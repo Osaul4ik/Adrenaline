@@ -13,10 +13,15 @@ all: run
 ge_native_test: ge_native_test.c $(SRC)/ge_native_list.c $(SRC)/ge_native.h
 	$(CC) $(CFLAGS) -o $@ ge_native_test.c $(SRC)/ge_native_list.c $(LDLIBS)
 
-run: ge_native_test
+# same tests with the frame trace compiled in (debug builds)
+ge_native_test_trace: ge_native_test.c $(SRC)/ge_native_list.c $(SRC)/ge_native.h
+	$(CC) $(CFLAGS) -DGE_NATIVE_TRACE -o $@ ge_native_test.c $(SRC)/ge_native_list.c $(LDLIBS)
+
+run: ge_native_test ge_native_test_trace
 	./ge_native_test
+	./ge_native_test_trace
 
 clean:
-	rm -f ge_native_test
+	rm -f ge_native_test ge_native_test_trace
 
 .PHONY: all run clean

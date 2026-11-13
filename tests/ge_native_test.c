@@ -9,6 +9,18 @@
 #include <math.h>
 #include "ge_native.h"
 
+#ifdef GE_NATIVE_TRACE
+#include <stdarg.h>
+static char trace_out[1 << 20];
+static size_t trace_n;
+void geNativeTrace(const char *fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	trace_n += vsnprintf(trace_out + trace_n, sizeof(trace_out) - trace_n, fmt, ap);
+	va_end(ap);
+}
+#endif
+
 #define RAM_BASE  0x08000000u
 #define RAM_SIZE  0x04000000u
 #define VRAM_BASE 0x04000000u
@@ -466,6 +478,39 @@ static void test_vertex_fingerprint(void) {
 	CHECK(*H(vb + 4) == 3000 && *H(vb + 6) == -3000, "out of range positions unchanged");
 }
 
+#ifdef GE_NATIVE_TRACE
+static void test_trace(void) {
+	reset_mem();
+	L l = { 0x08900000, 0x08900000 };
+	emitSetup(&l, 0x000000, 512, 240, -136, 2048, 2048, 2048 - 240, 2048 - 136);
+	emit(&l, C(GE_CMD_CLEARMODE, 1));
+	emit(&l, C(GE_CMD_VERTEXTYPE, VT_THROUGH_C8888_P16));
+	emitVaddr(&l, 0x08A00000);
+	emit(&l, C(GE_CMD_PRIM, (6 << 16) | 2));
+	emitFinish(&l);
+
+	trace_n = 0;
+	geNativeTraceOn = 1;
+	geNativeListReset();
+	geNativeListPatch(l.start, 0);
+	geNativeTraceOn = 0;
+
+	CHECK(strstr(trace_out, "L 08900000") != NULL, "trace: list start");
+	CHECK(strstr(trace_out, "F ") && strstr(trace_out, "-> hires"), "trace: framebuffer decision");
+	CHECK(strstr(trace_out, "V 42 ") != NULL, "trace: viewport rewrite");
+	CHECK(strstr(trace_out, "M ") != NULL, "trace: clear mode");
+	CHECK(strstr(trace_out, "clr 1") && strstr(trace_out, " on\n"), "trace: draw line");
+	CHECK(strstr(trace_out, "C finish") != NULL, "trace: finish");
+
+	/* tracing off: nothing recorded */
+	trace_n = 0;
+	trace_out[0] = 0;
+	geNativeListReset();
+	geNativeListPatch(l.start, 0);
+	CHECK(trace_n == 0, "trace off records nothing");
+}
+#endif
+
 static void test_copy_list(void) {
 	u32 list[16];
 	int n = geNativeListBuildCopy(list);
@@ -503,6 +548,9 @@ int main(void) {
 	test_indexed_and_float();
 	test_vertex_fingerprint();
 	test_copy_list();
+#ifdef GE_NATIVE_TRACE
+	test_trace();
+#endif
 
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
