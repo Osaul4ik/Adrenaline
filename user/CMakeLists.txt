@@ -64,6 +64,9 @@ target_link_libraries(adrenaline_user
   vitashaders
   c
   m
+  # Current newlib references SceNet (socket fds); this module is loaded before
+  # SceNet is, so the import must be weak or loading fails with 0x8002D003
+  SceNet_stub_weak
   SceAppMgr_stub
   SceAppUtil_stub
   SceAudio_stub
