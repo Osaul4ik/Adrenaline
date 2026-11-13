@@ -98,15 +98,15 @@ jobs:
 
       - name: Build kernel stubs
         run: |
-          cmake -S ci/kernel-stubs -B build/kernel-stubs -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake -S ci/kernel-stubs -B build/kernel-stubs -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS="-std=gnu17"
           cmake --build build/kernel-stubs
           cmake --install build/kernel-stubs
 
       - name: Build adrenaline_user.suprx
         run: |
-          # the sources predate GCC 14, where these warnings became errors
+          # the sources predate C23 (default of current vita-gcc) and GCC 14, where these warnings became errors
           cmake -S user -B build/user -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_C_FLAGS="-Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+            -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
           cmake --build build/user -j"$(nproc)"
           cp build/user/adrenaline_user.suprx bubble/pkg/sce_module/adrenaline_user.suprx
 
@@ -115,7 +115,7 @@ jobs:
         # are the prebuilt ones from bubble/pkg (those modules are unchanged).
         run: |
           cmake -S bubble -B build/bubble -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DVITA_VERSION=07.00 \
-            -DCMAKE_C_FLAGS="-Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+            -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
           cmake --build build/bubble -j"$(nproc)"
           unzip -l build/bubble/Adrenaline.vpk
 
