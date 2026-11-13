@@ -44,6 +44,14 @@ typedef struct {
 	uint32_t ram_kb;
 } GeSgxFrame;
 
+// Modes of config.sgx_renderer
+#define GE_SGX_MODE_OFF  0
+#define GE_SGX_MODE_WALK 1 // lists followed, nothing drawn (statistics only)
+#define GE_SGX_MODE_DRAW 2 // and drawn with GXM
+
+// Appends a line to ux0:data/adrenaline_sgx_log.txt
+void GeSgxLog(const char *fmt, ...);
+
 // Kermit command from systemctrl: start reading the ring (1) or not (0)
 int GeSgxStart(uint32_t ring_addr);
 

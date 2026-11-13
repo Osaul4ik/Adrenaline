@@ -85,6 +85,7 @@ static float flux_colors[] = {
 static char *graphics_options[] = { "Original", "Bilinear", "Sharp bilinear", "Advanced AA", "LCD3x", "Sharp bilinear without scanlines" };
 static char *flux_mode_options[] = { "None", "Yellow", "Blue", "Black" };
 static char *no_yes_options[] = { "No", "Yes" };
+static char *sgx_options[] = { "No", "Walk only", "Walk + draw" };
 static char *yes_no_options[] = { "Yes", "No" };
 static char *ms_location_options[] = { "ux0:pspemu", "ur0:pspemu", "imc0:pspemu", "xmc0:pspemu", "uma0:pspemu" };
 static char *usbdevice_options[] = { "Memory Card", "Internal Storage", "sd2vita", "psvsd" };
@@ -101,7 +102,7 @@ static MenuEntry settings_entries[] = {
   { "Smooth Graphics",           MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.no_smooth_graphics, yes_no_options, sizeof(yes_no_options) / sizeof(char **) },
   { "f.lux Filter Color",        MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.flux_mode, flux_mode_options, sizeof(flux_mode_options) / sizeof(char **) },
   { "Native Resolution (PSP)",   MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.native_resolution, no_yes_options, sizeof(no_yes_options) / sizeof(char **) },
-  { "SGX Renderer (PSP, test)",  MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.sgx_renderer, no_yes_options, sizeof(no_yes_options) / sizeof(char **) },
+  { "SGX Renderer (PSP, test)",  MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.sgx_renderer, sgx_options, sizeof(sgx_options) / sizeof(char **) },
   { "Screen Scale X (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_x, NULL, 0 },
   { "Screen Scale Y (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_y, NULL, 0 },
   { "Screen Scale X (PS1)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.ps1_screen_scale_x, NULL, 0 },
@@ -313,7 +314,7 @@ void drawMenu() {
 
     // Info about the SGX renderer
     if (tab_sel == 2 && menu_entries[menu_sel].value == &config.sgx_renderer) {
-      char *line1 = "Test stage: follows the GE on the Vita GPU, shows statistics.";
+      char *line1 = "Test stage. Walk only: follows the GE lists, log only. Walk + draw: also GXM.";
       char *line2 = "Applies on the next game start. Log: ux0:data/adrenaline_sgx_log.txt";
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line1)), FONT_Y_LINE(16), WHITE, FONT_SIZE, line1);
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line2)), FONT_Y_LINE(17), WHITE, FONT_SIZE, line2);
@@ -517,18 +518,26 @@ int AdrenalineDraw(SceSize args, void *argp) {
   // SGX renderer (test stage): frame from the Vita side GE walker
   static GeSgxFrame sgx_frame;
   vita2d_texture *sgx_tex = NULL;
+  int sgx_tex_failed = 0;
+  int sgx_scenes = 0;
   int last_sgx_active = 0;
 
   while (1) {
     int draw_native = *(uint32_t *)CONVERT_ADDRESS(DRAW_NATIVE);
     SceAdrenaline *adrenaline = (SceAdrenaline *)CONVERT_ADDRESS(ADRENALINE_ADDRESS);
 
-    int sgx_active = config.sgx_renderer && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
-    if (sgx_active && !sgx_tex) {
+    int sgx_active = config.sgx_renderer == GE_SGX_MODE_DRAW && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
+    if (sgx_active && !sgx_tex && !sgx_tex_failed) {
+      // In main RAM: the emulator has only a few MB of CDRAM left
+      SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
+      vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
       sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-      if (!sgx_tex)
-        sgx_active = 0;
+      vita2d_texture_set_alloc_memblock_type(type);
+      sgx_tex_failed = (sgx_tex == NULL);
+      GeSgxLog("GeSgx: draw target %s\n", sgx_tex ? "created" : "FAILED");
     }
+    if (!sgx_tex)
+      sgx_active = 0;
 
     // Native or SGX output stopped (systemctrl falls back to the game's own framebuffer,
     // e.g. while a video plays, or the game exited): give the screen back to the PSP framebuffer
@@ -612,7 +621,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
 
     // SGX renderer: the shown framebuffer's clears, at 960x544, into its own target
     if (sgx_active) {
-      vita2d_start_drawing_advanced(sgx_tex, 0);
+      // This scene resets the vertex pool for the frame, the display scene
+      // below must not (its reset would overwrite these vertices before the
+      // GPU has read them)
+      vita2d_start_drawing_advanced(sgx_tex, VITA_2D_RESET_POOL);
       vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
       vita2d_clear_screen();
       int r;
@@ -621,10 +633,15 @@ int AdrenalineDraw(SceSize args, void *argp) {
         vita2d_draw_rectangle(rect->x0 * 2.0f, rect->y0 * 2.0f, (rect->x1 - rect->x0) * 2.0f, (rect->y1 - rect->y0) * 2.0f, rect->color);
       }
       vita2d_end_drawing();
+
+      if (sgx_scenes < 3) {
+        sgx_scenes++;
+        GeSgxLog("GeSgx: draw scene %d, %d rects\n", sgx_scenes, sgx_frame.nrects);
+      }
     }
 
     // Draw display
-    vita2d_start_drawing();
+    vita2d_start_drawing_advanced(NULL, sgx_active ? 0 : VITA_2D_RESET_POOL);
     vita2d_clear_screen();
 
     // Select shader

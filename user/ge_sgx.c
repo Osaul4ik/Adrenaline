@@ -126,7 +126,7 @@ static void writeAck(uint32_t session, uint32_t read) {
 	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
 }
 
-static void logLine(const char *fmt, ...) {
+void GeSgxLog(const char *fmt, ...) {
 	char buf[256];
 	va_list ap;
 	va_start(ap, fmt);
@@ -188,13 +188,20 @@ static void publish(const GeSgxRect *rects, int nrects, const GeSgxStats *stats,
 }
 
 int GeSgxGetFrame(GeSgxFrame *out) {
-	uint32_t seq;
-	do {
-		seq = frame_seq;
+	// Never wait for the writer: a few tries, then take the copy as it is
+	// (at worst statistics of two frames mixed)
+	int tries;
+	for (tries = 0; tries < 4; tries++) {
+		uint32_t seq = frame_seq;
 		__sync_synchronize();
 		memcpy(out, &frame, sizeof(GeSgxFrame));
 		__sync_synchronize();
-	} while ((seq & 1) || seq != frame_seq);
+		if (!(seq & 1) && seq == frame_seq)
+			break;
+	}
+
+	if (out->nrects < 0 || out->nrects > GE_SGX_FRAME_RECTS)
+		out->nrects = 0;
 
 	if (out->flips == 0)
 		return 0;
@@ -205,6 +212,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t seen_seq = 0;
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
 	uint32_t read = 0, last_lost = 0;
+	uint32_t logged_types = 0, slow_logs = 0;
+	SceUInt64 session_start = 0;
 
 	// Per second
 	SceUInt64 second_start = sceKernelGetProcessTimeWide();
@@ -218,7 +227,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 
 	cdram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 64);
 	ram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64);
-	logLine("GeSgx: free CDRAM %u KB, free RAM %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb);
+	GeSgxLog("GeSgx: free CDRAM %u KB, free RAM %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb);
 
 	geSgxWalkerInit(&walker, pageFn, NULL);
 
@@ -233,7 +242,10 @@ static int GeSgxThread(SceSize args, void *argp) {
 			last_lost = 0;
 			geSgxWalkerReset(&walker);
 			rates.resyncs = 0;
-			logLine("GeSgx: ring %08X, %u entries, session %u\n", (unsigned)ring_addr, (unsigned)entries, (unsigned)session);
+			logged_types = 0;
+			slow_logs = 0;
+			session_start = sceKernelGetProcessTimeWide();
+			GeSgxLog("GeSgx: ring %08X, %u entries, session %u\n", (unsigned)ring_addr, (unsigned)entries, (unsigned)session);
 		}
 
 		if (!ring_addr) {
@@ -296,6 +308,12 @@ static int GeSgxThread(SceSize args, void *argp) {
 			SceUInt64 t0 = sceKernelGetProcessTimeWide();
 			epoch++;
 
+			if (e->type < 8 && !(logged_types & (1u << e->type))) {
+				logged_types |= 1u << e->type;
+				GeSgxLog("GeSgx: first event %u: %08X %08X %08X %08X (walker: %d lists)\n",
+					(unsigned)e->type, (unsigned)e->a, (unsigned)e->b, (unsigned)e->c, (unsigned)e->d, walker.count);
+			}
+
 			switch (e->type) {
 				case GE_SGX_EVENT_LIST:
 					geSgxWalkerList(&walker, (int)e->a, e->b, e->c, (int)e->d);
@@ -321,6 +339,11 @@ static int GeSgxThread(SceSize args, void *argp) {
 			}
 
 			uint32_t dt = (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+			if (dt > 20 * 1000 && slow_logs < 20) {
+				slow_logs++;
+				GeSgxLog("GeSgx: slow event %u: %u us, walker %d lists, commands %u, bad %u\n",
+					(unsigned)e->type, (unsigned)dt, walker.count, (unsigned)walker.stats.commands, (unsigned)walker.stats.bad);
+			}
 			walk_us += dt;
 			if (dt > walk_max_us)
 				walk_max_us = dt;
@@ -344,10 +367,10 @@ per_second:;
 			rates.walk_max_us = walk_max_us;
 			rates.invalidates = page_fetches - fetches_start;
 
-			if (now - log_start >= LOG_INTERVAL_US && flips) {
+			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				logLine("GeSgx: fps %u events %u walk %u us (max %u) pages %u | lists %u cmds %u prims %u verts %u clears %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
-					(unsigned)rates.fps, (unsigned)rates.events, (unsigned)rates.walk_us, (unsigned)rates.walk_max_us, (unsigned)rates.invalidates,
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) pages %u | lists %u cmds %u prims %u verts %u clears %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
+					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events, (unsigned)rates.walk_us, (unsigned)rates.walk_max_us, (unsigned)rates.invalidates,
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
@@ -363,7 +386,7 @@ per_second:;
 }
 
 int GeSgxStart(uint32_t ring_addr) {
-	if (!config.sgx_renderer)
+	if (config.sgx_renderer == GE_SGX_MODE_OFF)
 		return 0;
 
 	const GeSgxRing *ring = (const GeSgxRing *)ScePspemuConvertAddress(ring_addr, KERMIT_INPUT_MODE, RING_EVENTS_OFFSET);
@@ -375,7 +398,7 @@ int GeSgxStart(uint32_t ring_addr) {
 		return 0;
 
 	if (thid < 0) {
-		thid = sceKernelCreateThread("AdrenalineGeSgx", GeSgxThread, 0x60, 0x4000, 0, 0, NULL);
+		thid = sceKernelCreateThread("AdrenalineGeSgx", GeSgxThread, 0x90, 0x4000, 0, 0, NULL);
 		if (thid < 0)
 			return 0;
 		if (sceKernelStartThread(thid, 0, NULL) < 0) {

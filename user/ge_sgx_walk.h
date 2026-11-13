@@ -37,7 +37,7 @@
 #define GE_SGX_PAGE_SIZE 4096
 
 // Longest walk of one list in one go, against lists that loop forever
-#define GE_SGX_MAX_COMMANDS (1 << 21)
+#define GE_SGX_MAX_COMMANDS (1 << 18)
 
 /*
 	Returns a host pointer to the GE_SGX_PAGE_SIZE bytes of PSP memory at
