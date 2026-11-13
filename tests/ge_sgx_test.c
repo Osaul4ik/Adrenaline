@@ -797,15 +797,22 @@ static void testGpuTransform(void) {
 	emit(&l, C(0x01, 0x900008));
 	emit(&l, C(0x04, (4u << 16) | 4));    // strip of 4: vertices 0..3
 	emit(&l, C(0x04, (3u << 16) | 3));    // triangles: vertices 4..6, the same run, merged
-	emit(&l, C(0x12, VT_COL565 | VT_POSF)); // 16 bit colour: CPU transform
+	emit(&l, C(0x12, VT_COL565 | VT_POSF)); // 16 bit colour: decoded by the vertex program
+	emit(&l, C(0x04, (3u << 16) | 3));
+	/* indices scattered over a big buffer (0 and 3000): the two vertices are gathered */
+	w16(0x08910000, 0); w16(0x08910002, 3000); w16(0x08910004, 0);
+	emit(&l, C(0x12, VT_COL8888 | VT_POSF | VT_IDX16));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x02, 0x910000));
 	emit(&l, C(0x04, (3u << 16) | 3));
 	emit(&l, C(0x0C, 0));
+	w32(0x08900000 + 3000 * 16, 0xAABBCCDD);
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
 	geSgxBuildFinish(w);
 
-	CHECK(frame.prims_gpu == 2 && frame.ndraws == 2, "gpu prims %u draws %u", frame.prims_gpu, frame.ndraws);
-	if (frame.ndraws == 2) {
+	CHECK(frame.prims_gpu == 4 && frame.ndraws == 3, "gpu prims %u draws %u", frame.prims_gpu, frame.ndraws);
+	if (frame.ndraws == 3) {
 		GeSgxDraw *d = &fdraws[0];
 		CHECK(d->gpu && d->vkey == (GE_SGX_VS_BASE | GE_SGX_VS_TC | GE_SGX_VS_COLOR) && d->count == 9 && d->first == 0, "gpu draw %u key %x count %u", d->gpu, d->vkey, d->count);
 		CHECK((d->base & 15) == 8 && memcmp(fraw + d->base, host(v), 7 * 24) == 0, "raw copy at %u", d->base);
@@ -816,8 +823,15 @@ static void testGpuTransform(void) {
 		      "object block world %f scale %f uv %f", uo[0], uo[GE_SGX_UO_SCALE * 4], uo[GE_SGX_UO_UV * 4]);
 		CHECK(feq(uc[(GE_SGX_UC_PROJ + 2) * 4 + 3], -1) && feq(uc[GE_SGX_UC_VP * 4], 480) && feq(uc[GE_SGX_UC_VP * 4 + 1], 480) && feq(uc[GE_SGX_UC_LIGHT * 4 + 3], -1),
 		      "common block proj %f vp %f %f light %f", uc[(GE_SGX_UC_PROJ + 2) * 4 + 3], uc[GE_SGX_UC_VP * 4], uc[GE_SGX_UC_VP * 4 + 1], uc[GE_SGX_UC_LIGHT * 4 + 3]);
-		CHECK(!fdraws[1].gpu && frame.nvertices == 3, "cpu fallback %u verts %u", fdraws[1].gpu, frame.nvertices);
-		CHECK(frame.nuniforms == (GE_SGX_UC_COUNT + GE_SGX_UO_COUNT) * 16, "one block each %u", frame.nuniforms);
+		CHECK(fdraws[1].gpu && fdraws[1].vkey == (GE_SGX_VS_BASE | GE_SGX_VS_COLOR16) && frame.nvertices == 0, "16 bit colour %u key %x verts %u", fdraws[1].gpu, fdraws[1].vkey, frame.nvertices);
+		const float *uc1 = (const float *)(funi + fdraws[1].ucommon);
+		CHECK(feq(uc1[GE_SGX_UC_MATUPD * 4 + 1], 0), "565 format %f", uc1[GE_SGX_UC_MATUPD * 4 + 1]);
+		/* gathered: 2 vertices of 16 bytes, indices 0 1 0 */
+		GeSgxDraw *g = &fdraws[2];
+		uint32_t c3000 = 0;
+		memcpy(&c3000, fraw + g->base + 16, 4);
+		CHECK(g->gpu && fidx[g->first] == 0 && fidx[g->first + 1] == 1 && fidx[g->first + 2] == 0 && c3000 == 0xAABBCCDDu, "gather %u: %u %u %u colour %08x",
+		      g->gpu, fidx[g->first], fidx[g->first + 1], fidx[g->first + 2], c3000);
 	}
 	w->gpu_transform = 0;
 }

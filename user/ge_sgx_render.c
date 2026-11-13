@@ -369,8 +369,10 @@ static GpuProgram *gpuProgram(const GeSgxDraw *d, int *waiting) {
 	n += attribute(&attrs[n], gxp, "aPosition", 1, l.pos_fmt, 3, l.pos_off);
 	if (l.tc_fmt)
 		n += attribute(&attrs[n], gxp, "aTexcoord", 0, l.tc_fmt, 2, l.tc_off);
-	if (l.color_fmt)
+	if (l.color_fmt == 7)
 		n += attribute(&attrs[n], gxp, "aColor", 2, 0, 4, l.color_off);
+	else if (l.color_fmt)
+		n += attribute(&attrs[n], gxp, "aColor", 0, 2, 1, l.color_off); // U16, decoded by the program
 	if (l.nrm_fmt)
 		n += attribute(&attrs[n], gxp, "aNormal", 1, l.nrm_fmt, 3, l.nrm_off);
 	if (l.wt_fmt) {

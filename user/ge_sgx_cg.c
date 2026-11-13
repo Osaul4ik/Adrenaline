@@ -53,6 +53,7 @@ static SceShaccCgSourceFile source_file;
 // The GPU transform (see ge_sgx_cg.h): PPSSPP's transform and lighting in a vertex shader
 static int vertexSource(uint32_t key, char *buf, int size) {
 	int tc = key & GE_SGX_VS_TC, col = key & GE_SGX_VS_COLOR, nrm = key & GE_SGX_VS_NORMAL;
+	int col16 = key & GE_SGX_VS_COLOR16;
 	int w4 = key & (GE_SGX_VS_W4 | GE_SGX_VS_W8), w8 = key & GE_SGX_VS_W8, lit = key & GE_SGX_VS_LIGHT;
 	int n = 0;
 
@@ -60,6 +61,7 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("void main(\n	float3 aPosition,\n");
 	if (tc) S("	float2 aTexcoord,\n");
 	if (col) S("	float4 aColor,\n");
+	if (col16) S("	float aColor,\n"); // the 16 bit value
 	if (nrm) S("	float3 aNormal,\n");
 	if (w4) S("	float4 aWeight0,\n");
 	if (w8) S("	float4 aWeight1,\n");
@@ -112,8 +114,15 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("	} else {\n		vTexcoord = (float2(dot(uC[%d].xyz, wn), dot(uC[%d].xyz, wn)) + 1.0) * 0.5;\n	}\n",
 		GE_SGX_UC_ENVLS, GE_SGX_UC_ENVLS + 1);
 
-	// Colour
-	S("	float4 ic = %s;\n", col ? "aColor" : "uC[11]");
+	// Colour; 16 bit ones are decoded here (exact in float: integers below 65536)
+	if (col16) {
+		S("	float cv = aColor, cf = uC[%d].y;\n	float4 ic;\n", GE_SGX_UC_MATUPD);
+		S("	if (cf < 0.5)\n		ic = float4(fmod(cv, 32.0) / 31.0, fmod(floor(cv / 32.0), 64.0) / 63.0, floor(cv / 2048.0) / 31.0, 1.0);\n");
+		S("	else if (cf < 1.5)\n		ic = float4(fmod(cv, 32.0) / 31.0, fmod(floor(cv / 32.0), 32.0) / 31.0, fmod(floor(cv / 1024.0), 32.0) / 31.0, floor(cv / 32768.0));\n");
+		S("	else\n		ic = float4(fmod(cv, 16.0), fmod(floor(cv / 16.0), 16.0), fmod(floor(cv / 256.0), 16.0), floor(cv / 4096.0)) / 15.0;\n");
+	} else {
+		S("	float4 ic = %s;\n", col ? "aColor" : "uC[11]");
+	}
 	if (lit) {
 		S("	float3 ambC = lerp(uC[%d].rgb, ic.rgb, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
 		S("	float ambA = lerp(uC[%d].a, ic.a, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
@@ -256,8 +265,12 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 		uint32_t v, wc, lit;
 		for (lit = 0; lit < 2; lit++)
 			for (wc = 0; wc < 3; wc++)
-				for (v = 0; v < 8; v++)
-					ADD(GE_SGX_VS_BASE | v | (wc == 1 ? GE_SGX_VS_W4 : wc == 2 ? GE_SGX_VS_W8 : 0) | (lit ? GE_SGX_VS_LIGHT : 0));
+				for (v = 0; v < 8; v++) {
+					uint32_t k = GE_SGX_VS_BASE | v | (wc == 1 ? GE_SGX_VS_W4 : wc == 2 ? GE_SGX_VS_W8 : 0) | (lit ? GE_SGX_VS_LIGHT : 0);
+					ADD(k);
+					if (v & GE_SGX_VS_COLOR)
+						ADD((k & ~GE_SGX_VS_COLOR) | GE_SGX_VS_COLOR16);
+				}
 	}
 	ADD(1u << 10); // clear
 	// alpha test: off, or one of the functions but ALWAYS (= off)

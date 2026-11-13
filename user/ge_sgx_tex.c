@@ -39,7 +39,7 @@
 #include "ge_sgx_texconv.h"
 
 #define MAX_TEXTURES 512
-#define BUDGET_BYTES (8 * 1024 * 1024)
+#define BUDGET_BYTES (11 * 1024 * 1024)
 #define STAGING_BYTES (1024 * 1024)
 
 // Frames an entry is kept after its last use: published frames in flight plus the GPU

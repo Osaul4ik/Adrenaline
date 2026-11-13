@@ -868,6 +868,9 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
 
+// Indices of the primitive (up to 65535, 4 bytes each), read once
+static uint32_t prim_index[65536];
+
 /* ---- GPU transform ---- */
 
 // Biggest vertex range one primitive copies to the GPU (bigger: CPU transform)
@@ -875,7 +878,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 
 // Vertex shapes the vertex programs read as they are
 static int gpuLayout(const GeSgxWalker *w, const GeSgxVertexLayout *l) {
-	if (!(l->pos_fmt && l->morphs == 1 && (l->color_fmt == 0 || l->color_fmt == 7) && l->index_size <= 2))
+	if (!(l->pos_fmt && l->morphs == 1 && l->index_size <= 2))
 		return 0;
 	uint32_t attrs = reg(w, GE_CMD_VERTEXTYPE) & ((3u << 0) | (7u << 2) | (3u << 5) | (3u << 7) | (3u << 9) | (7u << 14));
 	int i;
@@ -890,8 +893,10 @@ static uint32_t gpuVertexKey(const GeSgxVertexLayout *l, const Xform *x) {
 	uint32_t k = GE_SGX_VS_BASE;
 	if (l->tc_fmt)
 		k |= GE_SGX_VS_TC;
-	if (l->color_fmt)
+	if (l->color_fmt == 7)
 		k |= GE_SGX_VS_COLOR;
+	else if (l->color_fmt)
+		k |= GE_SGX_VS_COLOR16;
 	if (l->nrm_fmt)
 		k |= GE_SGX_VS_NORMAL;
 	if (l->wt_fmt)
@@ -969,6 +974,8 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 		rgb4(c[GE_SGX_UC_ENVLS + i], x->envls[i], 0.0f);
 	for (i = 0; i < 4; i++)
 		c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE][3] = -1.0f; // off
+	if (l->color_fmt >= 4 && l->color_fmt <= 6)
+		c[GE_SGX_UC_MATUPD][1] = (float)(l->color_fmt - 4);
 	if (x->lighting) {
 		rgb4(c[GE_SGX_UC_EMISSIVE], x->mat_emissive, x->spec_coef);
 		rgb4(c[GE_SGX_UC_MATDIF], x->mat_diffuse, (x->matupdate & 1) ? 1.0f : 0.0f);
@@ -1081,6 +1088,42 @@ static int rawCopy(GeSgxWalker *w, GeSgxFrameData *f, uint32_t src, uint32_t byt
 	return 1;
 }
 
+/*
+	Scattered indices: each vertex they use once, appended to the raw
+	arena; prim_index becomes local. The stamp tells this primitive's
+	vertices from older ones without clearing the map.
+*/
+static uint16_t gather_map[65536];
+static uint32_t gather_stamp[65536];
+static uint32_t gather_cur = 0;
+
+static int rawGather(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, uint32_t count, uint32_t *off, uint32_t *nv) {
+	uint32_t size = l->size, dst = (f->nraw + 15u) & ~15u, n = 0, i;
+	if (dst + count * size > f->max_raw)
+		return 0;
+	if (++gather_cur == 0) {
+		memset(gather_stamp, 0, sizeof(gather_stamp));
+		gather_cur = 1;
+	}
+	for (i = 0; i < count; i++) {
+		uint32_t idx = prim_index[i];
+		if (idx > 0xFFFF)
+			return 0;
+		if (gather_stamp[idx] != gather_cur) {
+			gather_stamp[idx] = gather_cur;
+			gather_map[idx] = (uint16_t)n;
+			if (!geSgxRead(w, w->vaddr + idx * size, f->raw + dst + n * size, size))
+				return 0;
+			n++;
+		}
+		prim_index[i] = gather_map[idx];
+	}
+	f->nraw = dst + n * size;
+	*off = dst;
+	*nv = n;
+	return 1;
+}
+
 void geSgxBuildFinish(GeSgxWalker *w) {
 	if (raw_frame == w->frame)
 		rawFlush(w);
@@ -1088,8 +1131,6 @@ void geSgxBuildFinish(GeSgxWalker *w) {
 	uni_frame = NULL;
 }
 
-// Indices of the primitive (up to 65535, 4 bytes each), read once
-static uint32_t prim_index[65536];
 
 /*
 	Builds one PRIM. The vertices it uses are transformed once each into the
@@ -1216,19 +1257,37 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 
 	/*
 		GPU transform: the vertex range is copied as it is into the raw arena,
-		the vertex program decodes and transforms it. Sprites, morphing,
-		16 bit colours and 32 bit indices stay on the CPU path.
+		the vertex program decodes and transforms it. Indices scattered over a
+		big vertex buffer: only the vertices they use are gathered. Sprites,
+		morphing and 32 bit indices stay on the CPU path.
 	*/
 	int gpu = 0;
 	uint32_t raw_off = 0;
-	if (w->gpu_transform && f->raw && !xp->through && type != GE_PRIM_RECTANGLES && gpuLayout(w, l) &&
-	    range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES) {
-		if (gpuUniforms(w, f, l, xp) && rawCopy(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
+	if (w->gpu_transform && f->raw && !xp->through) {
+		int why = -1;
+		if (type == GE_PRIM_RECTANGLES)
+			why = GE_SGX_CPU_SPRITES;
+		else if (!gpuLayout(w, l))
+			why = GE_SGX_CPU_LAYOUT;
+		else if (!gpuUniforms(w, f, l, xp))
+			why = GE_SGX_CPU_FULL;
+		else if (range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES &&
+		         (!l->index_size || range <= 2 * count + 16)) {
+			if (rawCopy(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
+				gpu = 1;
+				for (i = 0; i < count; i++)
+					prim_index[i] -= imin;
+				nv = range;
+			} else {
+				why = GE_SGX_CPU_FULL;
+			}
+		} else if (rawGather(w, f, l, count, &raw_off, &nv)) {
 			gpu = 1;
-			for (i = 0; i < count; i++)
-				prim_index[i] -= imin;
-			nv = range;
+		} else {
+			why = GE_SGX_CPU_FULL;
 		}
+		if (why >= 0)
+			f->cpu_reason[why]++;
 	}
 
 	bulk_count = 0;

@@ -174,7 +174,7 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 #define FRAME_VERTICES 32768      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
 #define FRAME_UNIFORMS (512 * 1024)
-#define FRAME_RAW (2560 * 1024)   // PSP vertex data for the GPU transform
+#define FRAME_RAW (2048 * 1024)   // PSP vertex data for the GPU transform
 #define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
@@ -290,6 +290,7 @@ static void acquireSlot(void) {
 			s->data.ndraws = 0;
 			s->data.draws_3d = 0;
 			s->data.prims_gpu = 0;
+			memset(s->data.cpu_reason, 0, sizeof(s->data.cpu_reason));
 			s->data.vertices_built = 0;
 			s->data.state_builds = 0;
 			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
@@ -668,7 +669,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
-	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0;
+	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0, frame_stats_cpu[3] = { 0 };
 	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[4] = { 0 }; // per log interval
 	SceUInt64 session_start = 0;
 
@@ -703,7 +704,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	if (config.sgx_renderer >= GE_SGX_MODE_DRAW) {
 		int slots_ok = initSlots();
 		int tex_ok = geSgxTexInit();
-		GeSgxLog("GeSgx: frames %d, texture cache %d\n", slots_ok, tex_ok);
+		GeSgxLog("GeSgx: frames %d, texture cache %d, free RAM now %u KB\n", slots_ok, tex_ok,
+			(unsigned)probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64));
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
@@ -827,6 +829,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 							frame_stats_gpu = building->data.prims_gpu;
 							frame_stats_raw = building->data.nraw;
 							frame_stats_uni = building->data.nuniforms;
+							memcpy(frame_stats_cpu, building->data.cpu_reason, sizeof(frame_stats_cpu));
 							frame_stats_indices = building->data.nindices;
 							frame_stats_other = building->data.skipped_other;
 							frame_stats_draws = building->data.ndraws;
@@ -921,9 +924,10 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB vertices, %u KB uniforms) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
-					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024), (unsigned)frame_stats_other,
+					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
+					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other,
 					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
 					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[2], (unsigned)built_us[3],
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,

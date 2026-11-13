@@ -37,6 +37,7 @@
 #define GE_SGX_VS_W4     0x08u // 1..4 weights
 #define GE_SGX_VS_W8     0x10u // 5..8 weights
 #define GE_SGX_VS_LIGHT  0x20u
+#define GE_SGX_VS_COLOR16 0x40u // 16 bit colour (format in GE_SGX_UC_MATUPD.y), instead of GE_SGX_VS_COLOR
 
 /*
 	Uniform buffer 0 (float4 entries): the state shared by many objects.
@@ -53,7 +54,7 @@ enum {
 	GE_SGX_UC_MATDIF = 13,   // rgb, ambient from the vertex colour
 	GE_SGX_UC_MATSPC = 14,   // rgb, diffuse from the vertex colour
 	GE_SGX_UC_AMBIENT = 15,  // global ambient rgba
-	GE_SGX_UC_MATUPD = 16,   // specular from the vertex colour
+	GE_SGX_UC_MATUPD = 16,   // specular from the vertex colour, 16 bit colour format (0 565, 1 5551, 2 4444)
 	GE_SGX_UC_LIGHT = 17,    // 4 lights of GE_SGX_UC_LIGHT_SIZE
 	GE_SGX_UC_ENVLS = 45,    // 2: environment map light directions
 	GE_SGX_UC_TGEN = 47,     // 4 columns

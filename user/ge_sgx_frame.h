@@ -48,6 +48,13 @@ typedef struct {
 	float fog;      // 1: no fog, 0: fog colour
 } GeSgxVertex; // 32 bytes, the vertex stream of the GXM program
 
+// Why a 3D primitive used the CPU transform
+enum {
+	GE_SGX_CPU_SPRITES, // 3D sprites
+	GE_SGX_CPU_LAYOUT,  // morphing, 32 bit indices or a vertex type without program
+	GE_SGX_CPU_FULL,    // the frame's raw or uniform arena is full
+};
+
 enum GeSgxDrawPrims {
 	GE_SGX_DRAW_TRIANGLES,
 	GE_SGX_DRAW_LINES,
@@ -133,6 +140,7 @@ typedef struct {
 
 	uint32_t draws_3d;      // transformed (not through mode) primitives built
 	uint32_t prims_gpu;     // of them with the GPU transform
+	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew
