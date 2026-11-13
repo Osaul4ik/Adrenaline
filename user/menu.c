@@ -44,6 +44,8 @@
 #include "utils.h"
 #include "math_utils.h"
 #include "ge_sgx.h"
+#include "ge_sgx_render.h"
+#include "ge_sgx_shader.h"
 
 #include "includes/lcd3x_v.h"
 #include "includes/lcd3x_f.h"
@@ -85,7 +87,7 @@ static float flux_colors[] = {
 static char *graphics_options[] = { "Original", "Bilinear", "Sharp bilinear", "Advanced AA", "LCD3x", "Sharp bilinear without scanlines" };
 static char *flux_mode_options[] = { "None", "Yellow", "Blue", "Black" };
 static char *no_yes_options[] = { "No", "Yes" };
-static char *sgx_options[] = { "No", "Walk only", "Walk + draw" };
+static char *sgx_options[] = { "No", "Walk only", "Draw: corner", "Draw: full screen" };
 static char *yes_no_options[] = { "Yes", "No" };
 static char *ms_location_options[] = { "ux0:pspemu", "ur0:pspemu", "imc0:pspemu", "xmc0:pspemu", "uma0:pspemu" };
 static char *usbdevice_options[] = { "Memory Card", "Internal Storage", "sd2vita", "psvsd" };
@@ -259,22 +261,28 @@ static void waitPspLcdc(void) {
   }
 }
 
-// SGX renderer test stage: what the Vita GPU drew (top right) and the measurements
-static void drawSgxOverlay(vita2d_texture *tex, const GeSgxFrame *f) {
-  const float w = SCREEN_WIDTH / 4.0f, h = SCREEN_HEIGHT / 4.0f;
+// SGX renderer test stage: a small picture top right (the SGX frame, or the
+// original one in full screen mode) and the measurements under it
+static void drawSgxOverlay(vita2d_texture *tex, float tex_w, float tex_h, const GeSgxFrame *f,
+                           const GeSgxRenderStats *r, uint32_t skipped_3d) {
+  const float w = 240.0f, h = 136.0f;
   const float x = SCREEN_WIDTH - w - 8.0f, y = 8.0f;
 
   vita2d_draw_rectangle(x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, RGBA8(255, 255, 255, 255));
-  vita2d_draw_texture_scale(tex, x, y, 0.25f, 0.25f);
+  vita2d_draw_texture_part_scale(tex, x, y, 0.0f, 0.0f, tex_w, tex_h, w / tex_w, h / tex_h);
+
+  GeSgxShaderStats ss;
+  geSgxShaderStats(&ss);
 
   const float ty = y + h + 6.0f;
-  vita2d_draw_rectangle(x - 2.0f, ty - 2.0f, w + 4.0f, 4 * 18.0f + 4.0f, RGBA8(0, 0, 0, 200));
+  vita2d_draw_rectangle(x - 2.0f, ty - 2.0f, w + 4.0f, 5 * 18.0f + 4.0f, RGBA8(0, 0, 0, 200));
 
   const float fs = 0.75f;
-  pgf_draw_textf(x, ty + 0 * 18.0f, WHITE, fs, "SGX %u fps  lists %u  bad %u", (unsigned)(f->fps), (unsigned)(f->stats.lists), (unsigned)(f->stats.bad));
-  pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "cmds %u  prims %u  clr %u", (unsigned)(f->stats.commands), (unsigned)(f->stats.prims), (unsigned)(f->stats.clears));
-  pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "walk %u us/s  max %u  pg %u/s", (unsigned)(f->walk_us), (unsigned)(f->walk_max_us), (unsigned)(f->invalidates));
-  pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "wait %u/%u to  CD %uM  RAM %uM", (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts), (unsigned)(f->cdram_kb / 1024), (unsigned)(f->ram_kb / 1024));
+  pgf_draw_textf(x, ty + 0 * 18.0f, WHITE, fs, "SGX %u fps  cmds %u  bad %u", (unsigned)(f->fps), (unsigned)(f->stats.commands), (unsigned)(f->stats.bad));
+  pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "walk %u us/s  wait %u/%u", (unsigned)(f->walk_us), (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts));
+  pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "2D %u draws %u vtx %u us", (unsigned)(r->draws), (unsigned)(r->vertices), (unsigned)(r->render_us));
+  pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "3D %u  wait %u  other fb %u", (unsigned)skipped_3d, (unsigned)(r->waiting), (unsigned)(r->other_fb));
+  pgf_draw_textf(x, ty + 4 * 18.0f, WHITE, fs, "shaders %u+%u fail %u cg %d", (unsigned)ss.ready, (unsigned)ss.queued, (unsigned)ss.failed, ss.compiler);
 }
 
 void drawMenu() {
@@ -349,7 +357,7 @@ void drawMenu() {
 
     // Info about the SGX renderer
     if (tab_sel == 2 && menu_entries[menu_sel].value == &config.sgx_renderer) {
-      char *line1 = "Test stage. Walk only: follows the GE lists, log only. Walk + draw: also GXM.";
+      char *line1 = "Test stage: 2D (menus, HUD, 2D games) on the Vita GPU at 960x544, 3D not yet.";
       char *line2 = "Applies on the next game start. Log: ux0:data/adrenaline_sgx_log.txt";
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line1)), FONT_Y_LINE(16), WHITE, FONT_SIZE, line1);
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line2)), FONT_Y_LINE(17), WHITE, FONT_SIZE, line2);
@@ -561,13 +569,18 @@ int AdrenalineDraw(SceSize args, void *argp) {
   memset(&prof, 0, sizeof(prof));
   prof.start = sceKernelGetProcessTimeWide();
   int sgx_scenes = 0;
+  GeSgxRenderStats sgx_render;
+  uint32_t sgx_skipped_3d = 0;
+  memset(&sgx_render, 0, sizeof(sgx_render));
   int last_sgx_active = 0;
 
   while (1) {
     int draw_native = *(uint32_t *)CONVERT_ADDRESS(DRAW_NATIVE);
     SceAdrenaline *adrenaline = (SceAdrenaline *)CONVERT_ADDRESS(ADRENALINE_ADDRESS);
 
-    int sgx_active = config.sgx_renderer == GE_SGX_MODE_DRAW && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
+    int sgx_active = config.sgx_renderer >= GE_SGX_MODE_DRAW && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
+    int sgx_full = sgx_active && config.sgx_renderer == GE_SGX_MODE_FULL && !menu_open;
+    GeSgxDrawTick();
     if (sgx_active && !sgx_tex && !sgx_tex_failed) {
       // In main RAM: the emulator has only a few MB of CDRAM left
       SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
@@ -576,6 +589,14 @@ int AdrenalineDraw(SceSize args, void *argp) {
       vita2d_texture_set_alloc_memblock_type(type);
       sgx_tex_failed = (sgx_tex == NULL);
       GeSgxLog("GeSgx: draw target %s\n", sgx_tex ? "created" : "FAILED");
+      if (sgx_tex) {
+        int r = geSgxRenderInit();
+        GeSgxLog("GeSgx: renderer init %d\n", r);
+        if (r < 0) {
+          sgx_tex_failed = 1;
+          sgx_tex = NULL;
+        }
+      }
     }
     if (!sgx_tex)
       sgx_active = 0;
@@ -663,33 +684,37 @@ int AdrenalineDraw(SceSize args, void *argp) {
     // SGX renderer: where the draw thread's time goes (logged every 5 s)
     SceUInt64 prof_t0 = sgx_active ? sceKernelGetProcessTimeWide() : 0, prof_t;
 
-    // SGX renderer: the shown framebuffer's clears, at 960x544, into its own target
-    if (sgx_active) {
-      // This scene resets the vertex pool for the frame, the display scene
-      // below must not (its reset would overwrite these vertices before the
-      // GPU has read them)
+    // SGX renderer: a newly published frame, rendered at 960x544 into its own target
+    int pool_reset = 0;
+    GeSgxFrameRef sgx_ref;
+    if (sgx_active && GeSgxTakeFrame(&sgx_ref)) {
+      // This scene resets the vertex pool for the loop, the display scene
+      // below must not (its reset would overwrite vertices the GPU has not read)
       vita2d_start_drawing_advanced(sgx_tex, VITA_2D_RESET_POOL);
+      pool_reset = 1;
       vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
       vita2d_clear_screen();
-      int r;
-      for (r = 0; r < sgx_frame.nrects; r++) {
-        GeSgxRect *rect = &sgx_frame.rects[r];
-        vita2d_draw_rectangle(rect->x0 * 2.0f, rect->y0 * 2.0f, (rect->x1 - rect->x0) * 2.0f, (rect->y1 - rect->y0) * 2.0f, rect->color);
-      }
+      geSgxRender(_vita2d_context, sgx_ref.data, sgx_ref.fb, sgx_ref.aliases, sgx_ref.naliases, &sgx_render);
+      sgx_skipped_3d = sgx_ref.data->skipped_3d;
       vita2d_end_drawing();
+      GeSgxFrameRendered(&sgx_ref);
 
       if (sgx_scenes < 3) {
         sgx_scenes++;
-        GeSgxLog("GeSgx: draw scene %d, %d rects\n", sgx_scenes, sgx_frame.nrects);
+        GeSgxLog("GeSgx: draw scene %d: %u draws, %u vertices, %u waiting, %u other fb, %u 3d, fb %X\n", sgx_scenes,
+          (unsigned)sgx_render.draws, (unsigned)sgx_render.vertices, (unsigned)sgx_render.waiting,
+          (unsigned)sgx_render.other_fb, (unsigned)sgx_skipped_3d, (unsigned)sgx_ref.fb);
       }
+    }
 
+    if (sgx_active) {
       prof_t = sceKernelGetProcessTimeWide();
       prof.sgx += prof_t - prof_t0;
       prof_t0 = prof_t;
     }
 
     // Draw display
-    vita2d_start_drawing_advanced(NULL, sgx_active ? 0 : VITA_2D_RESET_POOL);
+    vita2d_start_drawing_advanced(NULL, pool_reset ? 0 : VITA_2D_RESET_POOL);
     vita2d_clear_screen();
 
     // Select shader
@@ -734,11 +759,23 @@ int AdrenalineDraw(SceSize args, void *argp) {
         prof_t0 = prof_t;
       }
 
-      // Draw psp screen
-      float scale_x = 2.00f;
-      float scale_y = 2.00f;
-      getPspScreenScale(&scale_x, &scale_y);
-      vita2d_draw_texture_scale_rotate_hotspot(psp_tex, 480.0f, 272.0f, scale_x, scale_y, 0.0, 240.0, 136.0);
+      // Draw psp screen (SGX full screen mode: the SGX frame, opaque)
+      if (sgx_full) {
+        vita2d_texture_set_program(opaque_shader->vertexProgram, opaque_shader->fragmentProgram);
+        vita2d_texture_set_wvp(opaque_shader->wvpParam);
+        vita2d_texture_set_vertexInput(&opaque_shader->vertexInput);
+        vita2d_texture_set_fragmentInput(&opaque_shader->fragmentInput);
+        vita2d_draw_texture(sgx_tex, 0.0f, 0.0f);
+        vita2d_texture_set_program(shader->vertexProgram, shader->fragmentProgram);
+        vita2d_texture_set_wvp(shader->wvpParam);
+        vita2d_texture_set_vertexInput(&shader->vertexInput);
+        vita2d_texture_set_fragmentInput(&shader->fragmentInput);
+      } else {
+        float scale_x = 2.00f;
+        float scale_y = 2.00f;
+        getPspScreenScale(&scale_x, &scale_y);
+        vita2d_draw_texture_scale_rotate_hotspot(psp_tex, 480.0f, 272.0f, scale_x, scale_y, 0.0, 240.0, 136.0);
+      }
     } else if (draw_native) {
       vita2d_draw_texture_scale_rotate_hotspot(native_tex, 480.0f, 272.0f, 1.0f, 1.0f, 0.0, 480.0, 272.0);
     } else {
@@ -750,8 +787,12 @@ int AdrenalineDraw(SceSize args, void *argp) {
     }
 
     // SGX renderer: its picture in the corner and the measurements
-    if (sgx_active && !menu_open)
-      drawSgxOverlay(sgx_tex, &sgx_frame);
+    if (sgx_active && !menu_open) {
+      if (sgx_full)
+        drawSgxOverlay(psp_tex, 480.0f, 272.0f, &sgx_frame, &sgx_render, sgx_skipped_3d);
+      else
+        drawSgxOverlay(sgx_tex, 960.0f, 544.0f, &sgx_frame, &sgx_render, sgx_skipped_3d);
+    }
 
     // Draw Menu
     if (menu_open)

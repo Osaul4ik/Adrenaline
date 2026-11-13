@@ -1,0 +1,102 @@
+/*
+	Adrenaline
+	Copyright (C) 2016-2018, TheFloW
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+	SGX renderer: one frame of GE work in the form the GXM renderer draws it.
+
+	The walker thread fills a frame while it follows the lists (vertices
+	decoded and scaled to 960x544, one record per draw with the GE state it
+	needs); the draw thread renders it with GXM. Pure data, no Vita types.
+*/
+
+#ifndef __GE_SGX_FRAME_H__
+#define __GE_SGX_FRAME_H__
+
+#include <stdint.h>
+
+// Output resolution: the PSP's 480x272 times this
+#define GE_SGX_SCALE 2
+
+// Vertices of one draw (GXM 16 bit indices must stay below 64000)
+#define GE_SGX_MAX_DRAW_VERTICES 60000
+
+typedef struct {
+	float x, y, z; // 960x544 pixels, z 0..1
+	float u, v;    // normalized
+	uint32_t color; // 0xAABBGGRR
+} GeSgxVertex; // 24 bytes, the vertex stream of the GXM program
+
+enum GeSgxDrawPrims {
+	GE_SGX_DRAW_TRIANGLES,
+	GE_SGX_DRAW_TRIANGLE_STRIP,
+	GE_SGX_DRAW_TRIANGLE_FAN,
+	GE_SGX_DRAW_LINES,
+	GE_SGX_DRAW_POINTS,
+};
+
+enum GeSgxDrawFlags {
+	GE_SGX_DRAW_TEXTURED     = 1 << 0,
+	GE_SGX_DRAW_BLEND        = 1 << 1,
+	GE_SGX_DRAW_ALPHATEST    = 1 << 2,
+	GE_SGX_DRAW_TCC          = 1 << 3, // texture alpha used (TEXFUNC RGBA)
+	GE_SGX_DRAW_DOUBLE       = 1 << 4, // colour doubling
+	GE_SGX_DRAW_CLEAR        = 1 << 5, // clear mode
+	GE_SGX_DRAW_WRITE_COLOR  = 1 << 6, // clear mode: colour is written
+	GE_SGX_DRAW_WRITE_ALPHA  = 1 << 7, // clear mode: alpha (stencil) is written
+};
+
+enum GeSgxTexModes {
+	GE_SGX_TEX_CLAMP_U    = 1 << 0,
+	GE_SGX_TEX_CLAMP_V    = 1 << 1,
+	GE_SGX_TEX_LINEAR_MIN = 1 << 2,
+	GE_SGX_TEX_LINEAR_MAG = 1 << 3,
+};
+
+typedef struct {
+	uint8_t prim;   // GeSgxDrawPrims
+	uint8_t flags;  // GeSgxDrawFlags
+	uint8_t tfunc;  // TEXFUNC 0..4 (modulate, decal, blend, replace, add)
+	uint8_t atest_func; // GE alpha test function
+	uint8_t atest_ref;
+	uint8_t tex_mode;   // GeSgxTexModes
+	uint8_t reserved[2];
+	uint32_t blend;     // BLENDMODE: src 0-3, dst 4-7, equation 8-10
+	uint32_t fix_a, fix_b; // fixed blend colours, 0x00BBGGRR
+	uint32_t env;       // TEXENVCOLOR, 0x00BBGGRR
+	int16_t scissor[4]; // x0, y0, x1, y1 in 960x544 pixels, x1/y1 exclusive
+	uint32_t first;     // first vertex in the frame's vertex array
+	uint32_t count;
+	int32_t texture;    // handle from the texture callback, -1: none
+	uint32_t fb;        // VRAM offset of the framebuffer drawn into
+} GeSgxDraw;
+
+typedef struct {
+	GeSgxVertex *vertices;
+	uint32_t max_vertices;
+	uint32_t nvertices;
+
+	GeSgxDraw *draws;
+	uint32_t max_draws;
+	uint32_t ndraws;
+
+	// Counted, not drawn (yet)
+	uint32_t skipped_3d;    // transformed (not through mode) draws
+	uint32_t skipped_other; // unsupported primitives, formats, full arrays
+} GeSgxFrameData;
+
+#endif

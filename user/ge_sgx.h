@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <psp2/types.h>
 #include "ge_sgx_walk.h"
+#include "ge_sgx_frame.h"
 
 #define GE_SGX_FRAME_RECTS 64
 
@@ -48,13 +49,32 @@ typedef struct {
 // Modes of config.sgx_renderer
 #define GE_SGX_MODE_OFF  0
 #define GE_SGX_MODE_WALK 1 // lists followed, nothing drawn (statistics only)
-#define GE_SGX_MODE_DRAW 2 // and drawn with GXM
+#define GE_SGX_MODE_DRAW 2 // and drawn with GXM, shown in a corner
+#define GE_SGX_MODE_FULL 3 // drawn with GXM, shown full screen
 
 // Appends a line to ux0:data/adrenaline_sgx_log.txt
 void GeSgxLog(const char *fmt, ...);
 
 // Thread to report in the log (CPU use, core), no-op when the option is off
 void GeSgxTrackThread(SceUID uid, const char *name);
+
+// A published frame for the draw thread
+typedef struct {
+	int slot;
+	const GeSgxFrameData *data;
+	uint32_t fb;               // VRAM offset of the shown framebuffer
+	const GeSgxAlias *aliases; // framebuffer copies into it
+	int naliases;
+} GeSgxFrameRef;
+
+// Draw thread: the newest published frame (1) or none new (0); then GeSgxFrameRendered
+int GeSgxTakeFrame(GeSgxFrameRef *ref);
+void GeSgxFrameRendered(const GeSgxFrameRef *ref);
+// Draw thread: once per loop (the GPU is done with frames rendered some ticks ago)
+void GeSgxDrawTick(void);
+
+// PSP memory in our address space (uncached), NULL if the range is not PSP RAM/VRAM
+const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size);
 
 // Kermit command from systemctrl: start reading the ring (1) or not (0)
 int GeSgxStart(uint32_t ring_addr);

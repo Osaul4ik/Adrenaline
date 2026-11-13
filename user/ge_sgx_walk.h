@@ -79,12 +79,44 @@ typedef struct {
 
 typedef struct {
 	uint32_t size;      // bytes per vertex (all morph targets)
-	uint32_t color_off; // offsets inside the vertex
+	uint32_t tc_off;    // offsets inside the vertex
+	uint32_t color_off;
 	uint32_t pos_off;
+	uint32_t tc_fmt;    // 0: none, 1: u8, 2: u16, 3: float
 	uint32_t color_fmt; // GE_VTYPE color field (0: none, 4..7)
 	uint32_t pos_fmt;   // 1: s8, 2: s16, 3: float
 	uint32_t index_size;
 } GeSgxVertexLayout;
+
+#include "ge_sgx_frame.h"
+
+/*
+	Texture of a draw, as the GE state describes it. The texture callback
+	(the Vita side texture cache) turns it into a handle for the draw
+	records, or -1 if it cannot be used.
+*/
+typedef struct {
+	uint32_t addr;        // level 0 in PSP memory
+	uint32_t bufw;        // texels per row in memory
+	uint16_t w, h;        // power of two sizes
+	uint8_t format;       // TEXFORMAT 0..10
+	uint8_t swizzle;
+	uint8_t reserved[2];
+	uint32_t clut_format; // CLUTFORMAT: format 0-1, shift 2-6, mask 8-15, start 16-20
+	const uint8_t *clut;  // the CLUT as LOADCLUT loaded it
+	uint32_t clut_bytes;
+	uint32_t clut_hash;
+} GeSgxTexDesc;
+
+typedef int32_t (* GeSgxTextureFn)(void *user, const GeSgxTexDesc *desc);
+
+#define GE_SGX_CLUT_BYTES 1024
+#define GE_SGX_MAX_ALIASES 4
+
+// Framebuffer copies (block transfers) of a frame: the shown buffer may be a copy
+typedef struct {
+	uint32_t src, dst; // VRAM offsets
+} GeSgxAlias;
 
 typedef struct {
 	GeSgxPageFn page_fn;
@@ -122,7 +154,27 @@ typedef struct {
 	GeSgxRect rects[GE_SGX_MAX_RECTS];
 	int nrects;
 	uint32_t flips;
+
+	// Draw records for the GXM renderer (NULL: not built)
+	GeSgxFrameData *frame;
+	GeSgxTextureFn texture_fn;
+	void *texture_user;
+	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];
+	int naliases;
+
+	// CLUT as loaded by the last LOADCLUT
+	uint8_t clut[GE_SGX_CLUT_BYTES];
+	uint32_t clut_bytes;
+	uint32_t clut_hash;
 } GeSgxWalker;
+
+// Copies size bytes of PSP memory, returns 0 if some are not readable
+int geSgxRead(GeSgxWalker *w, uint32_t addr, void *dst, uint32_t size);
+
+// Draw building (ge_sgx_build.c), called by the walker
+void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l);
+void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data);
+void geSgxBuildTransfer(GeSgxWalker *w);
 
 
 void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout);

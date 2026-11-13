@@ -47,6 +47,8 @@
 #define GE_CMD_FRAMEBUFPTR   0x9Cu
 #define GE_CMD_FRAMEBUFWIDTH 0x9Du
 #define GE_CMD_CLEARMODE  0xD3u
+#define GE_CMD_LOADCLUT   0xC4u
+#define GE_CMD_TRANSFERSTART 0xEAu
 
 #define GE_PRIM_SPRITES 6u
 
@@ -116,6 +118,29 @@ static int readValue(GeSgxWalker *w, uint32_t addr, int n, uint32_t *out) {
 	return 1;
 }
 
+int geSgxRead(GeSgxWalker *w, uint32_t addr, void *dst, uint32_t size) {
+	uint8_t *out = (uint8_t *)dst;
+	addr = normalize(addr);
+	while (size) {
+		uint32_t page = addr & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1);
+		if (page != w->page) {
+			w->page_ptr = (const uint8_t *)w->page_fn(w->user, page);
+			w->page = w->page_ptr ? page : NO_PAGE;
+			if (!w->page_ptr)
+				return 0;
+		}
+		uint32_t off = addr - page;
+		uint32_t n = GE_SGX_BLOCK_SIZE - off;
+		if (n > size)
+			n = size;
+		memcpy(out, w->page_ptr + off, n);
+		out += n;
+		addr = normalize(addr + n);
+		size -= n;
+	}
+	return 1;
+}
+
 static uint32_t relativeAddress(const GeSgxWalker *w, uint32_t data) {
 	return normalize((((w->regs[GE_CMD_BASE] & 0x000F0000u) << 8) | data) + w->offset);
 }
@@ -147,8 +172,10 @@ void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout) {
 			biggest = comp_size[wt];
 	}
 
+	layout->tc_off = 0;
 	if (tc) {
 		size = alignUp(size, comp_size[tc]);
+		layout->tc_off = size;
 		size += comp_size[tc] * 2;
 		if (comp_size[tc] > biggest)
 			biggest = comp_size[tc];
@@ -182,6 +209,7 @@ void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout) {
 	size = alignUp(size, biggest);
 
 	layout->size = size * morphs;
+	layout->tc_fmt = tc;
 	layout->color_fmt = color_size[col] ? col : 0;
 	layout->pos_fmt = pos;
 	layout->index_size = index_size[idx];
@@ -349,6 +377,9 @@ static void prim(GeSgxWalker *w, uint32_t data) {
 	if ((w->regs[GE_CMD_CLEARMODE] & 1) && type == GE_PRIM_SPRITES)
 		clearSprites(w, l, count);
 
+	if (w->frame)
+		geSgxBuildPrim(w, type, count, l);
+
 	// The next PRIM continues after these vertices (or indices)
 	if (l->index_size)
 		w->iaddr = normalize(w->iaddr + count * l->index_size);
@@ -440,6 +471,8 @@ static const uint8_t special_cmd[256] = {
 	[GE_CMD_SIGNAL] = 1,
 	[GE_CMD_OFFSETADDR] = 1,
 	[GE_CMD_ORIGIN] = 1,
+	[GE_CMD_LOADCLUT] = 1,
+	[GE_CMD_TRANSFERSTART] = 1,
 	// BJUMP: the bounding box result is not known, the draws after it are
 	// walked (as if the box was visible); BASE, VERTEXTYPE, CLEARMODE, the
 	// framebuffer and the rest are read from regs[] where they are used
@@ -547,6 +580,12 @@ special:
 				case GE_CMD_ORIGIN:
 					w->offset = cmd_pc;
 					break;
+				case GE_CMD_LOADCLUT:
+					geSgxBuildLoadClut(w, data);
+					break;
+				case GE_CMD_TRANSFERSTART:
+					geSgxBuildTransfer(w);
+					break;
 				default:
 					break;
 			}
@@ -581,7 +620,13 @@ void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user) {
 }
 
 void geSgxWalkerReset(GeSgxWalker *w) {
+	GeSgxFrameData *frame = w->frame;
+	GeSgxTextureFn texture_fn = w->texture_fn;
+	void *texture_user = w->texture_user;
 	geSgxWalkerInit(w, w->page_fn, w->user);
+	w->frame = frame;
+	w->texture_fn = texture_fn;
+	w->texture_user = texture_user;
 }
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {

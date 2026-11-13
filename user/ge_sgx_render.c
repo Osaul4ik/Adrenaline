@@ -1,0 +1,423 @@
+/*
+	Adrenaline
+	Copyright (C) 2016-2018, TheFloW
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+	SGX renderer: draws a frame's draw records with GXM, in the draw thread
+	(the GXM context of vita2d). Its own shader patcher holds the programs
+	made from the generated shaders (ge_sgx_shader.c): one vertex program,
+	one fragment program per fragment shader and blend state.
+*/
+
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "ge_sgx.h"
+#include "ge_sgx_render.h"
+#include "ge_sgx_shader.h"
+#include "ge_sgx_tex.h"
+
+#define PATCHER_BUFFER_SIZE (64 * 1024)
+#define PATCHER_VERTEX_USSE_SIZE (64 * 1024)
+#define PATCHER_FRAGMENT_USSE_SIZE (256 * 1024)
+
+#define MAX_FRAGMENT_PROGRAMS 256
+
+typedef struct {
+	uint32_t key;
+	uint32_t blend;
+	SceGxmFragmentProgram *program;
+	const SceGxmProgramParameter *alpha_ref;
+	const SceGxmProgramParameter *env;
+} FragmentProgram;
+
+typedef struct {
+	uint32_t key;
+	SceGxmShaderPatcherId id;
+	const SceGxmProgram *gxp;
+} Registered;
+
+static SceGxmShaderPatcher *patcher = NULL;
+static SceGxmVertexProgram *vertex_program = NULL;
+static const SceGxmProgram *vertex_gxp = NULL;
+static FragmentProgram fragment_programs[MAX_FRAGMENT_PROGRAMS];
+static int nfragment_programs = 0;
+static Registered registered[MAX_FRAGMENT_PROGRAMS];
+static int nregistered = 0;
+static uint16_t *indices = NULL;
+
+static void *gpuAlloc(SceKernelMemBlockType type, uint32_t size, SceGxmMemoryAttribFlags attr) {
+	size = (size + 0xFFF) & ~0xFFFu;
+	SceUID uid = sceKernelAllocMemBlock("SceGeSgxGpu", type, size, NULL);
+	if (uid < 0)
+		return NULL;
+	void *mem = NULL;
+	sceKernelGetMemBlockBase(uid, &mem);
+	if (attr && sceGxmMapMemory(mem, size, attr) < 0) {
+		sceKernelFreeMemBlock(uid);
+		return NULL;
+	}
+	return mem;
+}
+
+static void *patcherHostAlloc(void *user, SceSize size) {
+	return malloc(size);
+}
+
+static void patcherHostFree(void *user, void *mem) {
+	free(mem);
+}
+
+int geSgxRenderInit(void) {
+	if (patcher)
+		return 0;
+
+	void *buffer = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, PATCHER_BUFFER_SIZE, SCE_GXM_MEMORY_ATTRIB_READ);
+	void *vusse = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, PATCHER_VERTEX_USSE_SIZE, 0);
+	void *fusse = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, PATCHER_FRAGMENT_USSE_SIZE, 0);
+	indices = (uint16_t *)gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, GE_SGX_MAX_DRAW_VERTICES * 2, SCE_GXM_MEMORY_ATTRIB_READ);
+	if (!buffer || !vusse || !fusse || !indices)
+		return -1;
+
+	unsigned int vusse_offset = 0, fusse_offset = 0;
+	if (sceGxmMapVertexUsseMemory(vusse, PATCHER_VERTEX_USSE_SIZE, &vusse_offset) < 0)
+		return -2;
+	if (sceGxmMapFragmentUsseMemory(fusse, PATCHER_FRAGMENT_USSE_SIZE, &fusse_offset) < 0)
+		return -3;
+
+	uint32_t i;
+	for (i = 0; i < GE_SGX_MAX_DRAW_VERTICES; i++)
+		indices[i] = (uint16_t)i;
+
+	SceGxmShaderPatcherParams params;
+	memset(&params, 0, sizeof(params));
+	params.hostAllocCallback = patcherHostAlloc;
+	params.hostFreeCallback = patcherHostFree;
+	params.bufferMem = buffer;
+	params.bufferMemSize = PATCHER_BUFFER_SIZE;
+	params.vertexUsseMem = vusse;
+	params.vertexUsseMemSize = PATCHER_VERTEX_USSE_SIZE;
+	params.vertexUsseOffset = vusse_offset;
+	params.fragmentUsseMem = fusse;
+	params.fragmentUsseMemSize = PATCHER_FRAGMENT_USSE_SIZE;
+	params.fragmentUsseOffset = fusse_offset;
+
+	int res = sceGxmShaderPatcherCreate(&params, &patcher);
+	if (res < 0) {
+		patcher = NULL;
+		return res;
+	}
+	return 0;
+}
+
+// The vertex program, once its shader is there
+static int vertexProgram(void) {
+	if (vertex_program)
+		return 1;
+
+	const SceGxmProgram *gxp = geSgxShaderGet(GE_SGX_SHADER_VERTEX);
+	if (!gxp)
+		return 0;
+
+	SceGxmShaderPatcherId id;
+	if (sceGxmShaderPatcherRegisterProgram(patcher, gxp, &id) < 0)
+		return 0;
+
+	const SceGxmProgramParameter *pos = sceGxmProgramFindParameterByName(gxp, "aPosition");
+	const SceGxmProgramParameter *tc = sceGxmProgramFindParameterByName(gxp, "aTexcoord");
+	const SceGxmProgramParameter *col = sceGxmProgramFindParameterByName(gxp, "aColor");
+	if (!pos || !tc || !col) {
+		GeSgxLog("GeSgx render: vertex program parameters missing\n");
+		return 0;
+	}
+
+	SceGxmVertexAttribute attrs[3];
+	memset(attrs, 0, sizeof(attrs));
+	attrs[0].streamIndex = 0;
+	attrs[0].offset = 0;
+	attrs[0].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	attrs[0].componentCount = 3;
+	attrs[0].regIndex = sceGxmProgramParameterGetResourceIndex(pos);
+	attrs[1].streamIndex = 0;
+	attrs[1].offset = 12;
+	attrs[1].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
+	attrs[1].componentCount = 2;
+	attrs[1].regIndex = sceGxmProgramParameterGetResourceIndex(tc);
+	attrs[2].streamIndex = 0;
+	attrs[2].offset = 20;
+	attrs[2].format = SCE_GXM_ATTRIBUTE_FORMAT_U8N;
+	attrs[2].componentCount = 4;
+	attrs[2].regIndex = sceGxmProgramParameterGetResourceIndex(col);
+
+	SceGxmVertexStream stream;
+	stream.stride = sizeof(GeSgxVertex);
+	stream.indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+
+	int res = sceGxmShaderPatcherCreateVertexProgram(patcher, id, attrs, 3, &stream, 1, &vertex_program);
+	if (res < 0) {
+		GeSgxLog("GeSgx render: vertex program %08X\n", (unsigned)res);
+		vertex_program = NULL;
+		return 0;
+	}
+	vertex_gxp = gxp;
+	return 1;
+}
+
+static int factor(uint32_t f, uint32_t fix, int src) {
+	switch (f) {
+		case 0: return src ? SCE_GXM_BLEND_FACTOR_DST_COLOR : SCE_GXM_BLEND_FACTOR_SRC_COLOR;
+		case 1: return src ? SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_COLOR : SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+		case 2: case 6: return SCE_GXM_BLEND_FACTOR_SRC_ALPHA;
+		case 3: case 7: return SCE_GXM_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		case 4: case 8: return SCE_GXM_BLEND_FACTOR_DST_ALPHA;
+		case 5: case 9: return SCE_GXM_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+		default: {
+			// Fixed colour: GXM has no constant factor; white and black are exact
+			uint32_t sum = (fix & 0xFF) + ((fix >> 8) & 0xFF) + ((fix >> 16) & 0xFF);
+			return sum >= 3 * 0x80 ? SCE_GXM_BLEND_FACTOR_ONE : SCE_GXM_BLEND_FACTOR_ZERO;
+		}
+	}
+}
+
+static int blendFunc(uint32_t eq) {
+	switch (eq) {
+		case 1: return SCE_GXM_BLEND_FUNC_SUBTRACT;
+		case 2: return SCE_GXM_BLEND_FUNC_REVERSE_SUBTRACT;
+		case 3: return SCE_GXM_BLEND_FUNC_MIN;
+		case 4: return SCE_GXM_BLEND_FUNC_MAX;
+		default: return SCE_GXM_BLEND_FUNC_ADD; // absolute difference: closest
+	}
+}
+
+// Blend state of a draw as a key: 0 for none
+static uint32_t blendKey(const GeSgxDraw *d) {
+	if (d->flags & GE_SGX_DRAW_CLEAR) {
+		uint32_t mask = 0;
+		if (d->flags & GE_SGX_DRAW_WRITE_COLOR)
+			mask |= SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
+		if (d->flags & GE_SGX_DRAW_WRITE_ALPHA)
+			mask |= SCE_GXM_COLOR_MASK_A;
+		return 0x80000000u | mask;
+	}
+	if (!(d->flags & GE_SGX_DRAW_BLEND))
+		return 0;
+	uint32_t src = factor(d->blend & 0xF, d->fix_a, 1);
+	uint32_t dst = factor((d->blend >> 4) & 0xF, d->fix_b, 0);
+	uint32_t func = blendFunc((d->blend >> 8) & 7);
+	return 0x40000000u | func | (src << 4) | (dst << 8);
+}
+
+static const SceGxmProgram *fragmentGxp(uint32_t key, SceGxmShaderPatcherId *id) {
+	int i;
+	for (i = 0; i < nregistered; i++) {
+		if (registered[i].key == key) {
+			*id = registered[i].id;
+			return registered[i].gxp;
+		}
+	}
+	if (nregistered >= MAX_FRAGMENT_PROGRAMS)
+		return NULL;
+
+	const SceGxmProgram *gxp = geSgxShaderGet(key);
+	if (!gxp)
+		return NULL;
+	if (sceGxmShaderPatcherRegisterProgram(patcher, gxp, id) < 0)
+		return NULL;
+	registered[nregistered].key = key;
+	registered[nregistered].id = *id;
+	registered[nregistered].gxp = gxp;
+	nregistered++;
+	return gxp;
+}
+
+static FragmentProgram *fragmentProgram(const GeSgxDraw *d) {
+	uint32_t key = geSgxShaderKey(d);
+	uint32_t blend = blendKey(d);
+	int i;
+
+	for (i = 0; i < nfragment_programs; i++) {
+		if (fragment_programs[i].key == key && fragment_programs[i].blend == blend)
+			return &fragment_programs[i];
+	}
+	if (nfragment_programs >= MAX_FRAGMENT_PROGRAMS)
+		return NULL;
+
+	SceGxmShaderPatcherId id;
+	const SceGxmProgram *gxp = fragmentGxp(key, &id);
+	if (!gxp)
+		return NULL;
+
+	/*
+		Alpha is never written: the target keeps the alpha 1 of its clear, so
+		it shows opaque (the PSP keeps the stencil there, which only matters
+		for DSTALPHA blending; that is not emulated yet).
+	*/
+	SceGxmBlendInfo info;
+	memset(&info, 0, sizeof(info));
+	info.colorMask = SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
+	info.colorFunc = SCE_GXM_BLEND_FUNC_NONE;
+	info.alphaFunc = SCE_GXM_BLEND_FUNC_NONE;
+	info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ONE;
+	info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ZERO;
+	if (blend & 0x80000000u) {
+		info.colorMask = blend & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B);
+	} else if (blend & 0x40000000u) {
+		info.colorFunc = blend & 0xF;
+		info.colorSrc = (blend >> 4) & 0xF;
+		info.colorDst = (blend >> 8) & 0xF;
+	}
+	const SceGxmBlendInfo *pinfo = &info;
+
+	SceGxmFragmentProgram *program = NULL;
+	int res = sceGxmShaderPatcherCreateFragmentProgram(patcher, id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+		SCE_GXM_MULTISAMPLE_NONE, pinfo, vertex_gxp, &program);
+	if (res < 0) {
+		GeSgxLog("GeSgx render: fragment program %04X/%08X: %08X\n", (unsigned)key, (unsigned)blend, (unsigned)res);
+		return NULL;
+	}
+
+	FragmentProgram *fp = &fragment_programs[nfragment_programs++];
+	fp->key = key;
+	fp->blend = blend;
+	fp->program = program;
+	fp->alpha_ref = sceGxmProgramFindParameterByName(gxp, "uAlphaRef");
+	fp->env = sceGxmProgramFindParameterByName(gxp, "uEnv");
+	return fp;
+}
+
+static SceGxmPrimitiveType primitive(uint8_t prim) {
+	switch (prim) {
+		case GE_SGX_DRAW_TRIANGLE_STRIP: return SCE_GXM_PRIMITIVE_TRIANGLE_STRIP;
+		case GE_SGX_DRAW_TRIANGLE_FAN: return SCE_GXM_PRIMITIVE_TRIANGLE_FAN;
+		case GE_SGX_DRAW_LINES: return SCE_GXM_PRIMITIVE_LINES;
+		case GE_SGX_DRAW_POINTS: return SCE_GXM_PRIMITIVE_POINTS;
+		default: return SCE_GXM_PRIMITIVE_TRIANGLES;
+	}
+}
+
+static int shown(uint32_t draw_fb, uint32_t fb, const GeSgxAlias *aliases, int naliases) {
+	if (draw_fb == fb)
+		return 1;
+	int i;
+	for (i = 0; i < naliases; i++) {
+		if (aliases[i].dst == fb && aliases[i].src == draw_fb)
+			return 1;
+	}
+	return 0;
+}
+
+void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
+	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats) {
+	SceUInt64 t0 = sceKernelGetProcessTimeWide();
+	memset(stats, 0, sizeof(*stats));
+
+	if (!patcher || !vertexProgram())
+		return;
+
+	// 2D: no depth test, no culling
+	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
+	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+	sceGxmSetFrontPointLineWidth(ctx, GE_SGX_SCALE);
+	sceGxmSetVertexProgram(ctx, vertex_program);
+
+	int16_t last_scissor[4] = { -1, -1, -1, -1 };
+	int scissor_empty = 0;
+	const SceGxmFragmentProgram *last_fp = NULL;
+	uint32_t i;
+
+	for (i = 0; i < frame->ndraws; i++) {
+		const GeSgxDraw *d = &frame->draws[i];
+
+		if (!shown(d->fb, fb, aliases, naliases)) {
+			stats->other_fb++;
+			continue;
+		}
+
+		// Clear that does not write colour: depth or stencil only, nothing to draw yet
+		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & GE_SGX_DRAW_WRITE_COLOR))
+			continue;
+
+		FragmentProgram *fp = fragmentProgram(d);
+		if (!fp) {
+			stats->waiting++;
+			continue;
+		}
+
+		if (fp->program != last_fp) {
+			sceGxmSetFragmentProgram(ctx, fp->program);
+			last_fp = fp->program;
+		}
+
+		if (memcmp(last_scissor, d->scissor, sizeof(last_scissor)) != 0) {
+			memcpy(last_scissor, d->scissor, sizeof(last_scissor));
+			int x0 = d->scissor[0], y0 = d->scissor[1], x1 = d->scissor[2], y1 = d->scissor[3];
+			if (x0 < 0) x0 = 0;
+			if (y0 < 0) y0 = 0;
+			if (x1 > 960) x1 = 960;
+			if (y1 > 544) y1 = 544;
+			scissor_empty = x1 <= x0 || y1 <= y0;
+			// Tile granularity (32x32): exact for the full screen, the usual case
+			if (!scissor_empty)
+				sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, x0, y0, x1 - 1, y1 - 1);
+		}
+		if (scissor_empty)
+			continue;
+
+		if (fp->alpha_ref || fp->env) {
+			void *uniforms = NULL;
+			sceGxmReserveFragmentDefaultUniformBuffer(ctx, &uniforms);
+			if (fp->alpha_ref) {
+				float ref = d->atest_ref / 255.0f;
+				sceGxmSetUniformDataF(uniforms, fp->alpha_ref, 0, 1, &ref);
+			}
+			if (fp->env) {
+				float env[4] = {
+					(d->env & 0xFF) / 255.0f, ((d->env >> 8) & 0xFF) / 255.0f, ((d->env >> 16) & 0xFF) / 255.0f, 1.0f
+				};
+				sceGxmSetUniformDataF(uniforms, fp->env, 0, 4, env);
+			}
+		}
+
+		if (d->flags & GE_SGX_DRAW_TEXTURED) {
+			const SceGxmTexture *t = geSgxTexGet(d->texture);
+			if (!t)
+				continue;
+			SceGxmTexture tex = *t;
+			sceGxmTextureSetUAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_U) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
+			sceGxmTextureSetVAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_V) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
+			sceGxmTextureSetMinFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MIN) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmTextureSetMagFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MAG) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmSetFragmentTexture(ctx, 0, &tex);
+		}
+
+		sceGxmSetVertexStream(ctx, 0, &frame->vertices[d->first]);
+		sceGxmDraw(ctx, primitive(d->prim), SCE_GXM_INDEX_FORMAT_U16, indices, d->count);
+
+		stats->draws++;
+		stats->vertices += d->count;
+	}
+
+	// Back to the state vita2d expects
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
+	sceGxmSetFrontPointLineWidth(ctx, 1);
+
+	stats->render_us = (uint32_t)(sceKernelGetProcessTimeWide() - t0);
+}

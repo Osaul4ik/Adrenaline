@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ge_sgx_walk.h"
+#include "ge_sgx_texconv.h"
 
 #define RAM_BASE  0x08000000u
 #define RAM_SIZE  0x04000000u
@@ -468,6 +469,253 @@ static void testLongList(void) {
 	CHECK(page_calls - calls == (int)((0xF8 + 4004 + GE_SGX_BLOCK_SIZE - 1) / GE_SGX_BLOCK_SIZE), "block fetches %d", page_calls - calls);
 }
 
+/* ---- draw building (stage 1: through mode) ---- */
+
+static GeSgxVertex fverts[4096];
+static GeSgxDraw fdraws[64];
+static GeSgxFrameData frame;
+static GeSgxTexDesc last_desc;
+static int tex_calls;
+
+static int32_t texFn(void *user, const GeSgxTexDesc *d) {
+	(void)user;
+	last_desc = *d;
+	tex_calls++;
+	return d->format == GE_TFMT_DXT1 ? -1 : 7;
+}
+
+static void resetFrame(void) {
+	reset();
+	memset(&frame, 0, sizeof(frame));
+	frame.vertices = fverts;
+	frame.max_vertices = 4096;
+	frame.draws = fdraws;
+	frame.max_draws = 64;
+	w->frame = &frame;
+	w->texture_fn = texFn;
+	w->texture_user = NULL;
+	tex_calls = 0;
+}
+
+static int feq(float a, float b) { return a > b - 0.0001f && a < b + 0.0001f; }
+
+/* sprite vertex: u16 uv, 8888 color, s16 xyz = 4 + 4 + 6 (+2 pad) = 16 */
+static void spriteVertex(uint32_t a, uint16_t u, uint16_t v, uint32_t color, int16_t x, int16_t y) {
+	w16(a, u); w16(a + 2, v); w32(a + 4, color); w16(a + 8, (uint16_t)x); w16(a + 10, (uint16_t)y); w16(a + 12, 0);
+}
+
+static void testBuildSprites(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0x11111111, 10, 20);
+	spriteVertex(v + 16, 32, 16, 0xFF00FF00, 42, 36);
+	spriteVertex(v + 32, 32, 0, 0x22222222, 100, 100);
+	spriteVertex(v + 48, 64, 16, 0xFF0000FF, 132, 116);
+
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x44000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, (0 << 10) | 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x1E, 1));                  // texture on
+	emit(&l, C(0x21, 1));                  // blend on
+	emit(&l, C(0xDF, (3 << 4) | 2));       // src alpha, 1 - src alpha
+	emit(&l, C(0xC9, 0x100));              // modulate, RGBA
+	emit(&l, C(0xA0, 0x123450));           // texture 0x09123450
+	emit(&l, C(0xA8, (0x09 << 16) | 64));  // bufw 64, upper address 0x09
+	emit(&l, C(0xB8, (4 << 8) | 6));       // 64 x 16
+	emit(&l, C(0xC3, GE_TFMT_8888));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x04, (6u << 16) | 2));     // next two vertices: merged into the same draw
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 1 && frame.nvertices == 12, "draws %u vertices %u", frame.ndraws, frame.nvertices);
+	CHECK(tex_calls == 2, "texture lookups %d", tex_calls);
+	CHECK(last_desc.addr == 0x09123450 && last_desc.bufw == 64 && last_desc.w == 64 && last_desc.h == 16 && last_desc.format == GE_TFMT_8888 && !last_desc.swizzle,
+	      "desc addr %08x bufw %u %ux%u fmt %u", last_desc.addr, last_desc.bufw, last_desc.w, last_desc.h, last_desc.format);
+	if (frame.ndraws == 1) {
+		GeSgxDraw *d = &fdraws[0];
+		CHECK(d->prim == GE_SGX_DRAW_TRIANGLES && d->first == 0 && d->count == 12 && d->texture == 7, "prim %u first %u count %u tex %d", d->prim, d->first, d->count, d->texture);
+		CHECK((d->flags & (GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_BLEND | GE_SGX_DRAW_TCC)) == (GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_BLEND | GE_SGX_DRAW_TCC) && !(d->flags & GE_SGX_DRAW_CLEAR),
+		      "flags %02x", d->flags);
+		CHECK(d->blend == 0x32 && d->tfunc == 0, "blend %x tfunc %u", d->blend, d->tfunc);
+		CHECK(d->scissor[0] == 0 && d->scissor[1] == 0 && d->scissor[2] == 960 && d->scissor[3] == 544, "scissor %d %d %d %d", d->scissor[0], d->scissor[1], d->scissor[2], d->scissor[3]);
+		CHECK(d->fb == 0x44000, "fb %x", d->fb);
+	}
+	/* first sprite: corners (20,40) (84,40) (20,72) | (84,40) (84,72) (20,72), colour of vertex 2 */
+	CHECK(feq(fverts[0].x, 20) && feq(fverts[0].y, 40) && feq(fverts[0].u, 0) && feq(fverts[0].v, 0), "v0 %f %f %f %f", fverts[0].x, fverts[0].y, fverts[0].u, fverts[0].v);
+	CHECK(feq(fverts[1].x, 84) && feq(fverts[1].y, 40) && feq(fverts[1].u, 0.5f) && feq(fverts[1].v, 0), "v1 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[1].u, fverts[1].v);
+	CHECK(feq(fverts[4].x, 84) && feq(fverts[4].y, 72) && feq(fverts[4].u, 0.5f) && feq(fverts[4].v, 1.0f), "v4 %f %f %f %f", fverts[4].x, fverts[4].y, fverts[4].u, fverts[4].v);
+	CHECK(fverts[0].color == 0xFF00FF00u && fverts[5].color == 0xFF00FF00u, "sprite colour %08x", fverts[0].color);
+	CHECK(feq(fverts[6].x, 200) && feq(fverts[6].u, 0.5f) && fverts[6].color == 0xFF0000FFu, "second sprite %f %f %08x", fverts[6].x, fverts[6].u, fverts[6].color);
+}
+
+static void testBuildOther(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	/* 565 colour + s16 pos: 2 + 6 = 8 bytes, no texture */
+	int i;
+	for (i = 0; i < 5; i++) {
+		w16(v + i * 8, 0xF800);           // blue
+		w16(v + i * 8 + 2, (uint16_t)(i * 10));
+		w16(v + i * 8 + 4, (uint16_t)(i * 5));
+		w16(v + i * 8 + 6, 0xFFFF);       // z
+	}
+	L l = { 0x08800000 };
+	emit(&l, C(0x12, VT_COL565 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (2u << 16) | 3));   // line strip of 3 -> 2 lines
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (5u << 16) | 5));   // fan of 5
+	emit(&l, C(0x12, VT_COL565 | VT_POS16)); // 3D: counted, not built
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x12, VT_COL565 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xC3, GE_TFMT_DXT1));     // unsupported texture: skipped
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 2, "draws %u", frame.ndraws);
+	CHECK(frame.skipped_3d == 1 && frame.skipped_other == 1, "skipped 3d %u other %u", frame.skipped_3d, frame.skipped_other);
+	if (frame.ndraws == 2) {
+		CHECK(fdraws[0].prim == GE_SGX_DRAW_LINES && fdraws[0].count == 4, "line strip -> %u, %u verts", fdraws[0].prim, fdraws[0].count);
+		CHECK(fdraws[1].prim == GE_SGX_DRAW_TRIANGLE_FAN && fdraws[1].count == 5 && fdraws[1].first == 4, "fan %u %u %u", fdraws[1].prim, fdraws[1].count, fdraws[1].first);
+	}
+	/* lines: (0,0)-(10,5), (10,5)-(20,10) scaled */
+	CHECK(feq(fverts[2].x, 20) && feq(fverts[2].y, 10) && feq(fverts[3].x, 40) && feq(fverts[3].z, 1.0f), "line 2 %f %f %f %f", fverts[2].x, fverts[2].y, fverts[3].x, fverts[3].z);
+	CHECK(fverts[0].color == 0xFFFF0000u, "565 blue %08x", fverts[0].color);
+}
+
+static void testBuildClearAndClut(void) {
+	resetFrame();
+	/* CLUT in memory, loaded with LOADCLUT, then the CLUT texture desc carries it */
+	int i;
+	for (i = 0; i < 16; i++)
+		w32(0x08A00000 + i * 4, 0xFF000000u | (uint32_t)i);
+	L l = { 0x08800000 };
+	emit(&l, C(0xB0, 0xA00000));
+	emit(&l, C(0xB1, 0x080000));
+	emit(&l, C(0xC5, 3 | (0xFF << 8)));   // 8888, mask 0xFF
+	emit(&l, C(0xC4, 2));                 // 64 bytes
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xC3, GE_TFMT_CLUT4));
+	emit(&l, C(0xC2, 1));                 // swizzled
+	emit(&l, C(0xB8, (3 << 8) | 4));      // 16 x 8
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	/* clear mode sprite: no texture, own flags */
+	emit(&l, C(0xD3, 0x101));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	spriteVertex(0x08900000, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(0x08900010, 16, 8, 0xFFFFFFFF, 16, 8);
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(tex_calls == 1 && last_desc.clut_bytes == 64 && last_desc.swizzle == 1 && last_desc.w == 16 && last_desc.h == 8, "clut desc calls %d bytes %u swz %u", tex_calls, last_desc.clut_bytes, last_desc.swizzle);
+	for (i = 0; i < 16; i++)              // changed after the load: the snapshot keeps the loaded CLUT
+		w32(0x08A00000 + i * 4, 0);
+	uint32_t e5 = 0;
+	if (last_desc.clut)
+		memcpy(&e5, last_desc.clut + 5 * 4, 4);
+	CHECK(e5 == 0xFF000005u, "clut snapshot entry 5 %08x", e5);
+	CHECK(frame.ndraws == 2 && (fdraws[1].flags & GE_SGX_DRAW_CLEAR) && (fdraws[1].flags & GE_SGX_DRAW_WRITE_COLOR) && !(fdraws[1].flags & GE_SGX_DRAW_TEXTURED) && fdraws[1].texture == -1,
+	      "clear draw %u flags %02x", frame.ndraws, frame.ndraws > 1 ? fdraws[1].flags : 0);
+}
+
+static void testTransferAlias(void) {
+	resetFrame();
+	L l = { 0x08800000 };
+	emit(&l, C(0xB2, 0x088000));
+	emit(&l, C(0xB3, 512));
+	emit(&l, C(0xB4, 0x000000));
+	emit(&l, C(0xB5, 512));
+	emit(&l, C(0xEE, (271 << 10) | 479));
+	emit(&l, C(0xEA, 1));
+	emit(&l, C(0xEE, (15 << 10) | 15));   // small copy: not an alias
+	emit(&l, C(0xEA, 1));
+	emit(&l, C(0x0C, 0));
+	/* VRAM addresses: upper bits 0x04 */
+	w32(0x08800004, C(0xB3, (0x04 << 16) | 512));
+	w32(0x0880000C, C(0xB5, (0x04 << 16) | 512));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->naliases == 1 && w->aliases[0].src == 0x88000 && w->aliases[0].dst == 0, "aliases %d src %x dst %x", w->naliases, w->naliases ? w->aliases[0].src : 0, w->naliases ? w->aliases[0].dst : 0);
+}
+
+/* ---- texture conversion ---- */
+
+static void swizzle(uint8_t *dst, const uint8_t *src, uint32_t rowbytes, uint32_t rows) {
+	uint32_t bxc = rowbytes / 16, by, bx, line;
+	for (by = 0; by < rows / 8; by++)
+		for (bx = 0; bx < bxc; bx++)
+			for (line = 0; line < 8; line++)
+				memcpy(dst + (by * bxc + bx) * 128 + line * 16, src + (by * 8 + line) * rowbytes + bx * 16, 16);
+}
+
+static void testTexconv(void) {
+	static uint8_t lin[64 * 16 * 4], swz[64 * 16 * 4], back[64 * 16 * 4], out[64 * 16 * 4];
+	uint32_t i;
+	for (i = 0; i < sizeof(lin); i++)
+		lin[i] = (uint8_t)(i * 7 + (i >> 8));
+	swizzle(swz, lin, 64 * 4, 16);
+	geSgxUnswizzle(back, swz, 64 * 4, 16);
+	CHECK(memcmp(back, lin, sizeof(lin)) == 0, "unswizzle round trip");
+
+	CHECK(geSgxTexRowBytes(GE_TFMT_CLUT4, 32) == 16 && geSgxTexRowBytes(GE_TFMT_8888, 32) == 128 && geSgxTexRowBytes(GE_TFMT_DXT1, 32) == 0, "row bytes");
+
+	GeSgxTexDesc d;
+	memset(&d, 0, sizeof(d));
+	d.w = 4; d.h = 2; d.bufw = 8; d.format = GE_TFMT_5650;
+	CHECK(geSgxTexOutStride(&d) == 16, "stride %u", geSgxTexOutStride(&d));
+	memset(out, 0xAA, sizeof(out));
+	CHECK(geSgxTexConvert(&d, lin, 16, out, 16, NULL) && memcmp(out, lin, 8) == 0 && out[8] == 0 && memcmp(out + 16, lin + 16, 8) == 0, "16 bit rows copied, padding cleared");
+
+	/* CLUT: 5551 entries, CLUT8 with shift 1, mask 0x0F, start 1 (base 16) */
+	uint8_t clutraw[64];
+	for (i = 0; i < 32; i++) {
+		uint16_t c = (uint16_t)(0x8000 | i); // red = i
+		clutraw[i * 2] = (uint8_t)c;
+		clutraw[i * 2 + 1] = (uint8_t)(c >> 8);
+	}
+	static uint32_t clut[GE_SGX_CLUT_ENTRIES];
+	geSgxClutDecode(1, clutraw, 64, clut);
+	CHECK(clut[3] == geSgxDecodeColor16(1, 0x8003) && (clut[3] >> 24) == 0xFF && clut[40] == 0, "clut decode %08x", clut[3]);
+
+	uint8_t idx[8] = { 0, 2, 4, 6, 0x1E, 0x20, 0xFF, 0x08 };
+	memset(&d, 0, sizeof(d));
+	d.w = 8; d.h = 1; d.bufw = 8; d.format = GE_TFMT_CLUT8;
+	d.clut_format = 1 | (1 << 2) | (0x0F << 8) | (1 << 16);
+	CHECK(geSgxTexConvert(&d, idx, 8, out, 32, clut), "clut8 convert");
+	uint32_t o[8];
+	memcpy(o, out, 32);
+	/* (raw >> 1) & 15 | 16 */
+	CHECK(o[0] == clut[16] && o[1] == clut[17] && o[4] == clut[31] && o[5] == clut[16] && o[6] == clut[31] && o[7] == clut[20], "clut8 index %08x %08x", o[0], o[7]);
+
+	/* CLUT4: low nibble first */
+	uint8_t nib[2] = { 0x21, 0x43 };
+	memset(&d, 0, sizeof(d));
+	d.w = 4; d.h = 1; d.bufw = 4; d.format = GE_TFMT_CLUT4;
+	d.clut_format = 1 | (0xFF << 8);
+	CHECK(geSgxTexConvert(&d, nib, 2, out, 32, clut), "clut4 convert");
+	memcpy(o, out, 16);
+	CHECK(o[0] == clut[1] && o[1] == clut[2] && o[2] == clut[3] && o[3] == clut[4], "clut4 order %08x %08x", o[0], o[1]);
+
+	CHECK(geSgxDecodeColor16(0, 0x07E0) == 0xFF00FF00u && geSgxDecodeColor16(2, 0x8F00) == 0x88FF0000u, "colour decode %08x %08x", geSgxDecodeColor16(0, 0x07E0), geSgxDecodeColor16(2, 0x8F00));
+}
+
 int main(void) {
 	ram = calloc(1, RAM_SIZE);
 	vram = calloc(1, VRAM_SIZE);
@@ -485,6 +733,11 @@ int main(void) {
 	testIndexedAndAdvance();
 	testColors();
 	testLongList();
+	testBuildSprites();
+	testBuildOther();
+	testBuildClearAndClut();
+	testTransferAlias();
+	testTexconv();
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);
 	free(ram);

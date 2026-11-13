@@ -1,0 +1,158 @@
+/*
+	Adrenaline
+	Copyright (C) 2016-2018, TheFloW
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+	SGX renderer: PSP texture data to GXM texture data. See ge_sgx_texconv.h.
+	Layouts follow PPSSPP (GPU/Common/TextureDecoder.cpp).
+*/
+
+#include <string.h>
+
+#include "ge_sgx_texconv.h"
+
+uint32_t geSgxTexRowBytes(uint32_t format, uint32_t bufw) {
+	switch (format) {
+		case GE_TFMT_5650:
+		case GE_TFMT_5551:
+		case GE_TFMT_4444:
+		case GE_TFMT_CLUT16:
+			return bufw * 2;
+		case GE_TFMT_8888:
+		case GE_TFMT_CLUT32:
+			return bufw * 4;
+		case GE_TFMT_CLUT8:
+			return bufw;
+		case GE_TFMT_CLUT4:
+			return (bufw + 1) / 2;
+		default:
+			return 0; // DXT: not yet
+	}
+}
+
+uint32_t geSgxTexRows(const GeSgxTexDesc *d) {
+	return d->swizzle ? ((d->h + 7u) & ~7u) : d->h;
+}
+
+uint32_t geSgxTexOutBpp(uint32_t format) {
+	return format <= GE_TFMT_4444 ? 2 : 4;
+}
+
+void geSgxUnswizzle(uint8_t *dst, const uint8_t *src, uint32_t rowbytes, uint32_t rows) {
+	uint32_t bxc = rowbytes / 16;
+	uint32_t byc = rows / 8;
+	uint32_t by, bx, line;
+
+	for (by = 0; by < byc; by++) {
+		for (bx = 0; bx < bxc; bx++) {
+			const uint8_t *block = src + (by * bxc + bx) * 128;
+			for (line = 0; line < 8; line++)
+				memcpy(dst + (by * 8 + line) * rowbytes + bx * 16, block + line * 16, 16);
+		}
+	}
+}
+
+void geSgxClutDecode(uint32_t clut_format, const uint8_t *clut, uint32_t bytes, uint32_t *out) {
+	uint32_t fmt = clut_format & 3;
+	uint32_t i, n;
+
+	memset(out, 0, GE_SGX_CLUT_ENTRIES * sizeof(uint32_t));
+
+	if (fmt == 3) {
+		n = bytes / 4;
+		if (n > GE_SGX_CLUT_ENTRIES)
+			n = GE_SGX_CLUT_ENTRIES;
+		memcpy(out, clut, n * 4);
+	} else {
+		n = bytes / 2;
+		if (n > GE_SGX_CLUT_ENTRIES)
+			n = GE_SGX_CLUT_ENTRIES;
+		for (i = 0; i < n; i++)
+			out[i] = geSgxDecodeColor16(fmt, (uint32_t)clut[i * 2] | ((uint32_t)clut[i * 2 + 1] << 8));
+	}
+}
+
+static inline uint32_t clutIndex(uint32_t clut_format, uint32_t raw) {
+	uint32_t shift = (clut_format >> 2) & 0x1F;
+	uint32_t mask = (clut_format >> 8) & 0xFF;
+	uint32_t base = ((clut_format >> 16) & 0x1F) * 16;
+	// 32 bit entries: the CLUT has 256 of them, 16 bit ones 512
+	uint32_t limit = (clut_format & 3) == 3 ? 0xFF : 0x1FF;
+	return (((raw >> shift) & mask) | base) & limit;
+}
+
+int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes,
+	uint8_t *dst, uint32_t dst_stride, const uint32_t *clut) {
+	uint32_t x, y;
+	uint32_t w = d->w, h = d->h;
+
+	switch (d->format) {
+		case GE_TFMT_5650:
+		case GE_TFMT_5551:
+		case GE_TFMT_4444:
+		case GE_TFMT_8888: {
+			uint32_t row = w * geSgxTexOutBpp(d->format);
+			if (row > src_rowbytes)
+				row = src_rowbytes;
+			for (y = 0; y < h; y++) {
+				memcpy(dst + y * dst_stride, src + y * src_rowbytes, row);
+				if (row < dst_stride)
+					memset(dst + y * dst_stride + row, 0, dst_stride - row);
+			}
+			return 1;
+		}
+		case GE_TFMT_CLUT4:
+			for (y = 0; y < h; y++) {
+				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
+				for (x = 0; x < w && x / 2 < src_rowbytes; x++) {
+					uint32_t raw = (s[x / 2] >> ((x & 1) * 4)) & 0xF;
+					o[x] = clut[clutIndex(d->clut_format, raw)];
+				}
+			}
+			return 1;
+		case GE_TFMT_CLUT8:
+			for (y = 0; y < h; y++) {
+				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
+				for (x = 0; x < w && x < src_rowbytes; x++)
+					o[x] = clut[clutIndex(d->clut_format, s[x])];
+			}
+			return 1;
+		case GE_TFMT_CLUT16:
+			for (y = 0; y < h; y++) {
+				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
+				for (x = 0; x < w && x * 2 + 1 < src_rowbytes; x++)
+					o[x] = clut[clutIndex(d->clut_format, (uint32_t)s[x * 2] | ((uint32_t)s[x * 2 + 1] << 8))];
+			}
+			return 1;
+		case GE_TFMT_CLUT32:
+			for (y = 0; y < h; y++) {
+				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
+				for (x = 0; x < w && x * 4 + 3 < src_rowbytes; x++) {
+					uint32_t raw;
+					memcpy(&raw, s + x * 4, 4);
+					o[x] = clut[clutIndex(d->clut_format, raw)];
+				}
+			}
+			return 1;
+		default:
+			return 0;
+	}
+}

@@ -56,6 +56,11 @@ add_executable(adrenaline_user
   math_utils.c
   ge_sgx.c
   ge_sgx_walk.c
+  ge_sgx_build.c
+  ge_sgx_texconv.c
+  ge_sgx_tex.c
+  ge_sgx_shader.c
+  ge_sgx_render.c
   lz4/lz4.c
 )
 
