@@ -20,6 +20,7 @@
 #define __ADRENALINE_H__
 
 int SendAdrenalineCmd(int cmd);
+int SendAdrenalineCmdArg(int cmd, u32 arg);
 
 void initAdrenalineInfo();
 

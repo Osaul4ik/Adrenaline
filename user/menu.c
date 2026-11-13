@@ -43,6 +43,7 @@
 #include "usb.h"
 #include "utils.h"
 #include "math_utils.h"
+#include "ge_sgx.h"
 
 #include "includes/lcd3x_v.h"
 #include "includes/lcd3x_f.h"
@@ -100,6 +101,7 @@ static MenuEntry settings_entries[] = {
   { "Smooth Graphics",           MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.no_smooth_graphics, yes_no_options, sizeof(yes_no_options) / sizeof(char **) },
   { "f.lux Filter Color",        MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.flux_mode, flux_mode_options, sizeof(flux_mode_options) / sizeof(char **) },
   { "Native Resolution (PSP)",   MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.native_resolution, no_yes_options, sizeof(no_yes_options) / sizeof(char **) },
+  { "SGX Renderer (PSP, test)",  MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.sgx_renderer, no_yes_options, sizeof(no_yes_options) / sizeof(char **) },
   { "Screen Scale X (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_x, NULL, 0 },
   { "Screen Scale Y (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_y, NULL, 0 },
   { "Screen Scale X (PS1)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.ps1_screen_scale_x, NULL, 0 },
@@ -221,6 +223,24 @@ int ResetAdrenalineSettings() {
   return 0;
 }
 
+// SGX renderer test stage: what the Vita GPU drew (top right) and the measurements
+static void drawSgxOverlay(vita2d_texture *tex, const GeSgxFrame *f) {
+  const float w = SCREEN_WIDTH / 4.0f, h = SCREEN_HEIGHT / 4.0f;
+  const float x = SCREEN_WIDTH - w - 8.0f, y = 8.0f;
+
+  vita2d_draw_rectangle(x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, RGBA8(255, 255, 255, 255));
+  vita2d_draw_texture_scale(tex, x, y, 0.25f, 0.25f);
+
+  const float ty = y + h + 6.0f;
+  vita2d_draw_rectangle(x - 2.0f, ty - 2.0f, w + 4.0f, 4 * 18.0f + 4.0f, RGBA8(0, 0, 0, 200));
+
+  const float fs = 0.75f;
+  pgf_draw_textf(x, ty + 0 * 18.0f, WHITE, fs, "SGX %u fps  lists %u  bad %u", (unsigned)(f->fps), (unsigned)(f->stats.lists), (unsigned)(f->stats.bad));
+  pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "cmds %u  prims %u  clr %u", (unsigned)(f->stats.commands), (unsigned)(f->stats.prims), (unsigned)(f->stats.clears));
+  pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "walk %u us/s  max %u  pg %u/s", (unsigned)(f->walk_us), (unsigned)(f->walk_max_us), (unsigned)(f->invalidates));
+  pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "wait %u/%u to  CD %uM  RAM %uM", (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts), (unsigned)(f->cdram_kb / 1024), (unsigned)(f->ram_kb / 1024));
+}
+
 void drawMenu() {
   // Draw window
   vita2d_draw_rectangle(WINDOW_X, WINDOW_Y, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_COLOR);
@@ -287,6 +307,14 @@ void drawMenu() {
     if (tab_sel == 2 && menu_entries[menu_sel].value == &config.native_resolution) {
       char *line1 = "Renders PSP games at 960x544. Applies on the next game start.";
       char *line2 = "Hold L while a game starts to skip it. Not with high memory layout.";
+      pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line1)), FONT_Y_LINE(16), WHITE, FONT_SIZE, line1);
+      pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line2)), FONT_Y_LINE(17), WHITE, FONT_SIZE, line2);
+    }
+
+    // Info about the SGX renderer
+    if (tab_sel == 2 && menu_entries[menu_sel].value == &config.sgx_renderer) {
+      char *line1 = "Test stage: follows the GE on the Vita GPU, shows statistics.";
+      char *line2 = "Applies on the next game start. Log: ux0:data/adrenaline_sgx_log.txt";
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line1)), FONT_Y_LINE(16), WHITE, FONT_SIZE, line1);
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line2)), FONT_Y_LINE(17), WHITE, FONT_SIZE, line2);
     }
@@ -486,15 +514,28 @@ int AdrenalineDraw(SceSize args, void *argp) {
   // keep track of native resolution output
   int last_draw_native = 0;
 
+  // SGX renderer (test stage): frame from the Vita side GE walker
+  static GeSgxFrame sgx_frame;
+  vita2d_texture *sgx_tex = NULL;
+  int last_sgx_active = 0;
+
   while (1) {
     int draw_native = *(uint32_t *)CONVERT_ADDRESS(DRAW_NATIVE);
     SceAdrenaline *adrenaline = (SceAdrenaline *)CONVERT_ADDRESS(ADRENALINE_ADDRESS);
 
-    // Native output stopped (systemctrl falls back to the game's own framebuffer,
-    // e.g. while a video plays): give the screen back to the PSP framebuffer
-    if (last_draw_native && !draw_native && config.graphics_filtering == 0 && !menu_open)
+    int sgx_active = config.sgx_renderer && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
+    if (sgx_active && !sgx_tex) {
+      sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+      if (!sgx_tex)
+        sgx_active = 0;
+    }
+
+    // Native or SGX output stopped (systemctrl falls back to the game's own framebuffer,
+    // e.g. while a video plays, or the game exited): give the screen back to the PSP framebuffer
+    if ((last_draw_native || last_sgx_active) && !draw_native && !sgx_active && config.graphics_filtering == 0 && !menu_open)
       SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
     last_draw_native = draw_native;
+    last_sgx_active = sgx_active;
 
     // pause/unpause pops once after switching from psp to pops mode
     // this pause/unpause fixes slowdown in PS1 games that used to require manually entering/exiting menu
@@ -564,9 +605,22 @@ int AdrenalineDraw(SceSize args, void *argp) {
     }
 
     // Do not draw if dialog is running
-    if (sceCommonDialogIsRunning() || (config.graphics_filtering == 0 && menu_open == 0 && draw_native == 0)) {
+    if (sceCommonDialogIsRunning() || (config.graphics_filtering == 0 && menu_open == 0 && draw_native == 0 && !sgx_active)) {
       sceDisplayWaitVblankStart();
       continue;
+    }
+
+    // SGX renderer: the shown framebuffer's clears, at 960x544, into its own target
+    if (sgx_active) {
+      vita2d_start_drawing_advanced(sgx_tex, 0);
+      vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
+      vita2d_clear_screen();
+      int r;
+      for (r = 0; r < sgx_frame.nrects; r++) {
+        GeSgxRect *rect = &sgx_frame.rects[r];
+        vita2d_draw_rectangle(rect->x0 * 2.0f, rect->y0 * 2.0f, (rect->x1 - rect->x0) * 2.0f, (rect->y1 - rect->y0) * 2.0f, rect->color);
+      }
+      vita2d_end_drawing();
     }
 
     // Draw display
@@ -619,6 +673,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
       getPopsScreenScale(&scale_x, &scale_y);
       vita2d_draw_texture_scale_rotate_hotspot(pops_tex, 480.0f, 272.0f, scale_x, scale_y, 0.0, 480.0, 272.0);
     }
+
+    // SGX renderer: its picture in the corner and the measurements
+    if (sgx_active && !menu_open)
+      drawSgxOverlay(sgx_tex, &sgx_frame);
 
     // Draw Menu
     if (menu_open)

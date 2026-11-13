@@ -54,6 +54,8 @@ add_executable(adrenaline_user
   usb.c
   utils.c
   math_utils.c
+  ge_sgx.c
+  ge_sgx_walk.c
   lz4/lz4.c
 )
 

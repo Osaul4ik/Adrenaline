@@ -20,6 +20,7 @@
 
 #include "main.h"
 #include "ge_native.h"
+#include "ge_sgx.h"
 #include "init_patch.h"
 
 SceUID (* sceKernelLoadModuleMs2Handler)(const char *path, int flags, SceKernelLMOption *option);
@@ -260,9 +261,12 @@ int sceKernelStartModulePatched(SceUID modid, SceSize argsize, void *argp, int *
 	}
 
 START_MODULE:
-	// After the plugins, so that a standalone native resolution plugin wins
-	if (plugins_handled)
-		GeNativeInit();
+	// After the plugins, so that a standalone native resolution plugin wins.
+	// The SGX renderer needs the game's own lists, so the two are exclusive.
+	if (plugins_handled) {
+		if (GeSgxInit() != 1)
+			GeNativeInit();
+	}
 
 	res = sceKernelStartModule661(modid, argsize, argp, status, option);
 

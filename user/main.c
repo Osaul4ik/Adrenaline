@@ -47,6 +47,7 @@
 #include "states.h"
 #include "usb.h"
 #include "utils.h"
+#include "ge_sgx.h"
 
 #include "msfs.h"
 
@@ -338,6 +339,9 @@ int AdrenalineCompat(SceSize args, void *argp) {
     } else if (request->cmd == ADRENALINE_VITA_CMD_GET_NATIVE_RESOLUTION) {
       // Asked by systemctrl when a game starts
       res = config.native_resolution ? 1 : 0;
+    } else if (request->cmd == ADRENALINE_VITA_CMD_GE_SGX_START) {
+      // Asked by systemctrl when a game starts, args[0] = ring address
+      res = GeSgxStart((uint32_t)request->args[0]);
     }
 
     ScePspemuKermitSendResponse(KERMIT_MODE_EXTRA_2, request, (uint64_t)res);

@@ -154,6 +154,7 @@ enum AdrenalineVitaCommands {
 	ADRENALINE_VITA_CMD_POWER_SHUTDOWN,
 	ADRENALINE_VITA_CMD_POWER_REBOOT,
 	ADRENALINE_VITA_CMD_GET_NATIVE_RESOLUTION, // response: 1 if enabled in the Adrenaline menu
+	ADRENALINE_VITA_CMD_GE_SGX_START, // args[0]: address of the GeSgxRing; response: 1 if the Vita side renders it
 };
 
 enum AdrenalineVitaResponse {

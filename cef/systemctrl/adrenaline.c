@@ -67,6 +67,24 @@ int SendAdrenalineCmd(int cmd) {
 	return resp;
 }
 
+// Same with one argument, the Vita side reads it from request->args[0]
+int SendAdrenalineCmdArg(int cmd, u32 arg) {
+	int k1 = pspSdkSetK1(0);
+
+	char buf[sizeof(SceKermitRequest) + 0x40];
+	SceKermitRequest *request_aligned = (SceKermitRequest *)ALIGN((u32)buf, 0x40);
+	SceKermitRequest *request_uncached = (SceKermitRequest *)((u32)request_aligned | 0x20000000);
+	sceKernelDcacheInvalidateRange(request_aligned, sizeof(SceKermitRequest));
+
+	request_uncached->args[0] = arg;
+
+	u64 resp;
+	sceKermitSendRequest661(request_uncached, KERMIT_MODE_EXTRA_2, cmd, 1, 0, &resp);
+
+	pspSdkSetK1(k1);
+	return resp;
+}
+
 int getSfoTitle(char *title, int n) {
 	SceUID fd = -1;
 	int size = 0;
