@@ -34,14 +34,17 @@
 #define GE_SGX_MAX_LISTS 64
 #define GE_SGX_MAX_STACK 32
 #define GE_SGX_MAX_RECTS 256
-#define GE_SGX_PAGE_SIZE 4096
+// Unit in which PSP memory is fetched (ScePspemu maps the PSP RAM uncached:
+// the Vita side copies blocks with burst reads instead of reading words)
+#define GE_SGX_BLOCK_SIZE 256
 
 // Longest walk of one list in one go, against lists that loop forever
 #define GE_SGX_MAX_COMMANDS (1 << 18)
 
 /*
-	Returns a host pointer to the GE_SGX_PAGE_SIZE bytes of PSP memory at
-	page (aligned), or NULL if the address is not readable.
+	Returns a host pointer to the GE_SGX_BLOCK_SIZE bytes of PSP memory at
+	page (a block address, aligned), or NULL if the address is not readable.
+	The pointer stays valid until the next call.
 */
 typedef const void *(* GeSgxPageFn)(void *user, uint32_t page);
 

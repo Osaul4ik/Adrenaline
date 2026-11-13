@@ -28,7 +28,7 @@ static uint8_t *host(uint32_t addr) {
 static const void *pageFn(void *user, uint32_t page) {
 	(void)user;
 	page_calls++;
-	if (page & (GE_SGX_PAGE_SIZE - 1)) {
+	if (page & (GE_SGX_BLOCK_SIZE - 1)) {
 		printf("FATAL: unaligned page %08x\n", page);
 		abort();
 	}
@@ -452,6 +452,22 @@ static void testColors(void) {
 	}
 }
 
+static void testLongList(void) {
+	reset();
+	// a list over many fetch blocks, starting in the middle of one
+	L l = { 0x088000F8 };
+	int i;
+	for (i = 0; i < 1000; i++)
+		emit(&l, C(0x9D, (uint32_t)i));
+	emit(&l, C(0x0C, 0));
+	int calls = page_calls;
+	geSgxWalkerList(w, 1, 0x088000F8, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->fbw == 999 && w->stats.commands == 1001, "long list: fbw %u commands %u", w->fbw, w->stats.commands);
+	// 4004 bytes from offset 0xF8: blocks 0x08800000 .. 0x08800F00 -> 16
+	CHECK(page_calls - calls == (int)((0xF8 + 4004 + GE_SGX_BLOCK_SIZE - 1) / GE_SGX_BLOCK_SIZE), "block fetches %d", page_calls - calls);
+}
+
 int main(void) {
 	ram = calloc(1, RAM_SIZE);
 	vram = calloc(1, VRAM_SIZE);
@@ -468,6 +484,7 @@ int main(void) {
 	testQueue();
 	testIndexedAndAdvance();
 	testColors();
+	testLongList();
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);
 	free(ram);

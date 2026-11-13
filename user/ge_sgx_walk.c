@@ -75,14 +75,14 @@ static inline uint32_t normalize(uint32_t addr) {
 
 static int readByte(GeSgxWalker *w, uint32_t addr, uint8_t *out) {
 	addr = normalize(addr);
-	uint32_t page = addr & ~(uint32_t)(GE_SGX_PAGE_SIZE - 1);
+	uint32_t page = addr & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1);
 	if (page != w->page) {
 		w->page_ptr = (const uint8_t *)w->page_fn(w->user, page);
 		w->page = w->page_ptr ? page : NO_PAGE;
 		if (!w->page_ptr)
 			return 0;
 	}
-	*out = w->page_ptr[addr & (GE_SGX_PAGE_SIZE - 1)];
+	*out = w->page_ptr[addr & (GE_SGX_BLOCK_SIZE - 1)];
 	return 1;
 }
 
@@ -90,15 +90,15 @@ static int readWord(GeSgxWalker *w, uint32_t addr, uint32_t *out) {
 	addr = normalize(addr);
 	if (addr & 3)
 		return 0;
-	uint32_t page = addr & ~(uint32_t)(GE_SGX_PAGE_SIZE - 1);
+	uint32_t page = addr & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1);
 	if (page != w->page) {
 		w->page_ptr = (const uint8_t *)w->page_fn(w->user, page);
 		w->page = w->page_ptr ? page : NO_PAGE;
 		if (!w->page_ptr)
 			return 0;
 	}
-	const uint8_t *p = w->page_ptr + (addr & (GE_SGX_PAGE_SIZE - 1));
-	*out = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+	// One aligned load (little endian like the PSP)
+	memcpy(out, w->page_ptr + (addr & (GE_SGX_BLOCK_SIZE - 1)), 4);
 	return 1;
 }
 

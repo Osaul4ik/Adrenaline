@@ -50,10 +50,11 @@
 #define IDLE_DELAY_US 300
 
 #define RAM_START  0x08000000u
-#define RAM_PAGES  (PSP_RAM_SIZE / GE_SGX_PAGE_SIZE)
 #define VRAM_START 0x04000000u
 #define VRAM_SIZE  0x00200000u
-#define VRAM_PAGES (VRAM_SIZE / GE_SGX_PAGE_SIZE)
+
+// Copies of PSP memory blocks for the walker, direct mapped
+#define BLOCK_CACHE_ENTRIES 2048
 
 #define RING_EVENTS_OFFSET ((uint32_t)offsetof(GeSgxRing, events))
 
@@ -67,15 +68,67 @@ static SceUID thid = -1;
 
 static GeSgxWalker walker;
 
-// Pages fetched since the last event
+/*
+	ScePspemu maps the PSP RAM uncached (see the benchmark): every load is a
+	trip to memory, ~125 ns per word. The walker therefore reads copies of
+	GE_SGX_BLOCK_SIZE byte blocks, made with burst loads (memcpy), kept for
+	one event (the game may change the memory between events).
+*/
 static uint32_t epoch = 1;
-static uint32_t ram_epoch[RAM_PAGES];
-static const void *ram_ptr[RAM_PAGES];
-static uint32_t vram_epoch[VRAM_PAGES];
-static const void *vram_ptr[VRAM_PAGES];
-static uint32_t page_fetches = 0;
-static uint32_t page_calls = 0;   // page lookups by the walker (switches between pages)
-static uint32_t inval_us = 0;     // time spent in the invalidating ScePspemuConvertAddress
+static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
+static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000
+static uint32_t *block_tag = NULL;     // block address | 1 (valid)
+static uint32_t *block_epoch = NULL;
+static uint8_t *block_data = NULL;
+static SceUID block_mem = -1;
+static uint32_t block_copies = 0; // blocks copied
+static uint32_t block_calls = 0;  // block lookups by the walker
+
+static int initBlockCache(void) {
+	if (block_mem >= 0)
+		return 1;
+
+	uint32_t size = BLOCK_CACHE_ENTRIES * (GE_SGX_BLOCK_SIZE + 8);
+	size = (size + 0xFFF) & ~0xFFF;
+	block_mem = sceKernelAllocMemBlock("SceGeSgxBlocks", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+	if (block_mem < 0)
+		return 0;
+
+	void *base = NULL;
+	sceKernelGetMemBlockBase(block_mem, &base);
+	memset(base, 0, size);
+	block_data = (uint8_t *)base;
+	block_tag = (uint32_t *)(block_data + BLOCK_CACHE_ENTRIES * GE_SGX_BLOCK_SIZE);
+	block_epoch = block_tag + BLOCK_CACHE_ENTRIES;
+	return 1;
+}
+
+static const void *blockFn(void *user, uint32_t block) {
+	const uint8_t *src;
+
+	if (block >= RAM_START && block < RAM_START + PSP_RAM_SIZE) {
+		src = ram_map + (block - RAM_START);
+	} else if (block >= VRAM_START && block < VRAM_START + 0x00800000u) {
+		// VRAM and its mirrors
+		src = vram_map + (block & (VRAM_SIZE - 1));
+	} else {
+		return NULL;
+	}
+
+	block_calls++;
+
+	uint32_t i = (block / GE_SGX_BLOCK_SIZE) & (BLOCK_CACHE_ENTRIES - 1);
+	uint8_t *dst = block_data + i * GE_SGX_BLOCK_SIZE;
+
+	if (block_tag[i] != (block | 1) || block_epoch[i] != epoch) {
+		memcpy(dst, src, GE_SGX_BLOCK_SIZE);
+		block_tag[i] = block | 1;
+		block_epoch[i] = epoch;
+		block_copies++;
+	}
+
+	return dst;
+}
 
 // Published frame (seqlock: odd while it is written)
 static volatile uint32_t frame_seq = 0;
@@ -83,45 +136,6 @@ static GeSgxFrame frame;
 static volatile SceUInt64 last_flip_time = 0;
 
 static uint32_t cdram_kb = 0, ram_kb = 0;
-
-static const void *pageFn(void *user, uint32_t page) {
-	uint32_t *ep;
-	const void **pp;
-	uint32_t psp;
-
-	if (page >= RAM_START && page < RAM_START + PSP_RAM_SIZE) {
-		uint32_t i = (page - RAM_START) / GE_SGX_PAGE_SIZE;
-		ep = &ram_epoch[i];
-		pp = &ram_ptr[i];
-		// Kernel address: ScePspemu maps all of the PSP RAM only for those
-		psp = 0x80000000u | page;
-	} else if (page >= VRAM_START && page < VRAM_START + 0x00800000u) {
-		// VRAM and its mirrors
-		uint32_t off = page & (VRAM_SIZE - 1);
-		uint32_t i = off / GE_SGX_PAGE_SIZE;
-		ep = &vram_epoch[i];
-		pp = &vram_ptr[i];
-		psp = VRAM_START | off;
-	} else {
-		return NULL;
-	}
-
-	page_calls++;
-
-	if (*ep != epoch) {
-		// Aligned address and size: cacheable mapping, invalidated
-		SceUInt64 t0 = sceKernelGetProcessTimeWide();
-		const void *p = (const void *)ScePspemuConvertAddress(psp, KERMIT_INPUT_MODE, GE_SGX_PAGE_SIZE);
-		inval_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
-		if (!p)
-			return NULL;
-		*pp = p;
-		*ep = epoch;
-		page_fetches++;
-	}
-
-	return *pp;
-}
 
 static void writeAck(uint32_t session, uint32_t read) {
 	uint8_t *block = (uint8_t *)ScePspemuConvertAddress(ADRENALINE_ADDRESS, KERMIT_OUTPUT_MODE, ADRENALINE_SIZE);
@@ -228,18 +242,18 @@ static uint32_t sumWords(const volatile uint32_t *p, int n) {
 	memory access. 64 pages of 4 KB of the game's memory, times in us.
 */
 static void benchmarkMemory(void) {
-	enum { PAGES = 64, WORDS = GE_SGX_PAGE_SIZE / 4 };
+	enum { PAGES = 64, PAGE = 4096, WORDS = PAGE / 4 };
 	const uint32_t first = 0x88800000u;
 	uint32_t sum = 0;
 	uint32_t *buf = NULL;
-	SceUID buf_id = sceKernelAllocMemBlock("SceGeSgxBench", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, PAGES * GE_SGX_PAGE_SIZE, NULL);
+	SceUID buf_id = sceKernelAllocMemBlock("SceGeSgxBench", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, PAGES * PAGE, NULL);
 	if (buf_id < 0)
 		return;
 	sceKernelGetMemBlockBase(buf_id, (void **)&buf);
 	int i;
 	SceUInt64 t;
 
-	const uint8_t *cached = (const uint8_t *)ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	const uint8_t *cached = (const uint8_t *)ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * PAGE);
 	const uint8_t *plain = (const uint8_t *)ScePspemuConvertAddress(first, 0, 0);
 	GeSgxLog("GeSgx bench: cached map %08X, plain map %08X, CONVERT_ADDRESS %08X\n",
 		(unsigned)(uintptr_t)cached, (unsigned)(uintptr_t)plain, (unsigned)CONVERT_ADDRESS(first));
@@ -259,16 +273,16 @@ static void benchmarkMemory(void) {
 	// invalidate only, one call per page
 	t = sceKernelGetProcessTimeWide();
 	for (i = 0; i < PAGES; i++)
-		ScePspemuConvertAddress(first + i * GE_SGX_PAGE_SIZE, KERMIT_INPUT_MODE, GE_SGX_PAGE_SIZE);
+		ScePspemuConvertAddress(first + i * PAGE, KERMIT_INPUT_MODE, PAGE);
 	uint32_t t_inval_page = (uint32_t)(sceKernelGetProcessTimeWide() - t);
 
 	// invalidate the 256 KB in one call
 	t = sceKernelGetProcessTimeWide();
-	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * PAGE);
 	uint32_t t_inval_all = (uint32_t)(sceKernelGetProcessTimeWide() - t);
 
 	// read after invalidation (cache misses)
-	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * PAGE);
 	t = sceKernelGetProcessTimeWide();
 	sum += sumWords((const volatile uint32_t *)cached, PAGES * WORDS);
 	uint32_t t_read_cold = (uint32_t)(sceKernelGetProcessTimeWide() - t);
@@ -292,11 +306,11 @@ static void benchmarkMemory(void) {
 	// DMA into our buffer: one copy per page, then all at once
 	t = sceKernelGetProcessTimeWide();
 	for (i = 0; i < PAGES; i++)
-		sceDmacMemcpy(&buf[i * WORDS], cached + i * GE_SGX_PAGE_SIZE, GE_SGX_PAGE_SIZE);
+		sceDmacMemcpy(&buf[i * WORDS], cached + i * PAGE, PAGE);
 	uint32_t t_dma_page = (uint32_t)(sceKernelGetProcessTimeWide() - t);
 
 	t = sceKernelGetProcessTimeWide();
-	sceDmacMemcpy(buf, cached, PAGES * GE_SGX_PAGE_SIZE);
+	sceDmacMemcpy(buf, cached, PAGES * PAGE);
 	uint32_t t_dma_all = (uint32_t)(sceKernelGetProcessTimeWide() - t);
 
 	t = sceKernelGetProcessTimeWide();
@@ -304,10 +318,25 @@ static void benchmarkMemory(void) {
 	uint32_t t_read_buf = (uint32_t)(sceKernelGetProcessTimeWide() - t);
 
 	// memcpy with the CPU from the invalidated mapping
-	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * PAGE);
 	t = sceKernelGetProcessTimeWide();
-	memcpy(buf, cached, PAGES * GE_SGX_PAGE_SIZE);
+	memcpy(buf, cached, PAGES * PAGE);
 	uint32_t t_memcpy = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// memcpy in blocks of 64, 256, 1024 bytes (the walker's way)
+	uint32_t t_blocks[3];
+	static const int block_sizes[3] = { 64, 256, 1024 };
+	int k;
+	for (k = 0; k < 3; k++) {
+		int bs = block_sizes[k], n = PAGES * PAGE / bs;
+		t = sceKernelGetProcessTimeWide();
+		for (i = 0; i < n; i++)
+			memcpy((uint8_t *)buf + (i & 15) * bs, cached + i * bs, bs);
+		t_blocks[k] = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+	}
+
+	GeSgxLog("GeSgx bench (us, 256 KB in blocks of 64/256/1024): %u %u %u\n",
+		(unsigned)t_blocks[0], (unsigned)t_blocks[1], (unsigned)t_blocks[2]);
 
 	GeSgxLog("GeSgx bench (us, 64 x 4 KB): clock x1000 %u | inval per page %u, all %u | read cold %u, warm %u, L1 %u, plain map %u | dma per page %u, all %u, read copy %u | memcpy %u (sum %08X)\n",
 		(unsigned)t_clock, (unsigned)t_inval_page, (unsigned)t_inval_all,
@@ -327,8 +356,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	// Per second
 	SceUInt64 second_start = sceKernelGetProcessTimeWide();
 	SceUInt64 log_start = second_start;
-	uint32_t flips = 0, events = 0, walk_us = 0, walk_max_us = 0, fetches_start = page_fetches;
-	uint32_t calls_start = page_calls, inval_start = inval_us;
+	uint32_t flips = 0, events = 0, walk_us = 0, walk_max_us = 0, fetches_start = block_copies;
+	uint32_t calls_start = block_calls;
 	GeSgxFrame rates;
 	memset(&rates, 0, sizeof(rates));
 
@@ -341,7 +370,15 @@ static int GeSgxThread(SceSize args, void *argp) {
 
 	benchmarkMemory();
 
-	geSgxWalkerInit(&walker, pageFn, NULL);
+	ram_map = (const uint8_t *)ScePspemuConvertAddress(0x80000000u | RAM_START, 0, 0);
+	vram_map = (const uint8_t *)ScePspemuConvertAddress(VRAM_START, 0, 0);
+	if (!ram_map || !vram_map || !initBlockCache()) {
+		GeSgxLog("GeSgx: no memory map (%08X %08X) or block cache\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
+		return 0;
+	}
+	GeSgxLog("GeSgx: RAM map %08X, VRAM map %08X\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
+
+	geSgxWalkerInit(&walker, blockFn, NULL);
 
 	while (1) {
 		if (start_seq != seen_seq) {
@@ -477,14 +514,14 @@ per_second:;
 			rates.events = events;
 			rates.walk_us = walk_us;
 			rates.walk_max_us = walk_max_us;
-			rates.invalidates = page_fetches - fetches_start;
+			rates.invalidates = block_copies - fetches_start;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) inval %u us pages %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
-					(unsigned)(inval_us - inval_start), (unsigned)rates.invalidates, (unsigned)(page_calls - calls_start),
+					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
@@ -492,9 +529,8 @@ per_second:;
 
 			second_start = now;
 			flips = events = walk_us = walk_max_us = 0;
-			fetches_start = page_fetches;
-			calls_start = page_calls;
-			inval_start = inval_us;
+			fetches_start = block_copies;
+			calls_start = block_calls;
 		}
 	}
 
