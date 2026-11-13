@@ -59,8 +59,20 @@ static inline void memorySync(void) {
 	asm volatile ("sync" ::: "memory");
 }
 
+// Same as pspSdkDisableInterrupts/EnableInterrupts (Allegrex interrupt
+// controller), without importing InterruptManagerForKernel
+static inline u32 interruptsOff(void) {
+	u32 flags;
+	asm volatile ("mfic %0, $0\n\tmtic $0, $0\n\tsync" : "=r"(flags) :: "memory");
+	return flags;
+}
+
+static inline void interruptsRestore(u32 flags) {
+	asm volatile ("mtic %0, $0\n\tsync" :: "r"(flags) : "memory");
+}
+
 static void ringPush(u32 type, u32 a, u32 b, u32 c, u32 d) {
-	int intr = sceKernelCpuSuspendIntr();
+	u32 intr = interruptsOff();
 
 	u32 w = ring->write;
 	u32 read = shared->read;
@@ -81,7 +93,7 @@ static void ringPush(u32 type, u32 a, u32 b, u32 c, u32 d) {
 		ring->write = w + 1;
 	}
 
-	sceKernelCpuResumeIntr(intr);
+	interruptsRestore(intr);
 }
 
 static u32 timeNow(void) {
