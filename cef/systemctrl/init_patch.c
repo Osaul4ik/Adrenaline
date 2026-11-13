@@ -19,6 +19,7 @@
 #include <common.h>
 
 #include "main.h"
+#include "ge_native.h"
 #include "init_patch.h"
 
 SceUID (* sceKernelLoadModuleMs2Handler)(const char *path, int flags, SceKernelLMOption *option);
@@ -158,6 +159,7 @@ int sceKernelStartModulePatched(SceUID modid, SceSize argsize, void *argp, int *
 	char *plug_buf = NULL;
 	char *p;
 	int res;
+	int plugins_handled = 0;
 
 	if (mod != NULL) {
 		if (strcmp(mod->modname, "vsh_module") == 0) {
@@ -192,6 +194,7 @@ int sceKernelStartModulePatched(SceUID modid, SceSize argsize, void *argp, int *
 				SceUID fd;
 
 				plugindone = 1;
+				plugins_handled = 1;
 
 				int type = sceKernelInitKeyConfig();
 
@@ -257,6 +260,10 @@ int sceKernelStartModulePatched(SceUID modid, SceSize argsize, void *argp, int *
 	}
 
 START_MODULE:
+	// After the plugins, so that a standalone native resolution plugin wins
+	if (plugins_handled)
+		GeNativeInit();
+
 	res = sceKernelStartModule661(modid, argsize, argp, status, option);
 
 	if (plug_buf) {

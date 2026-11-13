@@ -99,6 +99,7 @@ static MenuEntry settings_entries[] = {
   { "Graphics Filtering",        MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.graphics_filtering, graphics_options, sizeof(graphics_options) / sizeof(char **) },
   { "Smooth Graphics",           MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.no_smooth_graphics, yes_no_options, sizeof(yes_no_options) / sizeof(char **) },
   { "f.lux Filter Color",        MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.flux_mode, flux_mode_options, sizeof(flux_mode_options) / sizeof(char **) },
+  { "Native Resolution (PSP)",   MENU_ENTRY_TYPE_OPTION, 0, NULL, &config.native_resolution, no_yes_options, sizeof(no_yes_options) / sizeof(char **) },
   { "Screen Scale X (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_x, NULL, 0 },
   { "Screen Scale Y (PSP)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.psp_screen_scale_y, NULL, 0 },
   { "Screen Scale X (PS1)",      MENU_ENTRY_TYPE_SCALE,  0, NULL, (int *)&config.ps1_screen_scale_x, NULL, 0 },
@@ -197,6 +198,8 @@ int ExitAdrenalineMenu() {
   if (old_config.ms_location != config.ms_location)
     SendAdrenalineRequest(ADRENALINE_PSP_CMD_REINSERT_MS);
 
+  SetNativeResolutionConfig();
+
   SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
   sceDisplayWaitVblankStart();
 
@@ -280,6 +283,14 @@ void drawMenu() {
     if (tab_sel == 2 && menu_sel == 0 && config.graphics_filtering == 0) {
       char *title = "All graphics related options are not taking effect with the Original rendering mode.";
       pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, title)), FONT_Y_LINE(17), WHITE, FONT_SIZE, title);
+    }
+
+    // Info about native resolution
+    if (tab_sel == 2 && menu_entries[menu_sel].value == &config.native_resolution) {
+      char *line1 = "Renders PSP games at 960x544. Applies on the next game start.";
+      char *line2 = "Hold L while a game starts to skip it. Not with high memory layout.";
+      pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line1)), FONT_Y_LINE(16), WHITE, FONT_SIZE, line1);
+      pgf_draw_textf(WINDOW_X + ALIGN_CENTER(WINDOW_WIDTH, vita2d_pgf_text_width(font, FONT_SIZE, line2)), FONT_Y_LINE(17), WHITE, FONT_SIZE, line2);
     }
   } else {
     drawStates();
@@ -389,7 +400,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
   vita2d_init();
   font = vita2d_load_default_pgf();
 
-  vita2d_texture *native_tex = vita2d_create_empty_texture_data(SCREEN_WIDTH, SCREEN_HEIGHT, CONVERT_ADDRESS(NATIVE_FRAMEBUFFER), SCE_GXM_TEXTURE_FORMAT_U5U6U5_BGR);
+  vita2d_texture *native_tex = vita2d_create_empty_texture_data(SCREEN_WIDTH, SCREEN_HEIGHT, (void *)CONVERT_ADDRESS(NATIVE_FRAMEBUFFER), SCE_GXM_TEXTURE_FORMAT_U5U6U5_BGR);
   if (!native_tex)
     return -1;
 
@@ -474,9 +485,18 @@ int AdrenalineDraw(SceSize args, void *argp) {
   // keep track of entering pops mode
   int lastPops = 0;
 
+  // keep track of native resolution output
+  int last_draw_native = 0;
+
   while (1) {
     int draw_native = *(uint32_t *)CONVERT_ADDRESS(DRAW_NATIVE);
     SceAdrenaline *adrenaline = (SceAdrenaline *)CONVERT_ADDRESS(ADRENALINE_ADDRESS);
+
+    // Native output stopped (systemctrl falls back to the game's own framebuffer,
+    // e.g. while a video plays): give the screen back to the PSP framebuffer
+    if (last_draw_native && !draw_native && config.graphics_filtering == 0 && !menu_open)
+      SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
+    last_draw_native = draw_native;
 
     // pause/unpause pops once after switching from psp to pops mode
     // this pause/unpause fixes slowdown in PS1 games that used to require manually entering/exiting menu

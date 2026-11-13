@@ -12,6 +12,7 @@
 	IMPORT_FUNC  "SysMemForKernel",0x83B5226D,sceKernelSetDdrMemoryProtection661
 	IMPORT_FUNC  "SysMemForKernel",0x36C503A9,sceKernelGetSystemStatus661
 	IMPORT_FUNC  "SysMemForKernel",0xEF29061C,sceKernelGetGameInfo661
+	IMPORT_FUNC  "SysMemForKernel",0xC4EEAF20,sceKernelQueryMemoryPartitionInfo661
 
 	IMPORT_START "LoadCoreForKernel",0x00010011
 	IMPORT_FUNC  "LoadCoreForKernel",0xF6B1BF0F,sceKernelFindModuleByName661

@@ -80,6 +80,7 @@ typedef struct {
   float ps1_screen_scale_x;
   float ps1_screen_scale_y;
   int usbdevice;
+  int native_resolution;
 } AdrenalineConfig;
 
 extern AdrenalineConfig config;
@@ -128,5 +129,6 @@ void lockPower();
 void unlockPower();
 
 void SendAdrenalineRequest(int cmd);
+void SetNativeResolutionConfig();
 
 #endif

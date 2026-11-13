@@ -56,6 +56,7 @@ void *sceKernelGetBlockHeadAddr661(SceUID blockid);
 int sceKernelSetDdrMemoryProtection661(void *addr, int size, int prot);
 int sceKernelGetSystemStatus661();
 void *sceKernelGetGameInfo661();
+int sceKernelQueryMemoryPartitionInfo661(int pid, PspSysmemPartitionInfo *info);
 
 SceModule2 *sceKernelFindModuleByName661(const char *modname);
 SceModule2 *sceKernelFindModuleByAddress661(u32 addr);

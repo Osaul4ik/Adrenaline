@@ -138,6 +138,14 @@ void SendAdrenalineRequest(int cmd) {
   sceCompatInterrupt(KERMIT_VIRTUAL_INTR_IMPOSE_CH1);
 }
 
+// Tell systemctrl whether to render games at native resolution.
+// It is read when a game starts, so a change applies to the next game.
+void SetNativeResolutionConfig() {
+  uint32_t *flag = (uint32_t *)ScePspemuConvertAddress(NATIVE_RES_CONFIG, KERMIT_OUTPUT_MODE, sizeof(uint32_t));
+  *flag = config.native_resolution ? NATIVE_RES_MAGIC : 0;
+  ScePspemuWritebackCache(flag, sizeof(uint32_t));
+}
+
 #define LZ4_ACCELERATION 8
 #define SAVESTATE_TEMP_SIZE (32 * 1024 * 1024)
 
@@ -451,6 +459,9 @@ static int sceCompatWaitSpecialRequestPatched(int mode) {
 
   // Init Adrenaline
   InitAdrenaline();
+
+  // Pass the native resolution option to systemctrl
+  SetNativeResolutionConfig();
 
   // Clear 0x8A000000 memory
   sceDmacMemset((void *)0x63000000, 0, 16 * 1024 * 1024);
