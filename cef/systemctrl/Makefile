@@ -6,7 +6,7 @@ OBJS = main.o adrenaline.o executable_patch.o libraries_patch.o io_patch.o init_
 	   nodrm.o conf.o malloc.o kubridge.o systemctrl.o LflashFatfmt.o ge_native.o ge_native_list.o string_clone.o setjmp_clone.o imports.o exports.o
 
 INCDIR = ../include
-CFLAGS = -O2 -Os -G0 -Wall -fshort-wchar -fno-pic -mno-check-zero-division
+CFLAGS = -O2 -Os -G0 -Wall -fshort-wchar -fno-pic -mno-check-zero-division -DGE_NATIVE_TRACE
 CXXFLAGS = $(CFLAGS) -fno-exceptions -fno-rtti
 ASFLAGS = $(CFLAGS)
 
