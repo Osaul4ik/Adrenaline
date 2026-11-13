@@ -62,6 +62,8 @@ static u32 trace_len = 0;
 static int trace_frames_left = 0;
 static int trace_armed = 1;
 static int trace_count = 0;
+static u32 trace_flips = 0;
+static int trace_auto_done = 0;
 static int (* _ctrlPeek)(SceCtrlData *pad_data, int count);
 
 static void traceAppend(const char *s, int n) {
@@ -141,7 +143,16 @@ static void traceWrite(void) {
 	}
 	pspSdkSetK1(k1);
 
+	log("GeNative: trace %d written to %s (%d bytes)\n", trace_count, path, (int)trace_len);
 	trace_count++;
+}
+
+static void traceStart(const char *why) {
+	trace_len = 0;
+	trace_frames_left = TRACE_FRAMES;
+	geNativeTrace("GE trace %d (%s), frames %d\n--- frame\n", trace_count, why, TRACE_FRAMES);
+	geNativeTraceOn = 1;
+	log("GeNative: trace %d started (%s)\n", trace_count, why);
 }
 
 /* Called on every display flip */
@@ -157,20 +168,32 @@ static void traceFlip(u32 top, int bufferwidth, int pixelformat, u32 draws) {
 		return;
 	}
 
+	if (trace_flips == 0)
+		log("GeNative: first display flip, top %08X width %d format %d, draws %d\n", (unsigned int)top, bufferwidth, pixelformat, (int)draws);
+
+	// One automatic capture ~30 s into the game, in case the combo is not usable
+	if (++trace_flips == 1800 && !trace_auto_done) {
+		trace_auto_done = 1;
+		traceStart("auto");
+		return;
+	}
+
 	if (!_ctrlPeek)
 		return;
 
+	// Called from the game's syscall: the driver must see a kernel caller,
+	// otherwise it refuses to write into our (kernel stack) buffer
 	SceCtrlData pad;
 	memset(&pad, 0, sizeof(pad));
+	int k1 = pspSdkSetK1(0);
 	_ctrlPeek(&pad, 1);
+	pspSdkSetK1(k1);
+
 	u32 combo = PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER | PSP_CTRL_SELECT;
 	if ((pad.Buttons & combo) == combo) {
 		if (trace_armed) {
 			trace_armed = 0;
-			trace_len = 0;
-			trace_frames_left = TRACE_FRAMES;
-			geNativeTrace("GE trace %d, frames %d\n--- frame\n", trace_count, TRACE_FRAMES);
-			geNativeTraceOn = 1;
+			traceStart("L+R+SELECT");
 		}
 	} else {
 		trace_armed = 1;
