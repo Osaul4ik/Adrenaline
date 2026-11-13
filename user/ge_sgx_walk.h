@@ -126,6 +126,12 @@ typedef struct {
 
 typedef int32_t (* GeSgxTextureFn)(void *user, const GeSgxTexDesc *desc);
 
+/*
+	Optional: copies size bytes of PSP memory at addr into dst in one go
+	(DMA), for the vertices of big primitives. Returns 0 if it cannot.
+*/
+typedef int (* GeSgxBulkFn)(uint32_t addr, void *dst, uint32_t size);
+
 #define GE_SGX_CLUT_BYTES 1024
 #define GE_SGX_MAX_ALIASES 4
 
@@ -176,6 +182,9 @@ typedef struct {
 	GeSgxFrameData *frame;
 	GeSgxTextureFn texture_fn;
 	void *texture_user;
+	GeSgxBulkFn bulk_fn;
+	// A register, matrix or CLUT changed since the last primitive built
+	int state_dirty;
 	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];
 	int naliases;
 

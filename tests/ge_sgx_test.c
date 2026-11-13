@@ -539,7 +539,8 @@ static void testBuildSprites(void) {
 	geSgxWalkerRun(w);
 
 	CHECK(frame.ndraws == 1 && frame.nvertices == 8 && frame.nindices == 12, "draws %u vertices %u indices %u", frame.ndraws, frame.nvertices, frame.nindices);
-	CHECK(tex_calls == 2, "texture lookups %d", tex_calls);
+	/* the second PRIM in the same state: no new lookup, no rebuild */
+	CHECK(tex_calls == 1 && frame.state_builds == 1, "texture lookups %d, state builds %u", tex_calls, frame.state_builds);
 	CHECK(last_desc.addr == 0x09123450 && last_desc.bufw == 64 && last_desc.w == 64 && last_desc.h == 16 && last_desc.format == GE_TFMT_8888 && !last_desc.swizzle,
 	      "desc addr %08x bufw %u %ux%u fmt %u", last_desc.addr, last_desc.bufw, last_desc.w, last_desc.h, last_desc.format);
 	if (frame.ndraws == 1) {

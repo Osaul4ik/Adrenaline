@@ -150,6 +150,15 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 	return NULL;
 }
 
+// Vertices of big primitives: one DMA (about 80 us a call, then 2 ns/byte against 11 for a copy)
+static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
+	const uint8_t *src = geSgxPspPtr(addr, size);
+	if (!src)
+		return 0;
+	sceDmacMemcpy(dst, src, size);
+	return 1;
+}
+
 /*
 	Frames for the GXM renderer: the walker builds one while it walks, and
 	publishes it at the display flip; the draw thread renders the newest
@@ -157,7 +166,7 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 	(some draw thread loops after it was rendered).
 */
 #define FRAME_SLOTS 4
-#define FRAME_VERTICES 65536
+#define FRAME_VERTICES 98304
 #define FRAME_INDICES (3 * 65536)
 #define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
@@ -185,7 +194,7 @@ static int slots_ready = 0;
 static FrameSlot *building = NULL;
 static uint32_t frame_seq_counter = 0;
 static volatile uint32_t draw_tick = 0;
-static uint32_t frames_dropped = 0, frames_published = 0;
+static uint32_t frames_dropped = 0, frames_published = 0, frames_skipped = 0;
 
 static int initSlots(void) {
 	if (slots_ready)
@@ -247,6 +256,12 @@ static void acquireSlot(void) {
 static void publishSlot(uint32_t top) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
+
+	// Walked but not built (the walker was behind): nothing to show, the slot is free again
+	if (building && !walker.frame) {
+		building->state = SLOT_FREE;
+		building = NULL;
+	}
 
 	if (building) {
 		building->fb = fb;
@@ -594,6 +609,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
+	uint32_t built_vertices = 0, built_states = 0; // per log interval
 	SceUInt64 session_start = 0;
 
 	// Per second
@@ -630,6 +646,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		GeSgxLog("GeSgx: frames %d, texture cache %d\n", slots_ok, tex_ok);
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
+			walker.bulk_fn = bulkFn;
 			acquireSlot();
 		}
 	}
@@ -741,12 +758,32 @@ static int GeSgxThread(SceSize args, void *argp) {
 				case GE_SGX_EVENT_FLIP: {
 					int nrects = geSgxWalkerFlip(&walker, e->a, rects, GE_SGX_FRAME_RECTS, &frame_stats);
 					if (walker.texture_fn) {
-						frame_stats_3d = building ? building->data.draws_3d : 0;
-						frame_stats_indices = building ? building->data.nindices : 0;
-						frame_stats_other = building ? building->data.skipped_other : 0;
-						frame_stats_draws = building ? building->data.ndraws : 0;
-						frame_stats_verts = building ? building->data.nvertices : 0;
+						if (building && walker.frame) {
+							frame_stats_3d = building->data.draws_3d;
+							frame_stats_indices = building->data.nindices;
+							frame_stats_other = building->data.skipped_other;
+							frame_stats_draws = building->data.ndraws;
+							frame_stats_verts = building->data.nvertices;
+							built_vertices += building->data.vertices_built;
+							built_states += building->data.state_builds;
+						}
 						publishSlot(e->a);
+
+						/*
+							Behind: the next frame is already queued (another flip waits in
+							the ring). Its lists are walked to stay in step, but not built,
+							so the walker catches up instead of falling further behind.
+						*/
+						int behind = (write - read) > n;
+						uint32_t j;
+						for (j = i + 1; j < n && !behind; j++) {
+							if (ring->events[(read + j) & mask].type == GE_SGX_EVENT_FLIP)
+								behind = 1;
+						}
+						if (behind && walker.frame) {
+							walker.frame = NULL;
+							frames_skipped++;
+						}
 					}
 					publish(rects, nrects, &frame_stats, &rates);
 					last_flip_time = sceKernelGetProcessTimeWide();
@@ -809,14 +846,16 @@ per_second:;
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
 			}
 
-			if (walker.texture_fn && (now - log_start < 1000 || now - session_start < 30 * 1000 * 1000)) {
+			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | published %u dropped %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | interval: vertices %u states %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d, (unsigned)frame_stats_other,
-					(unsigned)frames_published, (unsigned)frames_dropped,
+					(unsigned)built_vertices, (unsigned)built_states,
+					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
+				built_vertices = built_states = 0;
 			}
 
 			if (now - thread_report >= LOG_INTERVAL_US) {

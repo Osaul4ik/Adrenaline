@@ -541,21 +541,28 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 			end = stall - block;
 		uint32_t start = off;
 		uint32_t op = 0, cmd = 0;
+		uint32_t changed = 0;
 
 		while (off < end) {
 			memcpy(&op, ptr + off, 4);
 			off += 4;
 			cmd = op >> 24;
-			regs[cmd] = op;
 			if (special_cmd[cmd])
 				goto special;
+			changed |= regs[cmd] ^ op;
+			regs[cmd] = op;
 		}
 
+		if (changed)
+			w->state_dirty = 1;
 		commands += (off - start) / 4;
 		pc = block + off;
 		continue;
 
 special:
+		if (changed)
+			w->state_dirty = 1;
+		regs[cmd] = op;
 		commands += (off - start) / 4;
 		{
 			uint32_t data = op & 0x00FFFFFF;
@@ -609,11 +616,13 @@ special:
 					break;
 				case GE_CMD_LOADCLUT:
 					geSgxBuildLoadClut(w, data);
+					w->state_dirty = 1;
 					break;
 				case GE_CMD_TRANSFERSTART:
 					geSgxBuildTransfer(w);
 					break;
 				// Matrix uploads: a number, then the values one by one
+				// (state_dirty: see below the switch)
 				case GE_CMD_BONEMATRIXNUMBER:
 					w->mtx.bone_n = (uint8_t)(data & 0x7F);
 					break;
@@ -656,6 +665,8 @@ special:
 				default:
 					break;
 			}
+			if (cmd >= GE_CMD_BONEMATRIXNUMBER && cmd <= GE_CMD_TGENMATRIXDATA)
+				w->state_dirty = 1;
 		}
 	}
 
@@ -684,16 +695,19 @@ void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user) {
 	w->page_fn = page_fn;
 	w->user = user;
 	w->page = NO_PAGE;
+	w->state_dirty = 1;
 }
 
 void geSgxWalkerReset(GeSgxWalker *w) {
 	GeSgxFrameData *frame = w->frame;
 	GeSgxTextureFn texture_fn = w->texture_fn;
 	void *texture_user = w->texture_user;
+	GeSgxBulkFn bulk_fn = w->bulk_fn;
 	geSgxWalkerInit(w, w->page_fn, w->user);
 	w->frame = frame;
 	w->texture_fn = texture_fn;
 	w->texture_user = texture_user;
+	w->bulk_fn = bulk_fn;
 }
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {
@@ -763,6 +777,9 @@ int geSgxWalkerFlip(GeSgxWalker *w, uint32_t top, GeSgxRect *out, int max, GeSgx
 	uint32_t fb = 0xFFFFFFFFu;
 	if (addr >= 0x04000000u && addr < 0x04800000u)
 		fb = addr & 0x001FFFFFu;
+
+	// A new frame: textures are checked again, the draw state is built anew
+	w->state_dirty = 1;
 
 	int n = 0, kept = 0, i;
 	for (i = 0; i < w->nrects; i++) {

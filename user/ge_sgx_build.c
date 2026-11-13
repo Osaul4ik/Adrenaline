@@ -502,14 +502,41 @@ static inline uint32_t packColor(const float *c) {
 
 #define MAX_VERTEX_BYTES 512
 
+/*
+	Vertex data of the current primitive: its whole range copied in one go
+	(one DMA for big ones), or vertex by vertex for scattered indices.
+*/
+#define BULK_BYTES (256 * 1024)
+static uint8_t bulk[BULK_BYTES];
+static uint32_t bulk_first, bulk_count;
+
+static int bulkLoad(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t first, uint32_t count) {
+	bulk_count = 0;
+	uint32_t bytes = count * l->size;
+	if (bytes > BULK_BYTES)
+		return 0;
+	uint32_t addr = w->vaddr + first * l->size;
+	if (!(w->bulk_fn && bytes >= 8 * 1024 && w->bulk_fn(addr, bulk, bytes)) && !geSgxRead(w, addr, bulk, bytes))
+		return 0;
+	bulk_first = first;
+	bulk_count = count;
+	return 1;
+}
+
+static const uint8_t *vertexData(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t index, uint8_t *tmp) {
+	if (index - bulk_first < bulk_count)
+		return bulk + (index - bulk_first) * l->size;
+	if (l->size > MAX_VERTEX_BYTES || !geSgxRead(w, w->vaddr + index * l->size, tmp, l->size))
+		return NULL;
+	return tmp;
+}
+
 // One vertex of the current primitive, ready for the GPU
 static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex *out) {
 	const GeSgxVertexLayout *l = x->l;
-	uint8_t buf[MAX_VERTEX_BYTES];
-	uint32_t size = l->size;
-	if (size > sizeof(buf) || !l->pos_fmt)
-		return 0;
-	if (!geSgxRead(w, w->vaddr + index * size, buf, size))
+	uint8_t tmp[MAX_VERTEX_BYTES];
+	const uint8_t *buf = vertexData(w, l, index, tmp);
+	if (!buf)
 		return 0;
 
 	if (x->through) {
@@ -646,6 +673,14 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 	out->y = x->vp_y[0] * cy + x->vp_y[1] * cw;
 	out->z = x->vp_z[0] * cz + x->vp_z[1] * cw;
 	out->w = cw;
+	// The PSP clamps the depth instead of clipping at the far plane (and only
+	// clips at the near one): keep z inside 0..w, the GPU then clips at w = 0
+	if (cw > 0.0f) {
+		if (out->z < 0.0f)
+			out->z = 0.0f;
+		else if (out->z > cw)
+			out->z = cw;
+	}
 
 	// Texture coordinates
 	switch (x->uvgen) {
@@ -795,8 +830,34 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	if (count == 0 || !l->pos_fmt)
 		return;
 
-	GeSgxDraw d;
-	drawState(w, &d);
+	/*
+		The draw state and the transform setup only change when a register,
+		matrix or CLUT did (lists draw many primitives in one state).
+	*/
+	static GeSgxDraw cached_d;
+	static Xform cached_x;
+	static const GeSgxWalker *cached_w = NULL;
+	if (w->state_dirty || cached_w != w) {
+		drawState(w, &cached_d);
+		xformInit(w, l, &cached_x);
+		cached_x.tex_w = cached_x.tex_h = 1.0f;
+		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
+			cached_d.texture = drawTexture(w);
+			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
+			cached_x.tex_w = 1.0f / (float)(1u << (size & 0xF));
+			cached_x.tex_h = 1.0f / (float)(1u << ((size >> 8) & 0xF));
+		}
+		cached_w = w;
+		w->state_dirty = 0;
+		f->state_builds++;
+	}
+	if ((cached_d.flags & GE_SGX_DRAW_TEXTURED) && cached_d.texture < 0) {
+		f->skipped_other++;
+		return;
+	}
+
+	GeSgxDraw d = cached_d;
+	const Xform *xp = &cached_x;
 
 	// Output indices per input vertex, at most
 	uint32_t nidx;
@@ -821,20 +882,6 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	if (f->nvertices + nverts_max > f->max_vertices || f->nindices + nidx > f->max_indices || f->ndraws >= f->max_draws) {
 		f->skipped_other++;
 		return;
-	}
-
-	Xform x;
-	xformInit(w, l, &x);
-	x.tex_w = x.tex_h = 1.0f;
-	if (d.flags & GE_SGX_DRAW_TEXTURED) {
-		d.texture = drawTexture(w);
-		if (d.texture < 0) {
-			f->skipped_other++;
-			return;
-		}
-		uint32_t size = reg(w, GE_CMD_TEXSIZE0);
-		x.tex_w = 1.0f / (float)(1u << (size & 0xF));
-		x.tex_h = 1.0f / (float)(1u << ((size >> 8) & 0xF));
 	}
 
 	// Which vertex each primitive vertex is
@@ -870,13 +917,22 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	uint16_t *iout = &f->indices[istart];
 	uint32_t nv = 0, ni = 0;
 
+	// The vertex data: the range of a non-indexed or compact indexed primitive at once
+	uint32_t range = imax - imin + 1;
+	int compact = l->index_size && range <= count;
+	bulk_count = 0;
+	if (!l->index_size)
+		bulkLoad(w, l, 0, count);
+	else if (compact)
+		bulkLoad(w, l, imin, range);
+
 	if (type == GE_PRIM_RECTANGLES) {
 		// Sprites: two corners each, screen aligned (3D ones after the projection)
 		for (i = 0; i + 1 < count; i += 2) {
 			GeSgxVertex a, b;
-			if (!vertexOut(w, &x, prim_index[i], &a) || !vertexOut(w, &x, prim_index[i + 1], &b))
+			if (!vertexOut(w, xp, prim_index[i], &a) || !vertexOut(w, xp, prim_index[i + 1], &b))
 				goto fail;
-			if (!x.through) {
+			if (!xp->through) {
 				if (a.w <= 0.0f || b.w <= 0.0f)
 					continue;
 				float ia = 1.0f / a.w, ib = 1.0f / b.w;
@@ -900,11 +956,9 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		}
 	} else {
 		// Local vertex numbers: the compact index range, or one vertex per index
-		uint32_t range = imax - imin + 1;
-		int compact = l->index_size && range <= count;
 		if (compact) {
 			for (i = 0; i < range; i++) {
-				if (!vertexOut(w, &x, imin + i, &vout[i]))
+				if (!vertexOut(w, xp, imin + i, &vout[i]))
 					goto fail;
 			}
 			nv = range;
@@ -912,7 +966,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 				prim_index[i] -= imin;
 		} else {
 			for (i = 0; i < count; i++) {
-				if (!vertexOut(w, &x, prim_index[i], &vout[i]))
+				if (!vertexOut(w, xp, prim_index[i], &vout[i]))
 					goto fail;
 				prim_index[i] = i;
 			}
@@ -974,7 +1028,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 
 	f->nvertices = vstart + nv;
 	f->nindices = istart + ni;
-	if (!x.through)
+	f->vertices_built += nv;
+	if (!xp->through)
 		f->draws_3d++;
 
 	// Lists of the same state follow each other: extend the previous draw

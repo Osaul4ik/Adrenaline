@@ -109,7 +109,8 @@ typedef struct {
 
 	uint32_t draws_3d;      // transformed (not through mode) primitives built
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
-	uint32_t build_us;      // time spent building (set by the caller)
+	uint32_t vertices_built; // vertices transformed
+	uint32_t state_builds;   // times the draw state was built anew
 } GeSgxFrameData;
 
 #endif
