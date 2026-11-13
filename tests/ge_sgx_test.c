@@ -797,6 +797,10 @@ static void swizzle(uint8_t *dst, const uint8_t *src, uint32_t rowbytes, uint32_
 				memcpy(dst + (by * bxc + bx) * 128 + line * 16, src + (by * 8 + line) * rowbytes + bx * 16, 16);
 }
 
+static uint32_t rgbaT(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+	return r | (g << 8) | (b << 16) | (a << 24);
+}
+
 static void testTexconv(void) {
 	static uint8_t lin[64 * 16 * 4], swz[64 * 16 * 4], back[64 * 16 * 4], out[64 * 16 * 4];
 	uint32_t i;
@@ -806,7 +810,32 @@ static void testTexconv(void) {
 	geSgxUnswizzle(back, swz, 64 * 4, 16);
 	CHECK(memcmp(back, lin, sizeof(lin)) == 0, "unswizzle round trip");
 
-	CHECK(geSgxTexRowBytes(GE_TFMT_CLUT4, 32) == 16 && geSgxTexRowBytes(GE_TFMT_8888, 32) == 128 && geSgxTexRowBytes(GE_TFMT_DXT1, 32) == 0, "row bytes");
+	CHECK(geSgxTexRowBytes(GE_TFMT_CLUT4, 32) == 16 && geSgxTexRowBytes(GE_TFMT_8888, 32) == 128 && geSgxTexRowBytes(GE_TFMT_DXT1, 32) == 64 &&
+	      geSgxTexRowBytes(GE_TFMT_DXT5, 32) == 128 && geSgxTexRowBytes(11, 32) == 0, "row bytes");
+	{
+		/* DXT1 8x4: two blocks. Block 0: c1 = pure red 0xF800 > c2 = pure blue 0x001F, indices row 0 = 0,1,2,3 */
+		uint8_t dxt[16] = { 0xE4, 0x00, 0x55, 0xFF, 0x00, 0xF8, 0x1F, 0x00,
+		                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }; /* block 1: c1 == c2 == 0, index 0 -> black opaque */
+		static uint32_t px[8 * 4];
+		GeSgxTexDesc dd;
+		memset(&dd, 0, sizeof(dd));
+		dd.format = GE_TFMT_DXT1; dd.w = 8; dd.h = 4; dd.bufw = 8;
+		CHECK(geSgxTexRows(&dd) == 1, "dxt rows %u", geSgxTexRows(&dd));
+		CHECK(geSgxTexConvert(&dd, dxt, 16, (uint8_t *)px, 8 * 4, NULL), "dxt1 convert");
+		/* blue in the low bits of the PSP 565: 0xF800 is red -> 0xFF0000F8 */
+		CHECK(px[0] == 0xFF0000F8u && px[1] == 0xFFF80000u, "dxt1 colours %08x %08x", px[0], px[1]);
+		CHECK(px[2] == rgbaT(0xA5, 0, 0x52, 0xFF) && px[3] == rgbaT(0x52, 0, 0xA5, 0xFF), "dxt1 mix %08x %08x", px[2], px[3]);
+		/* rows 1..3: indices all 0, all 1, all 3; block 1 (c1 == c2 == 0): opaque black */
+		CHECK(px[8] == 0xFF0000F8u && px[16] == 0xFFF80000u && px[24] == px[3] && px[4] == 0xFF000000u && px[15] == 0xFF000000u,
+		      "dxt1 rows %08x %08x %08x %08x", px[8], px[16], px[24], px[4]);
+		/* DXT5: alpha 255 / 0 with 6 interpolated, index bits 3 per texel; DXT3: 4 bit alpha */
+		uint8_t d5[16] = { 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0x08, 0, 0, 0, 0, 0, 0xFF, 0x00 }; /* texel 0 idx 0, texel 1 idx 1 */
+		dd.format = GE_TFMT_DXT5; dd.w = 4;
+		CHECK(geSgxTexConvert(&dd, d5, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0xFF && (px[1] >> 24) == 0 && (px[0] & 0xFFFFFF) == 0xF8FCF8, "dxt5 %08x %08x", px[0], px[1]);
+		uint8_t d3[16] = { 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0x21, 0x00, 0, 0, 0, 0, 0, 0xF0 };
+		dd.format = GE_TFMT_DXT3;
+		CHECK(geSgxTexConvert(&dd, d3, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0x11 && (px[1] >> 24) == 0x22 && (px[15] >> 24) == 0xFF, "dxt3 %08x %08x %08x", px[0], px[1], px[15]);
+	}
 
 	GeSgxTexDesc d;
 	memset(&d, 0, sizeof(d));

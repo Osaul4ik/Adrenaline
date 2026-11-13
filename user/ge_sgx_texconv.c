@@ -39,13 +39,97 @@ uint32_t geSgxTexRowBytes(uint32_t format, uint32_t bufw) {
 			return bufw;
 		case GE_TFMT_CLUT4:
 			return (bufw + 1) / 2;
+		// DXT: one row of 4x4 blocks
+		case GE_TFMT_DXT1:
+			return ((bufw + 3) / 4) * 8;
+		case GE_TFMT_DXT3:
+		case GE_TFMT_DXT5:
+			return ((bufw + 3) / 4) * 16;
 		default:
-			return 0; // DXT: not yet
+			return 0;
 	}
 }
 
+static inline int isDxt(uint32_t format) {
+	return format >= GE_TFMT_DXT1 && format <= GE_TFMT_DXT5;
+}
+
 uint32_t geSgxTexRows(const GeSgxTexDesc *d) {
+	if (isDxt(d->format))
+		return (d->h + 3u) / 4; // block rows, never swizzled
 	return d->swizzle ? ((d->h + 7u) & ~7u) : d->h;
+}
+
+/*
+	PSP DXT blocks (PPSSPP DXTDecoder): the colour part has the four index
+	bytes first, then the two 565 colours (blue in the low bits); DXT3/5
+	start with that colour part, then the alpha.
+*/
+static inline uint32_t rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+	return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+static void dxtColors(const uint8_t *blk, int dxt1, uint32_t *c) {
+	uint32_t c1 = (uint32_t)blk[4] | ((uint32_t)blk[5] << 8);
+	uint32_t c2 = (uint32_t)blk[6] | ((uint32_t)blk[7] << 8);
+	uint32_t b1 = (c1 << 3) & 0xF8, b2 = (c2 << 3) & 0xF8;
+	uint32_t g1 = (c1 >> 3) & 0xFC, g2 = (c2 >> 3) & 0xFC;
+	uint32_t r1 = (c1 >> 8) & 0xF8, r2 = (c2 >> 8) & 0xF8;
+	uint32_t a = dxt1 ? 0xFF : 0;
+	c[0] = rgba(r1, g1, b1, a);
+	c[1] = rgba(r2, g2, b2, a);
+	if (c1 > c2) {
+		c[2] = rgba((r1 * 2 + r2) / 3, (g1 * 2 + g2) / 3, (b1 * 2 + b2) / 3, a);
+		c[3] = rgba((r2 * 2 + r1) / 3, (g2 * 2 + g1) / 3, (b2 * 2 + b1) / 3, a);
+	} else {
+		c[2] = rgba((r1 + r2) / 2, (g1 + g2) / 2, (b1 + b2) / 2, a);
+		c[3] = 0;
+	}
+}
+
+static void dxtBlock(uint32_t format, const uint8_t *blk, uint32_t *out, uint32_t stride_px, uint32_t bw, uint32_t bh) {
+	uint32_t c[4], x, y;
+	dxtColors(blk, format == GE_TFMT_DXT1, c);
+
+	uint8_t alpha[8];
+	uint64_t abits = 0;
+	if (format == GE_TFMT_DXT5) {
+		uint32_t d2;
+		memcpy(&d2, blk + 8, 4);
+		uint64_t d1 = (uint64_t)blk[12] | ((uint64_t)blk[13] << 8);
+		abits = (d1 << 32) | d2;
+		uint32_t a0 = blk[14], a1 = blk[15];
+		alpha[0] = (uint8_t)a0;
+		alpha[1] = (uint8_t)a1;
+		if (a0 > a1) {
+			for (x = 1; x < 7; x++)
+				alpha[x + 1] = (uint8_t)(((7 - x) * a0 + x * a1) / 7);
+		} else {
+			for (x = 1; x < 5; x++)
+				alpha[x + 1] = (uint8_t)(((5 - x) * a0 + x * a1) / 5);
+			alpha[6] = 0;
+			alpha[7] = 255;
+		}
+	}
+
+	for (y = 0; y < 4; y++) {
+		uint32_t idx = blk[y];
+		uint32_t aline = 0;
+		if (format == GE_TFMT_DXT3)
+			aline = (uint32_t)blk[8 + y * 2] | ((uint32_t)blk[9 + y * 2] << 8);
+		for (x = 0; x < 4; x++) {
+			uint32_t v = c[idx & 3];
+			idx >>= 2;
+			if (format == GE_TFMT_DXT3) {
+				v = (v & 0x00FFFFFFu) | (((aline >> (x * 4)) & 0xF) * 0x11u) << 24;
+			} else if (format == GE_TFMT_DXT5) {
+				v = (v & 0x00FFFFFFu) | ((uint32_t)alpha[abits & 7] << 24);
+				abits >>= 3;
+			}
+			if (x < bw && y < bh)
+				out[y * stride_px + x] = v;
+		}
+	}
 }
 
 uint32_t geSgxTexOutBpp(uint32_t format) {
@@ -152,6 +236,19 @@ int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowb
 				}
 			}
 			return 1;
+		case GE_TFMT_DXT1:
+		case GE_TFMT_DXT3:
+		case GE_TFMT_DXT5: {
+			uint32_t bsize = d->format == GE_TFMT_DXT1 ? 8 : 16;
+			uint32_t stride_px = dst_stride / 4;
+			for (y = 0; y < h; y += 4) {
+				const uint8_t *s = src + (y / 4) * src_rowbytes;
+				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
+				for (x = 0; x < w && (x / 4 + 1) * bsize <= src_rowbytes; x += 4)
+					dxtBlock(d->format, s + (x / 4) * bsize, o + x, stride_px, w - x < 4 ? w - x : 4, h - y < 4 ? h - y : 4);
+			}
+			return 1;
+		}
 		default:
 			return 0;
 	}

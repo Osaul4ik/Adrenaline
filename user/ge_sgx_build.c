@@ -213,6 +213,7 @@ typedef struct {
 	int skinning;
 	float wv[12];   // view * world (no skinning)
 	float proj[16];
+	float mvp[16];  // proj * view * world, 4x4 column-major
 	const GeSgxMatrices *m;
 	float vp_x[2], vp_y[2], vp_z[2]; // pixel = c[0] * clip + c[1] * w
 	float uscale, vscale, uoff, voff;
@@ -315,6 +316,17 @@ static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
 	x->skinning = l->wt_fmt != 0;
 	mul43(x->wv, m->view, m->world);
 	memcpy(x->proj, m->proj, sizeof(x->proj));
+	// The 4x3 wv as 4x4 (last row 0 0 0 1), times proj
+	for (i = 0; i < 4; i++) {
+		int r;
+		for (r = 0; r < 4; r++) {
+			const float *P = x->proj;
+			float v = P[r] * x->wv[i * 3] + P[4 + r] * x->wv[i * 3 + 1] + P[8 + r] * x->wv[i * 3 + 2];
+			if (i == 3)
+				v += P[12 + r];
+			x->mvp[i * 4 + r] = v;
+		}
+	}
 
 	// screen = center + scale * clip / w - offset, in PSP pixels; times w and the output scale
 	float offx = (reg(w, GE_CMD_OFFSETX) & 0xFFFF) * (1.0f / 16.0f);
@@ -392,6 +404,40 @@ static inline float clamp01(float v) {
 	return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 
+/*
+	x^e for x in 0..1 (lighting exponents): 2^(e * log2 x) with short
+	polynomials (about 1e-4 relative), much cheaper than powf.
+*/
+static inline float fastPow(float x, float e) {
+	if (x <= 0.0f)
+		return e == 0.0f ? 1.0f : 0.0f;
+	if (e == 0.0f)
+		return 1.0f;
+	union { float f; int32_t i; } u = { x };
+	float lg = (float)((u.i >> 23) & 0xFF) - 127.0f;
+	u.i = (u.i & 0x007FFFFF) | 0x3F800000; // mantissa 1..2
+	float m = u.f;
+	if (m > 1.41421356f) { // around 1 for the series: m in 0.707..1.414
+		m *= 0.5f;
+		lg += 1.0f;
+	}
+	float t = (m - 1.0f) / (m + 1.0f), t2 = t * t;
+	lg += 2.88539008f * t * (1.0f + t2 * (0.33333333f + t2 * (0.2f + t2 * 0.14285714f)));
+	float p = e * lg;
+	if (p < -126.0f)
+		return 0.0f;
+	if (p > 0.0f)
+		p = 0.0f; // x <= 1, e >= 0
+	float fl = (float)(int32_t)p;
+	if (fl > p)
+		fl -= 1.0f;
+	float fr = p - fl; // 0..1
+	union { float f; int32_t i; } r;
+	r.f = 1.0f + fr * (0.69314718f + fr * (0.24022651f + fr * (0.05550411f + fr * (0.00961813f + fr * 0.00133336f))));
+	r.i += (int32_t)fl << 23;
+	return r.f;
+}
+
 // Colour of a lit vertex (PPSSPP Lighter::Light); specular is added to the primary colour
 static void light(const Xform *x, const float *in, const float *pos, const float *nrm, float *out) {
 	const float *amb = (x->matupdate & 1) ? in : x->mat_ambient;
@@ -430,7 +476,7 @@ static void light(const Xform *x, const float *in, const float *pos, const float
 		if (dot < 0.0f)
 			dot = 0.0f;
 		if (lt->comp == 2)
-			dot = powf(dot, x->spec_coef);
+			dot = fastPow(dot, x->spec_coef);
 
 		float scale = 1.0f;
 		if (lt->type != 0) {
@@ -438,7 +484,7 @@ static void light(const Xform *x, const float *in, const float *pos, const float
 			scale = d > 0.0f ? clamp01(1.0f / d) : 1.0f;
 			if (lt->type >= 2) {
 				float angle = to[0] * lt->dir[0] + to[1] * lt->dir[1] + to[2] * lt->dir[2];
-				scale = angle >= lt->spot_cut ? scale * powf(angle > 0.0f ? angle : 0.0f, lt->spot_exp) : 0.0f;
+				scale = angle >= lt->spot_cut ? scale * fastPow(angle, lt->spot_exp) : 0.0f;
 			}
 		}
 		if (scale == 0.0f)
@@ -452,7 +498,7 @@ static void light(const Xform *x, const float *in, const float *pos, const float
 			normalize3(h, 1.0f);
 			float sd = h[0] * nrm[0] + h[1] * nrm[1] + h[2] * nrm[2];
 			if (sd > 0.0f) {
-				float p = powf(sd, x->spec_coef) * scale;
+				float p = fastPow(sd > 1.0f ? 1.0f : sd, x->spec_coef) * scale;
 				for (k = 0; k < 3; k++)
 					spec[k] += lt->specular[k] * spc[k] * p;
 			}
@@ -651,23 +697,30 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 		memcpy(mnrm, nrm, sizeof(mnrm));
 	}
 
-	float view[3];
+	float view[3] = { 0, 0, 0 };
 	float wpos[3], wnrm[3];
 	int need_world = x->lighting || x->uvgen == 2;
+	float cx, cy, cz, cw;
 	if (need_world) {
 		xf43(wpos, x->m->world, mpos[0], mpos[1], mpos[2]);
 		xf33(wnrm, x->m->world, mnrm[0], mnrm[1], mnrm[2]);
 		normalize3(wnrm, 1.0f);
 		xf43(view, x->m->view, wpos[0], wpos[1], wpos[2]);
+		const float *P = x->proj;
+		cx = view[0] * P[0] + view[1] * P[4] + view[2] * P[8] + P[12];
+		cy = view[0] * P[1] + view[1] * P[5] + view[2] * P[9] + P[13];
+		cz = view[0] * P[2] + view[1] * P[6] + view[2] * P[10] + P[14];
+		cw = view[0] * P[3] + view[1] * P[7] + view[2] * P[11] + P[15];
 	} else {
-		xf43(view, x->wv, mpos[0], mpos[1], mpos[2]);
+		// One 4x4 transform; the view depth only for the fog
+		const float *M = x->mvp;
+		cx = mpos[0] * M[0] + mpos[1] * M[4] + mpos[2] * M[8] + M[12];
+		cy = mpos[0] * M[1] + mpos[1] * M[5] + mpos[2] * M[9] + M[13];
+		cz = mpos[0] * M[2] + mpos[1] * M[6] + mpos[2] * M[10] + M[14];
+		cw = mpos[0] * M[3] + mpos[1] * M[7] + mpos[2] * M[11] + M[15];
+		if (x->fog)
+			view[2] = mpos[0] * x->wv[2] + mpos[1] * x->wv[5] + mpos[2] * x->wv[8] + x->wv[11];
 	}
-
-	const float *P = x->proj;
-	float cx = view[0] * P[0] + view[1] * P[4] + view[2] * P[8] + P[12];
-	float cy = view[0] * P[1] + view[1] * P[5] + view[2] * P[9] + P[13];
-	float cz = view[0] * P[2] + view[1] * P[6] + view[2] * P[10] + P[14];
-	float cw = view[0] * P[3] + view[1] * P[7] + view[2] * P[11] + P[15];
 
 	out->x = x->vp_x[0] * cx + x->vp_x[1] * cw;
 	out->y = x->vp_y[0] * cy + x->vp_y[1] * cw;

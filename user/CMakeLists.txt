@@ -120,3 +120,6 @@ add_custom_target(updater
   COMMAND bin2c adrenaline_user.suprx ../../cef/updater/adrenaline_user.h adrenaline_user
   DEPENDS adrenaline_user.suprx
 )
+
+# SGX renderer vertex pipeline: no errno for sqrtf (an inline VSQRT), fused multiply-adds
+set_source_files_properties(ge_sgx_build.c PROPERTIES COMPILE_FLAGS "-fno-math-errno -fno-trapping-math -ffp-contract=fast")
