@@ -198,8 +198,6 @@ int ExitAdrenalineMenu() {
   if (old_config.ms_location != config.ms_location)
     SendAdrenalineRequest(ADRENALINE_PSP_CMD_REINSERT_MS);
 
-  SetNativeResolutionConfig();
-
   SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
   sceDisplayWaitVblankStart();
 
