@@ -52,6 +52,12 @@ void _init_vita_newlib(void) {
   _init_vita_io();
 }
 
+// Referenced by the exit path of newer newlib versions (normally provided by
+// crt0, which this -nostartfiles module does not link). Nothing to tear down:
+// the module lives until the PspEmu process ends.
+__attribute__((weak)) void _free_vita_newlib(void) {
+}
+
 int debugPrintf(char *text, ...) {
   va_list list;
   char string[512];

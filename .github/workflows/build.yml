@@ -11,6 +11,11 @@ env:
   PSP_PACKER_VERSION: 0.1.0
   # frangarcj/vita2dlib, branch "fbo": the vita2d fork with custom shader support used by Adrenaline
   VITA2D_FORK_COMMIT: c221adb
+  # Precompiled GXP shaders (lcd3x, sharp bilinear, advanced AA, ...) referenced by
+  # user/includes/*.h. The original frangarcj/vitashaders repository is gone; this is
+  # the same raw2c-generated collection as shipped in rsn8887/SDLPoP-Vita.
+  VITASHADERS_URL: https://github.com/rsn8887/SDLPoP-Vita/raw/89df763d78f13d31a9479743e5d0c6fc2f0fe0e4/vitashaderlibs/vita-shader-collection/lib/libvitashaders.a
+  VITASHADERS_SHA256: 68b77d50c401b2636fddb2fef14cd8300d8468ec284616648ab19c6b3d63c720
 
 jobs:
   tests:
@@ -86,15 +91,14 @@ jobs:
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
 
       - name: Install vita2d fork and vitashaders
-        # The shaders are compiled into user/includes, so the vitashaders library
-        # the user module links against only has to exist.
         run: |
           git clone https://github.com/frangarcj/vita2dlib /tmp/vita2dlib
           git -C /tmp/vita2dlib checkout "${VITA2D_FORK_COMMIT}"
           make -C /tmp/vita2dlib/libvita2d -j"$(nproc)" \
             CFLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wl,-q -Wall -O3 -Iinclude -I$VITASDK/arm-vita-eabi/include/freetype2"
           make -C /tmp/vita2dlib/libvita2d install
-          arm-vita-eabi-ar rcs "$VITASDK/arm-vita-eabi/lib/libvitashaders.a"
+          curl -fsSL -o "$VITASDK/arm-vita-eabi/lib/libvitashaders.a" "${VITASHADERS_URL}"
+          echo "${VITASHADERS_SHA256}  $VITASDK/arm-vita-eabi/lib/libvitashaders.a" | sha256sum -c -
 
       - name: Build kernel stubs
         run: |
