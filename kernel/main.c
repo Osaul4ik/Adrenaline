@@ -35,7 +35,7 @@
 
 // Renamed in current vita-headers
 #ifndef ksceKernelCpuDcacheWritebackRange
-#define ksceKernelCpuDcacheWritebackRange ksceKernelDcacheCleanRange
+#define ksceKernelCpuDcacheWritebackRange ksceKernelDcacheCleanRangeForL1WBWA
 #endif
 
 int ksceKernelSysrootGetShellPid();
