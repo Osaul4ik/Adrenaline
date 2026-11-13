@@ -133,6 +133,7 @@ typedef int32_t (* GeSgxTextureFn)(void *user, const GeSgxTexDesc *desc);
 typedef int (* GeSgxBulkFn)(uint32_t addr, void *dst, uint32_t size);
 
 #define GE_SGX_CLUT_BYTES 1024
+#define GE_SGX_GPU_BAD_MAX 8
 #define GE_SGX_MAX_ALIASES 4
 
 // Framebuffer copies (block transfers) of a frame: the shown buffer may be a copy
@@ -187,6 +188,11 @@ typedef struct {
 	uint32_t (* clock_fn)(void);
 	// A register, matrix or CLUT changed since the last primitive built
 	int state_dirty;
+	// 3D draws with the GPU transform where they can (frame->raw needed),
+	// but not these vertex types (attribute bits of VERTEXTYPE)
+	int gpu_transform;
+	uint32_t gpu_bad[GE_SGX_GPU_BAD_MAX];
+	int ngpu_bad;
 	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];
 	int naliases;
 
@@ -207,6 +213,8 @@ int geSgxRead(GeSgxWalker *w, uint32_t addr, void *dst, uint32_t size);
 void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l);
 void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data);
 void geSgxBuildTransfer(GeSgxWalker *w);
+// Before the frame is published: copies the vertex data still pending
+void geSgxBuildFinish(GeSgxWalker *w);
 
 
 void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout);

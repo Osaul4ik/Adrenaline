@@ -28,6 +28,7 @@
 
 #include <stdint.h>
 #include <psp2/gxm.h>
+#include "ge_sgx_gpu.h"
 
 // Bump when the generated sources change: older cached programs are not used
 #define GE_SGX_CG_VERSION 1
@@ -39,6 +40,11 @@
 // Key of the vertex program (fragment program keys are below 0x1000; 0xFFFF
 // was the vertex program of the 2D only renderer)
 #define GE_SGX_SHADER_VERTEX 0xFFFEu
+
+static inline int geSgxCgIsVertex(uint32_t key) {
+	return key == GE_SGX_SHADER_VERTEX || (key & 0xF000u) == GE_SGX_VS_BASE;
+}
+
 
 // Cg source of a program
 int geSgxCgSource(uint32_t key, char *buf, int size);

@@ -43,6 +43,7 @@
 typedef struct {
 	uint32_t key;
 	uint32_t blend;
+	const SceGxmProgram *vgxp; // the vertex program it was made for
 	SceGxmFragmentProgram *program;
 	const SceGxmProgramParameter *alpha_ref;
 	const SceGxmProgramParameter *env;
@@ -222,7 +223,7 @@ static uint32_t blendKey(const GeSgxDraw *d) {
 	return 0x40000000u | func | (src << 4) | (dst << 8);
 }
 
-static const SceGxmProgram *fragmentGxp(uint32_t key, SceGxmShaderPatcherId *id) {
+static const SceGxmProgram *registeredGxp(uint32_t key, SceGxmShaderPatcherId *id) {
 	int i;
 	for (i = 0; i < nregistered; i++) {
 		if (registered[i].key == key) {
@@ -245,20 +246,20 @@ static const SceGxmProgram *fragmentGxp(uint32_t key, SceGxmShaderPatcherId *id)
 	return gxp;
 }
 
-static FragmentProgram *fragmentProgram(const GeSgxDraw *d) {
+static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram *vgxp) {
 	uint32_t key = geSgxShaderKey(d);
 	uint32_t blend = blendKey(d);
 	int i;
 
 	for (i = 0; i < nfragment_programs; i++) {
-		if (fragment_programs[i].key == key && fragment_programs[i].blend == blend)
+		if (fragment_programs[i].key == key && fragment_programs[i].blend == blend && fragment_programs[i].vgxp == vgxp)
 			return &fragment_programs[i];
 	}
 	if (nfragment_programs >= MAX_FRAGMENT_PROGRAMS)
 		return NULL;
 
 	SceGxmShaderPatcherId id;
-	const SceGxmProgram *gxp = fragmentGxp(key, &id);
+	const SceGxmProgram *gxp = registeredGxp(key, &id);
 	if (!gxp)
 		return NULL;
 
@@ -285,7 +286,7 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d) {
 
 	SceGxmFragmentProgram *program = NULL;
 	int res = sceGxmShaderPatcherCreateFragmentProgram(patcher, id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
-		SCE_GXM_MULTISAMPLE_NONE, pinfo, vertex_gxp, &program);
+		SCE_GXM_MULTISAMPLE_NONE, pinfo, vgxp, &program);
 	if (res < 0) {
 		GeSgxLog("GeSgx render: fragment program %04X/%08X: %08X\n", (unsigned)key, (unsigned)blend, (unsigned)res);
 		return NULL;
@@ -294,11 +295,110 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d) {
 	FragmentProgram *fp = &fragment_programs[nfragment_programs++];
 	fp->key = key;
 	fp->blend = blend;
+	fp->vgxp = vgxp;
 	fp->program = program;
 	fp->alpha_ref = sceGxmProgramFindParameterByName(gxp, "uAlphaRef");
 	fp->env = sceGxmProgramFindParameterByName(gxp, "uEnv");
 	fp->fog_color = sceGxmProgramFindParameterByName(gxp, "uFogColor");
 	return fp;
+}
+
+/*
+	Vertex programs of the GPU transform: one per vertex program key and
+	vertex shape, the attributes read straight from the PSP's vertex layout.
+*/
+#define MAX_GPU_PROGRAMS 128
+#define VTYPE_ATTRIBUTES ((3u << 0) | (7u << 2) | (3u << 5) | (3u << 7) | (3u << 9) | (7u << 14))
+
+typedef struct {
+	uint32_t vkey, vtype;
+	const SceGxmProgram *gxp;
+	SceGxmVertexProgram *program; // NULL: could not be made
+} GpuProgram;
+
+static GpuProgram gpu_programs[MAX_GPU_PROGRAMS];
+static int ngpu_programs = 0;
+volatile int ge_sgx_gpu_failed = 0;
+volatile uint32_t ge_sgx_gpu_bad[GE_SGX_GPU_BAD_MAX];
+volatile int ge_sgx_gpu_nbad = 0;
+
+static int attribute(SceGxmVertexAttribute *a, const SceGxmProgram *gxp, const char *name, uint32_t fmt_class, uint32_t fmt, uint32_t comps, uint32_t offset) {
+	const SceGxmProgramParameter *p = sceGxmProgramFindParameterByName(gxp, name);
+	if (!p)
+		return 0; // not used by the program (optimised out)
+	static const uint8_t unsigned_formats[4] = { 0, SCE_GXM_ATTRIBUTE_FORMAT_U8, SCE_GXM_ATTRIBUTE_FORMAT_U16, SCE_GXM_ATTRIBUTE_FORMAT_F32 };
+	static const uint8_t signed_formats[4] = { 0, SCE_GXM_ATTRIBUTE_FORMAT_S8, SCE_GXM_ATTRIBUTE_FORMAT_S16, SCE_GXM_ATTRIBUTE_FORMAT_F32 };
+	memset(a, 0, sizeof(*a));
+	a->streamIndex = 0;
+	a->offset = (uint16_t)offset;
+	if (fmt_class == 2)
+		a->format = SCE_GXM_ATTRIBUTE_FORMAT_U8N;
+	else
+		a->format = fmt_class ? signed_formats[fmt & 3] : unsigned_formats[fmt & 3];
+	a->componentCount = (uint8_t)comps;
+	a->regIndex = (uint16_t)sceGxmProgramParameterGetResourceIndex(p);
+	return 1;
+}
+
+static GpuProgram *gpuProgram(const GeSgxDraw *d, int *waiting) {
+	uint32_t vtype = d->vtype & VTYPE_ATTRIBUTES;
+	int i;
+	for (i = 0; i < ngpu_programs; i++) {
+		if (gpu_programs[i].vkey == d->vkey && gpu_programs[i].vtype == vtype)
+			return gpu_programs[i].program ? &gpu_programs[i] : NULL;
+	}
+	if (ngpu_programs >= MAX_GPU_PROGRAMS)
+		return NULL;
+
+	SceGxmShaderPatcherId id;
+	const SceGxmProgram *gxp = registeredGxp(d->vkey, &id);
+	if (!gxp) {
+		if (geSgxShaderFailed(d->vkey) && !ge_sgx_gpu_failed) {
+			ge_sgx_gpu_failed = 1;
+			GeSgxLog("GeSgx render: GPU transform program %04X not available, CPU transform from now on\n", (unsigned)d->vkey);
+		}
+		*waiting = 1;
+		return NULL;
+	}
+
+	GeSgxVertexLayout l;
+	geSgxVertexLayout(vtype, &l);
+	static const uint8_t comp_size[4] = { 0, 1, 2, 4 };
+	SceGxmVertexAttribute attrs[6];
+	int n = 0;
+	n += attribute(&attrs[n], gxp, "aPosition", 1, l.pos_fmt, 3, l.pos_off);
+	if (l.tc_fmt)
+		n += attribute(&attrs[n], gxp, "aTexcoord", 0, l.tc_fmt, 2, l.tc_off);
+	if (l.color_fmt)
+		n += attribute(&attrs[n], gxp, "aColor", 2, 0, 4, l.color_off);
+	if (l.nrm_fmt)
+		n += attribute(&attrs[n], gxp, "aNormal", 1, l.nrm_fmt, 3, l.nrm_off);
+	if (l.wt_fmt) {
+		n += attribute(&attrs[n], gxp, "aWeight0", 0, l.wt_fmt, l.weights < 4 ? l.weights : 4, 0);
+		if (l.weights > 4)
+			n += attribute(&attrs[n], gxp, "aWeight1", 0, l.wt_fmt, l.weights - 4, 4 * comp_size[l.wt_fmt]);
+	}
+
+	SceGxmVertexStream stream;
+	stream.stride = (uint16_t)l.size;
+	stream.indexSource = SCE_GXM_INDEX_SOURCE_INDEX_16BIT;
+
+	GpuProgram *g = &gpu_programs[ngpu_programs++];
+	g->vkey = d->vkey;
+	g->vtype = vtype;
+	g->gxp = gxp;
+	g->program = NULL;
+	int res = sceGxmShaderPatcherCreateVertexProgram(patcher, id, attrs, n, &stream, 1, &g->program);
+	if (res < 0) {
+		g->program = NULL;
+		if (ge_sgx_gpu_nbad < GE_SGX_GPU_BAD_MAX)
+			ge_sgx_gpu_bad[ge_sgx_gpu_nbad++] = vtype;
+		else
+			ge_sgx_gpu_failed = 1;
+		GeSgxLog("GeSgx render: GPU vertex program %04X vtype %06X stride %u: %08X, this vertex type on the CPU\n", (unsigned)d->vkey, (unsigned)vtype, (unsigned)l.size, (unsigned)res);
+		return NULL;
+	}
+	return g;
 }
 
 static SceGxmDepthFunc depthFunc(uint8_t ztest) {
@@ -353,6 +453,7 @@ void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
 	sceGxmSetFrontPointLineWidth(ctx, GE_SGX_SCALE);
 	sceGxmSetVertexProgram(ctx, vertex_program);
+	const SceGxmVertexProgram *last_vp = vertex_program;
 
 	int16_t last_scissor[4] = { -1, -1, -1, -1 };
 	int scissor_empty = 0;
@@ -371,10 +472,30 @@ void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH)))
 			continue;
 
-		FragmentProgram *fp = fragmentProgram(d);
+		// The vertex program: the CPU transformed vertices', or the GPU transform's for this vertex shape
+		const SceGxmVertexProgram *vp = vertex_program;
+		const SceGxmProgram *vgxp = vertex_gxp;
+		if (d->gpu) {
+			int waiting = 0;
+			GpuProgram *g = gpuProgram(d, &waiting);
+			if (!g) {
+				if (waiting)
+					stats->waiting++;
+				continue;
+			}
+			vp = g->program;
+			vgxp = g->gxp;
+		}
+
+		FragmentProgram *fp = fragmentProgram(d, vgxp);
 		if (!fp) {
 			stats->waiting++;
 			continue;
+		}
+
+		if (vp != last_vp) {
+			sceGxmSetVertexProgram(ctx, vp);
+			last_vp = vp;
 		}
 
 		if (fp->program != last_fp) {
@@ -433,8 +554,15 @@ void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 			sceGxmSetFragmentTexture(ctx, 0, &tex);
 		}
 
-		sceGxmSetVertexStream(ctx, 0, &frame->vertices[d->base]);
-		sceGxmDraw(ctx, primitive(d->prim), SCE_GXM_INDEX_FORMAT_U16, &frame->indices[d->first], d->count);
+		if (d->gpu) {
+			sceGxmSetVertexUniformBuffer(ctx, 0, frame->uniforms_gpu + d->ucommon);
+			sceGxmSetVertexUniformBuffer(ctx, 1, frame->uniforms_gpu + d->uobject);
+			sceGxmSetVertexStream(ctx, 0, frame->raw + d->base);
+			stats->gpu_draws++;
+		} else {
+			sceGxmSetVertexStream(ctx, 0, &frame->vertices_gpu[d->base]);
+		}
+		sceGxmDraw(ctx, primitive(d->prim), SCE_GXM_INDEX_FORMAT_U16, &frame->indices_gpu[d->first], d->count);
 
 		stats->draws++;
 		stats->vertices += d->count;

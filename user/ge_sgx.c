@@ -43,6 +43,7 @@
 #include "main.h"
 #include "ge_sgx.h"
 #include "ge_sgx_tex.h"
+#include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
 
 #define LOG_PATH "ux0:data/adrenaline_sgx_log.txt"
@@ -169,9 +170,11 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 	published one. A frame is built again only when the GPU is done with it
 	(some draw thread loops after it was rendered).
 */
-#define FRAME_SLOTS 4
-#define FRAME_VERTICES 98304
+#define FRAME_SLOTS 3
+#define FRAME_VERTICES 32768      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
+#define FRAME_UNIFORMS (512 * 1024)
+#define FRAME_RAW (2560 * 1024)   // PSP vertex data for the GPU transform
 #define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
@@ -200,35 +203,72 @@ static uint32_t frame_seq_counter = 0;
 static volatile uint32_t draw_tick = 0;
 static uint32_t frames_dropped = 0, frames_published = 0, frames_skipped = 0;
 
+/*
+	A frame's vertices, indices and uniforms are written in cached memory
+	(staging, one for the frame being built: writes and the read-modify-
+	writes of merged indices are slow in uncached memory) and copied into the
+	slot's GPU memory when it is published. The raw arena (PSP vertex data
+	for the GPU transform) is filled by DMA straight into GPU memory.
+*/
+#define OFF_VERTICES 0u
+#define OFF_INDICES (OFF_VERTICES + FRAME_VERTICES * (uint32_t)sizeof(GeSgxVertex))
+#define OFF_UNIFORMS (OFF_INDICES + FRAME_INDICES * 2u)
+#define OFF_RAW (OFF_UNIFORMS + FRAME_UNIFORMS)
+#define STAGING_SIZE OFF_RAW
+
+static uint8_t *staging = NULL;
+
 static int initSlots(void) {
 	if (slots_ready)
 		return 1;
+	SceUID sm = sceKernelAllocMemBlock("SceGeSgxStaging", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (STAGING_SIZE + 0xFFF) & ~0xFFFu, NULL);
+	if (sm < 0)
+		return 0;
+	sceKernelGetMemBlockBase(sm, (void **)&staging);
+
 	int i;
 	for (i = 0; i < FRAME_SLOTS; i++) {
-		// Vertices, then indices: one GPU mapped block
-		uint32_t vbytes = FRAME_VERTICES * sizeof(GeSgxVertex);
-		uint32_t vsize = (vbytes + FRAME_INDICES * sizeof(uint16_t) + 0xFFF) & ~0xFFFu;
+		uint32_t vsize = (OFF_RAW + FRAME_RAW + 0xFFF) & ~0xFFFu;
 		uint32_t dsize = (FRAME_DRAWS * sizeof(GeSgxDraw) + 0xFFF) & ~0xFFFu;
 		SceUID vm = sceKernelAllocMemBlock("SceGeSgxVertices", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, vsize, NULL);
 		SceUID dm = sceKernelAllocMemBlock("SceGeSgxDraws", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, dsize, NULL);
 		if (vm < 0 || dm < 0)
 			return 0;
-		void *vb = NULL, *db = NULL;
-		sceKernelGetMemBlockBase(vm, &vb);
+		uint8_t *vb = NULL;
+		void *db = NULL;
+		sceKernelGetMemBlockBase(vm, (void **)&vb);
 		sceKernelGetMemBlockBase(dm, &db);
 		if (sceGxmMapMemory(vb, vsize, SCE_GXM_MEMORY_ATTRIB_READ) < 0)
 			return 0;
 		memset(&slots[i], 0, sizeof(slots[i]));
-		slots[i].data.vertices = (GeSgxVertex *)vb;
-		slots[i].data.max_vertices = FRAME_VERTICES;
-		slots[i].data.indices = (uint16_t *)((uint8_t *)vb + vbytes);
-		slots[i].data.max_indices = FRAME_INDICES;
-		slots[i].data.draws = (GeSgxDraw *)db;
-		slots[i].data.max_draws = FRAME_DRAWS;
+		GeSgxFrameData *f = &slots[i].data;
+		f->vertices = (GeSgxVertex *)(staging + OFF_VERTICES);
+		f->max_vertices = FRAME_VERTICES;
+		f->indices = (uint16_t *)(staging + OFF_INDICES);
+		f->max_indices = FRAME_INDICES;
+		f->uniforms = staging + OFF_UNIFORMS;
+		f->max_uniforms = FRAME_UNIFORMS;
+		f->raw = vb + OFF_RAW;
+		f->max_raw = FRAME_RAW;
+		f->vertices_gpu = (const GeSgxVertex *)(vb + OFF_VERTICES);
+		f->indices_gpu = (const uint16_t *)(vb + OFF_INDICES);
+		f->uniforms_gpu = vb + OFF_UNIFORMS;
+		f->draws = (GeSgxDraw *)db;
+		f->max_draws = FRAME_DRAWS;
 		slots[i].state = SLOT_FREE;
 	}
 	slots_ready = 1;
 	return 1;
+}
+
+// Staging to the GPU copy: one DMA for the big parts
+static void toGpu(const void *gpu, const void *src, uint32_t bytes) {
+	if (!bytes)
+		return;
+	if (bytes >= 4096)
+		sceDmacMemcpy((void *)gpu, src, bytes);
+	else
+		memcpy((void *)gpu, src, bytes);
 }
 
 // Walker thread: a slot to build the next frame in (NULL: none free)
@@ -245,14 +285,21 @@ static void acquireSlot(void) {
 			s->state = SLOT_BUILDING;
 			s->data.nvertices = 0;
 			s->data.nindices = 0;
+			s->data.nuniforms = 0;
+			s->data.nraw = 0;
 			s->data.ndraws = 0;
 			s->data.draws_3d = 0;
+			s->data.prims_gpu = 0;
 			s->data.vertices_built = 0;
 			s->data.state_builds = 0;
 			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
 			s->data.skipped_other = 0;
 			building = s;
 			walker.frame = &s->data;
+			walker.gpu_transform = !ge_sgx_gpu_failed;
+			walker.ngpu_bad = ge_sgx_gpu_nbad;
+			for (int b = 0; b < walker.ngpu_bad; b++)
+				walker.gpu_bad[b] = ge_sgx_gpu_bad[b];
 			return;
 		}
 	}
@@ -271,6 +318,11 @@ static void publishSlot(uint32_t top) {
 	}
 
 	if (building) {
+		GeSgxFrameData *f = &building->data;
+		geSgxBuildFinish(&walker);
+		toGpu(f->vertices_gpu, f->vertices, f->nvertices * sizeof(GeSgxVertex));
+		toGpu(f->indices_gpu, f->indices, f->nindices * sizeof(uint16_t));
+		toGpu(f->uniforms_gpu, f->uniforms, f->nuniforms);
 		building->fb = fb;
 		building->naliases = walker.naliases;
 		memcpy(building->aliases, walker.aliases, sizeof(building->aliases));
@@ -616,6 +668,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
+	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0;
 	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[4] = { 0 }; // per log interval
 	SceUInt64 session_start = 0;
 
@@ -655,6 +708,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
 			walker.clock_fn = clockUs;
+			walker.gpu_transform = 1;
 			acquireSlot();
 		}
 	}
@@ -675,6 +729,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 					building->data.ndraws = 0;
 					building->data.nvertices = 0;
 					building->data.nindices = 0;
+					building->data.nuniforms = 0;
+					building->data.nraw = 0;
 				}
 			}
 			rates.resyncs = 0;
@@ -768,6 +824,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 					if (walker.texture_fn) {
 						if (building && walker.frame) {
 							frame_stats_3d = building->data.draws_3d;
+							frame_stats_gpu = building->data.prims_gpu;
+							frame_stats_raw = building->data.nraw;
+							frame_stats_uni = building->data.nuniforms;
 							frame_stats_indices = building->data.nindices;
 							frame_stats_other = building->data.skipped_other;
 							frame_stats_draws = building->data.ndraws;
@@ -862,8 +921,9 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
-					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d, (unsigned)frame_stats_other,
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB vertices, %u KB uniforms) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
+					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024), (unsigned)frame_stats_other,
 					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
 					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[2], (unsigned)built_us[3],
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,

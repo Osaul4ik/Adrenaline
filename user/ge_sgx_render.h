@@ -29,8 +29,15 @@ typedef struct {
 	uint32_t vertices;
 	uint32_t waiting;  // draws whose shader is still being compiled
 	uint32_t other_fb; // draws into other framebuffers (not shown)
+	uint32_t gpu_draws; // with the GPU transform
 	uint32_t render_us;
 } GeSgxRenderStats;
+
+// Set when a GPU transform vertex program cannot be had: the walker then transforms on the CPU
+extern volatile int ge_sgx_gpu_failed;
+// Vertex types (attribute bits) the GPU transform cannot draw (no vertex program for them)
+extern volatile uint32_t ge_sgx_gpu_bad[GE_SGX_GPU_BAD_MAX];
+extern volatile int ge_sgx_gpu_nbad;
 
 // Draw thread, with the GXM context of vita2d. Returns < 0 on error.
 int geSgxRenderInit(void);

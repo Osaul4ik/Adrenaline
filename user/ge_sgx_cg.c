@@ -50,7 +50,110 @@ static struct {
 
 static SceShaccCgSourceFile source_file;
 
+// The GPU transform (see ge_sgx_cg.h): PPSSPP's transform and lighting in a vertex shader
+static int vertexSource(uint32_t key, char *buf, int size) {
+	int tc = key & GE_SGX_VS_TC, col = key & GE_SGX_VS_COLOR, nrm = key & GE_SGX_VS_NORMAL;
+	int w4 = key & (GE_SGX_VS_W4 | GE_SGX_VS_W8), w8 = key & GE_SGX_VS_W8, lit = key & GE_SGX_VS_LIGHT;
+	int n = 0;
+
+#define S(...) do { n += snprintf(buf + n, size > n ? size - n : 0, __VA_ARGS__); } while (0)
+	S("void main(\n	float3 aPosition,\n");
+	if (tc) S("	float2 aTexcoord,\n");
+	if (col) S("	float4 aColor,\n");
+	if (nrm) S("	float3 aNormal,\n");
+	if (w4) S("	float4 aWeight0,\n");
+	if (w8) S("	float4 aWeight1,\n");
+	S("	uniform float4 uC[%d] : BUFFER[0],\n	uniform float4 uO[%d] : BUFFER[1],\n", GE_SGX_UC_COUNT, GE_SGX_UO_COUNT);
+	S("	out float4 vPosition : POSITION,\n	out float2 vTexcoord : TEXCOORD0,\n	out float vFog : TEXCOORD1,\n	out float4 vColor : COLOR)\n{\n");
+
+	// Model space, with the bones
+	S("	float3 p = aPosition * uO[%d].x;\n", GE_SGX_UO_SCALE);
+	if (nrm)
+		S("	float3 n = aNormal * uO[%d].y * uC[%d].w;\n", GE_SGX_UO_SCALE, GE_SGX_UC_FLAGS);
+	else
+		S("	float3 n = float3(0.0, 0.0, uC[%d].w);\n", GE_SGX_UC_FLAGS);
+	if (w4) {
+		S("	float4 w0 = aWeight0 * uO[%d].w * uO[%d];\n", GE_SGX_UO_SCALE, GE_SGX_UO_WMASK);
+		if (w8)
+			S("	float4 w1 = aWeight1 * uO[%d].w * uO[%d];\n", GE_SGX_UO_SCALE, GE_SGX_UO_WMASK + 1);
+		S("	float3 sp = float3(0.0, 0.0, 0.0), sn = float3(0.0, 0.0, 0.0);\n");
+		// Unrolled: constant indices only
+		int i;
+		for (i = 0; i < (w8 ? 8 : 4); i++) {
+			int b = GE_SGX_UO_BONES + i * 4;
+			const char *wt = i < 4 ? "w0" : "w1";
+			S("	sp += (uO[%d].xyz * p.x + uO[%d].xyz * p.y + uO[%d].xyz * p.z + uO[%d].xyz) * %s.%c;\n", b, b + 1, b + 2, b + 3, wt, "xyzw"[i & 3]);
+			S("	sn += (uO[%d].xyz * n.x + uO[%d].xyz * n.y + uO[%d].xyz * n.z) * %s.%c;\n", b, b + 1, b + 2, wt, "xyzw"[i & 3]);
+		}
+		S("	p = sp;\n	n = sn;\n");
+	}
+
+	// World, view, projection, the PSP viewport (pixels times w), depth clamped like the PSP
+	S("	float3 wp = uO[0].xyz * p.x + uO[1].xyz * p.y + uO[2].xyz * p.z + uO[3].xyz;\n");
+	S("	float3 wn = uO[0].xyz * n.x + uO[1].xyz * n.y + uO[2].xyz * n.z;\n");
+	S("	float nl = dot(wn, wn);\n	wn = nl > 0.0 ? wn * rsqrt(nl) : float3(0.0, 0.0, 1.0);\n");
+	S("	float3 vp = uC[%d].xyz * wp.x + uC[%d].xyz * wp.y + uC[%d].xyz * wp.z + uC[%d].xyz;\n",
+		GE_SGX_UC_VIEW, GE_SGX_UC_VIEW + 1, GE_SGX_UC_VIEW + 2, GE_SGX_UC_VIEW + 3);
+	S("	float4 c = uC[0] * vp.x + uC[1] * vp.y + uC[2] * vp.z + uC[3];\n");
+	S("	float4 vpx = uC[%d], vpz = uC[%d];\n", GE_SGX_UC_VP, GE_SGX_UC_VPZ);
+	S("	float x = vpx.x * c.x + vpx.y * c.w;\n	float y = vpx.z * c.y + vpx.w * c.w;\n");
+	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	if (c.w > 0.0)\n		z = clamp(z, 0.0, c.w);\n");
+	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
+
+	// Texture coordinates
+	S("	float4 fl = uC[%d];\n", GE_SGX_UC_FLAGS);
+	S("	float2 t = %s;\n", tc ? "aTexcoord * uO[4].z" : "float2(0.0, 0.0)");
+	S("	if (fl.x < 0.5) {\n		vTexcoord = t * uO[%d].xy + uO[%d].zw;\n", GE_SGX_UO_UV, GE_SGX_UO_UV);
+	S("	} else if (fl.x < 1.5) {\n");
+	S("		float3 s = fl.y < 0.5 ? p : (fl.y < 1.5 ? float3(t, 0.0) : (fl.y < 2.5 ? normalize(n) : n));\n");
+	S("		float3 q = uC[%d].xyz * s.x + uC[%d].xyz * s.y + uC[%d].xyz * s.z + uC[%d].xyz;\n",
+		GE_SGX_UC_TGEN, GE_SGX_UC_TGEN + 1, GE_SGX_UC_TGEN + 2, GE_SGX_UC_TGEN + 3);
+	S("		vTexcoord = q.xy / (abs(q.z) > 0.000001 ? q.z : 1.0);\n");
+	S("	} else {\n		vTexcoord = (float2(dot(uC[%d].xyz, wn), dot(uC[%d].xyz, wn)) + 1.0) * 0.5;\n	}\n",
+		GE_SGX_UC_ENVLS, GE_SGX_UC_ENVLS + 1);
+
+	// Colour
+	S("	float4 ic = %s;\n", col ? "aColor" : "uC[11]");
+	if (lit) {
+		S("	float3 ambC = lerp(uC[%d].rgb, ic.rgb, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
+		S("	float ambA = lerp(uC[%d].a, ic.a, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
+		S("	float3 difC = lerp(uC[%d].rgb, ic.rgb, uC[%d].w);\n", GE_SGX_UC_MATDIF, GE_SGX_UC_MATSPC);
+		S("	float3 spcC = lerp(uC[%d].rgb, ic.rgb, uC[%d].x);\n", GE_SGX_UC_MATSPC, GE_SGX_UC_MATUPD);
+		S("	float sexp = uC[%d].w;\n", GE_SGX_UC_EMISSIVE);
+		S("	float3 sum = uC[%d].rgb * ambC + uC[%d].rgb;\n", GE_SGX_UC_AMBIENT, GE_SGX_UC_EMISSIVE);
+		S("	float3 spec = float3(0.0, 0.0, 0.0);\n");
+		int l;
+		for (l = 0; l < 4; l++) {
+			int o = GE_SGX_UC_LIGHT + l * GE_SGX_UC_LIGHT_SIZE;
+			S("	{\n		float4 L0 = uC[%d];\n", o);
+			S("		if (L0.w > -0.5) {\n");
+			S("			float3 to = L0.xyz;\n			float dist = 1.0;\n");
+			S("			if (L0.w > 0.5) {\n				to = L0.xyz - wp;\n				dist = length(to);\n				to = dist > 0.0 ? to / dist : to;\n			}\n");
+			S("			float4 L1 = uC[%d], L2 = uC[%d];\n", o + 1, o + 2);
+			S("			float d = max(dot(to, wn), 0.0);\n");
+			S("			if (L1.w > 1.5)\n				d = d > 0.0 ? pow(d, sexp) : 0.0;\n");
+			S("			float sc = 1.0;\n");
+			S("			if (L0.w > 0.5) {\n				float den = L2.x + L2.y * dist + L2.z * dist * dist;\n				sc = den > 0.0 ? saturate(1.0 / den) : 1.0;\n");
+			S("				if (L0.w > 1.5) {\n					float ang = dot(to, L1.xyz);\n					sc = ang >= uC[%d].x ? sc * (ang > 0.0 ? pow(ang, L2.w) : 0.0) : 0.0;\n				}\n			}\n", o + 3);
+			S("			sum += (uC[%d].rgb * ambC + uC[%d].rgb * difC * d) * sc;\n", o + 4, o + 5);
+			S("			if (L1.w > 0.5 && L1.w < 1.5) {\n				float3 h = normalize(to + float3(0.0, 0.0, 1.0));\n				float sd = dot(h, wn);\n");
+			S("				if (sd > 0.0)\n					spec += uC[%d].rgb * spcC * (pow(sd, sexp) * sc);\n			}\n", o + 6);
+			S("		}\n	}\n");
+		}
+		S("	vColor = float4(saturate(sum + spec), saturate(uC[%d].a * ambA));\n", GE_SGX_UC_AMBIENT);
+	} else {
+		S("	vColor = ic;\n");
+	}
+
+	// Fog from the view depth
+	S("	vFog = fl.z > 0.5 ? saturate((vp.z + vpz.z) * vpz.w) : 1.0;\n}\n");
+#undef S
+	return n;
+}
+
 int geSgxCgSource(uint32_t key, char *buf, int size) {
+	if ((key & 0xF000u) == GE_SGX_VS_BASE)
+		return vertexSource(key, buf, size);
 	if (key == GE_SGX_SHADER_VERTEX) {
 		return snprintf(buf, size,
 			// Pixels times w to clip space (see GeSgxVertex)
@@ -148,6 +251,14 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 
 #define ADD(k) do { if (n < max) keys[n] = (k); n++; } while (0)
 	ADD(GE_SGX_SHADER_VERTEX);
+	// GPU transform: every attribute combination, with and without lighting
+	{
+		uint32_t v, wc, lit;
+		for (lit = 0; lit < 2; lit++)
+			for (wc = 0; wc < 3; wc++)
+				for (v = 0; v < 8; v++)
+					ADD(GE_SGX_VS_BASE | v | (wc == 1 ? GE_SGX_VS_W4 : wc == 2 ? GE_SGX_VS_W8 : 0) | (lit ? GE_SGX_VS_LIGHT : 0));
+	}
 	ADD(1u << 10); // clear
 	// alpha test: off, or one of the functions but ALWAYS (= off)
 	static const int8_t atests[8] = { -1, 0, 2, 3, 4, 5, 6, 7 };
@@ -267,7 +378,7 @@ static SceShaccCgSourceFile *openFile(const char *fileName, const SceShaccCgSour
 }
 
 SceGxmProgram *geSgxCgCompile(uint32_t key, uint32_t *size, void (* log)(uint32_t key, int line, const char *msg)) {
-	static char src[4096];
+	static char src[8192];
 	int len = geSgxCgSource(key, src, sizeof(src));
 	if (len <= 0 || len >= (int)sizeof(src) || !cg.CompileProgram)
 		return NULL;
@@ -283,7 +394,7 @@ SceGxmProgram *geSgxCgCompile(uint32_t key, uint32_t *size, void (* log)(uint32_
 	SceShaccCgCompileOptions options;
 	cg.InitializeCompileOptions(&options);
 	options.mainSourceFile = source_file.fileName;
-	options.targetProfile = key == GE_SGX_SHADER_VERTEX ? SCE_SHACCCG_PROFILE_VP : SCE_SHACCCG_PROFILE_FP;
+	options.targetProfile = geSgxCgIsVertex(key) ? SCE_SHACCCG_PROFILE_VP : SCE_SHACCCG_PROFILE_FP;
 	options.entryFunctionName = "main";
 	options.useFx = 1;
 	options.locale = SCE_SHACCCG_ENGLISH;

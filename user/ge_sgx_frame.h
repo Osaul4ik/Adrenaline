@@ -87,11 +87,19 @@ typedef struct {
 	uint32_t env;       // TEXENVCOLOR, 0x00BBGGRR
 	uint32_t fog_color; // 0x00BBGGRR
 	int16_t scissor[4]; // x0, y0, x1, y1 in 960x544 pixels, x1/y1 exclusive
-	uint32_t base;      // first vertex: the indices count from it
+	uint32_t base;      // first vertex: the indices count from it (GPU transform: byte offset in the raw vertex arena)
 	uint32_t first;     // first index in the frame's index array
 	uint32_t count;     // indices
 	int32_t texture;    // handle from the texture callback, -1: none
 	uint32_t fb;        // VRAM offset of the framebuffer drawn into
+
+	// GPU transform: the vertices are the PSP's, the vertex program transforms them
+	uint8_t gpu;
+	uint8_t reserved2;
+	uint16_t vkey;      // vertex program key (GE_SGX_VS_*)
+	uint32_t vtype;     // GE vertex type: the attribute formats and offsets
+	uint32_t ucommon;   // byte offsets of its uniform buffers in the uniform arena
+	uint32_t uobject;
 } GeSgxDraw;
 
 typedef struct {
@@ -103,11 +111,28 @@ typedef struct {
 	uint32_t max_indices;
 	uint32_t nindices;
 
+	/*
+		GPU transform. vertices, indices and uniforms are built in cached
+		memory and copied to the GPU's copies (*_gpu) when the frame is
+		published; the raw arena is GPU memory the PSP vertex data is copied
+		into directly. NULL raw: CPU transform only.
+	*/
+	uint8_t *uniforms;
+	uint32_t max_uniforms;
+	uint32_t nuniforms;  // bytes
+	uint8_t *raw;
+	uint32_t max_raw;
+	uint32_t nraw;       // bytes
+	const GeSgxVertex *vertices_gpu;
+	const uint16_t *indices_gpu;
+	const uint8_t *uniforms_gpu;
+
 	GeSgxDraw *draws;
 	uint32_t max_draws;
 	uint32_t ndraws;
 
 	uint32_t draws_3d;      // transformed (not through mode) primitives built
+	uint32_t prims_gpu;     // of them with the GPU transform
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew

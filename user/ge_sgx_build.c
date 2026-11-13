@@ -32,6 +32,7 @@
 
 #include "ge_sgx_walk.h"
 #include "ge_sgx_texconv.h"
+#include "ge_sgx_gpu.h"
 
 #define GE_CMD_TEXTUREMAPENABLE 0x1Eu
 #define GE_CMD_ALPHABLENDENABLE 0x21u
@@ -867,6 +868,226 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
 
+/* ---- GPU transform ---- */
+
+// Biggest vertex range one primitive copies to the GPU (bigger: CPU transform)
+#define GPU_MAX_RANGE_BYTES (256 * 1024)
+
+// Vertex shapes the vertex programs read as they are
+static int gpuLayout(const GeSgxWalker *w, const GeSgxVertexLayout *l) {
+	if (!(l->pos_fmt && l->morphs == 1 && (l->color_fmt == 0 || l->color_fmt == 7) && l->index_size <= 2))
+		return 0;
+	uint32_t attrs = reg(w, GE_CMD_VERTEXTYPE) & ((3u << 0) | (7u << 2) | (3u << 5) | (3u << 7) | (3u << 9) | (7u << 14));
+	int i;
+	for (i = 0; i < w->ngpu_bad; i++) {
+		if (w->gpu_bad[i] == attrs)
+			return 0;
+	}
+	return 1;
+}
+
+static uint32_t gpuVertexKey(const GeSgxVertexLayout *l, const Xform *x) {
+	uint32_t k = GE_SGX_VS_BASE;
+	if (l->tc_fmt)
+		k |= GE_SGX_VS_TC;
+	if (l->color_fmt)
+		k |= GE_SGX_VS_COLOR;
+	if (l->nrm_fmt)
+		k |= GE_SGX_VS_NORMAL;
+	if (l->wt_fmt)
+		k |= l->weights > 4 ? GE_SGX_VS_W8 : GE_SGX_VS_W4;
+	if (x->lighting)
+		k |= GE_SGX_VS_LIGHT;
+	return k;
+}
+
+/*
+	The uniform buffers of the current state, built once per state and kept
+	in the frame's uniform arena; a block equal to the previous one is
+	shared (objects drawn one after the other with the same camera and lights).
+*/
+static int uni_valid = 0;
+static const GeSgxFrameData *uni_frame = NULL;
+static uint32_t gpu_vkey, gpu_ucommon, gpu_uobject;
+static float last_common[GE_SGX_UC_COUNT][4], last_object[GE_SGX_UO_COUNT][4];
+static int have_common, have_object;
+static uint32_t last_common_off, last_object_off;
+
+static void set4(float *d, float a, float b, float c, float e) {
+	d[0] = a; d[1] = b; d[2] = c; d[3] = e;
+}
+
+static void col4(float *d, const float *m, int j) {
+	set4(d, m[j * 3], m[j * 3 + 1], m[j * 3 + 2], j == 3 ? 1.0f : 0.0f);
+}
+
+static void rgb4(float *d, const float *c, float w) {
+	set4(d, c[0], c[1], c[2], w);
+}
+
+static float compScale(uint32_t fmt) {
+	return fmt == 1 ? 1.0f / 128.0f : fmt == 2 ? 1.0f / 32768.0f : 1.0f;
+}
+
+static int putBlock(GeSgxFrameData *f, const void *data, uint32_t bytes, uint32_t *off) {
+	uint32_t o = (f->nuniforms + 15u) & ~15u;
+	if (o + bytes > f->max_uniforms)
+		return 0;
+	memcpy(f->uniforms + o, data, bytes);
+	f->nuniforms = o + bytes;
+	*off = o;
+	return 1;
+}
+
+static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, const Xform *x) {
+	if (uni_frame != f) {
+		uni_frame = f;
+		uni_valid = 0;
+		have_common = have_object = 0;
+	}
+	if (uni_valid)
+		return 1;
+
+	const GeSgxMatrices *m = &w->mtx;
+	float c[GE_SGX_UC_COUNT][4], o[GE_SGX_UO_COUNT][4];
+	int i;
+	memset(c, 0, sizeof(c));
+	memset(o, 0, sizeof(o));
+
+	for (i = 0; i < 4; i++) {
+		set4(c[GE_SGX_UC_PROJ + i], m->proj[i * 4], m->proj[i * 4 + 1], m->proj[i * 4 + 2], m->proj[i * 4 + 3]);
+		col4(c[GE_SGX_UC_VIEW + i], m->view, i);
+		col4(c[GE_SGX_UC_TGEN + i], m->tgen, i);
+		col4(o[GE_SGX_UO_WORLD + i], m->world, i);
+	}
+	set4(c[GE_SGX_UC_VP], x->vp_x[0], x->vp_x[1], x->vp_y[0], x->vp_y[1]);
+	set4(c[GE_SGX_UC_VPZ], x->vp_z[0], x->vp_z[1], x->fog1, x->fog2);
+	set4(c[GE_SGX_UC_FLAGS], (float)x->uvgen, (float)x->uvproj, x->fog ? 1.0f : 0.0f, (x->lighting && x->reverse_normal) ? -1.0f : 1.0f);
+	uint32_t mc = x->material_color;
+	set4(c[GE_SGX_UC_MATAMB], (mc & 0xFF) / 255.0f, ((mc >> 8) & 0xFF) / 255.0f, ((mc >> 16) & 0xFF) / 255.0f, (mc >> 24) / 255.0f);
+	for (i = 0; i < 2; i++)
+		rgb4(c[GE_SGX_UC_ENVLS + i], x->envls[i], 0.0f);
+	for (i = 0; i < 4; i++)
+		c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE][3] = -1.0f; // off
+	if (x->lighting) {
+		rgb4(c[GE_SGX_UC_EMISSIVE], x->mat_emissive, x->spec_coef);
+		rgb4(c[GE_SGX_UC_MATDIF], x->mat_diffuse, (x->matupdate & 1) ? 1.0f : 0.0f);
+		rgb4(c[GE_SGX_UC_MATSPC], x->mat_specular, (x->matupdate & 2) ? 1.0f : 0.0f);
+		set4(c[GE_SGX_UC_AMBIENT], x->global_ambient[0], x->global_ambient[1], x->global_ambient[2], x->global_ambient[3]);
+		c[GE_SGX_UC_MATUPD][0] = (x->matupdate & 4) ? 1.0f : 0.0f;
+		for (i = 0; i < x->nlights; i++) {
+			float (*L)[4] = &c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE];
+			rgb4(L[0], x->light[i].pos, (float)x->light[i].type);
+			rgb4(L[1], x->light[i].dir, (float)x->light[i].comp);
+			rgb4(L[2], x->light[i].att, x->light[i].spot_exp);
+			set4(L[3], x->light[i].spot_cut, 0.0f, 0.0f, 0.0f);
+			rgb4(L[4], x->light[i].ambient, 0.0f);
+			rgb4(L[5], x->light[i].diffuse, 0.0f);
+			rgb4(L[6], x->light[i].specular, 0.0f);
+		}
+	}
+
+	set4(o[GE_SGX_UO_SCALE], compScale(l->pos_fmt), compScale(l->nrm_fmt), compScale(l->tc_fmt), compScale(l->wt_fmt));
+	set4(o[GE_SGX_UO_UV], x->uscale, x->vscale, x->uoff, x->voff);
+	if (l->wt_fmt) {
+		for (i = 0; i < 8; i++)
+			o[GE_SGX_UO_WMASK + i / 4][i & 3] = (uint32_t)i < l->weights ? 1.0f : 0.0f;
+		for (i = 0; i < 8 * 4; i++)
+			col4(o[GE_SGX_UO_BONES + i], &m->bone[(i / 4) * 12], i & 3);
+	}
+
+	if (!(have_common && memcmp(c, last_common, sizeof(c)) == 0)) {
+		if (!putBlock(f, c, sizeof(c), &last_common_off))
+			return 0;
+		memcpy(last_common, c, sizeof(c));
+		have_common = 1;
+	}
+	if (!(have_object && memcmp(o, last_object, sizeof(o)) == 0)) {
+		if (!putBlock(f, o, sizeof(o), &last_object_off))
+			return 0;
+		memcpy(last_object, o, sizeof(o));
+		have_object = 1;
+	}
+	gpu_ucommon = last_common_off;
+	gpu_uobject = last_object_off;
+	gpu_vkey = gpuVertexKey(l, x);
+	uni_valid = 1;
+	return 1;
+}
+
+/*
+	The raw arena: vertex data copied from PSP memory. Primitives usually
+	use consecutive memory, so their ranges are collected into one pending
+	run and copied together (one DMA when big); ranges copied before in this
+	frame are found again. dst keeps the source's alignment modulo 16.
+*/
+#define RAW_DONE 16
+static GeSgxFrameData *raw_frame = NULL;
+static struct { uint32_t src, len, dst; } raw_done[RAW_DONE];
+static int raw_ndone = 0, raw_next = 0;
+static uint32_t pend_src, pend_len, pend_dst;
+
+static void rawFlush(GeSgxWalker *w) {
+	if (!pend_len || !raw_frame)
+		return;
+	uint8_t *dst = raw_frame->raw + pend_dst;
+	if (!(w->bulk_fn && pend_len >= 8 * 1024 && w->bulk_fn(pend_src, dst, pend_len)))
+		geSgxRead(w, pend_src, dst, pend_len);
+	raw_done[raw_next].src = pend_src;
+	raw_done[raw_next].len = pend_len;
+	raw_done[raw_next].dst = pend_dst;
+	raw_next = (raw_next + 1) % RAW_DONE;
+	if (raw_ndone < RAW_DONE)
+		raw_ndone++;
+	pend_len = 0;
+}
+
+static int rawCopy(GeSgxWalker *w, GeSgxFrameData *f, uint32_t src, uint32_t bytes, uint32_t *off) {
+	int i;
+	if (raw_frame != f) {
+		raw_frame = f;
+		raw_ndone = raw_next = 0;
+		pend_len = 0;
+	}
+	if (pend_len && src >= pend_src && src + bytes <= pend_src + pend_len) {
+		*off = pend_dst + (src - pend_src);
+		return 1;
+	}
+	// Continues the pending run (it ends the arena)
+	if (pend_len && src >= pend_src && src <= pend_src + pend_len && pend_dst + pend_len == f->nraw) {
+		uint32_t len = src + bytes - pend_src;
+		if (pend_dst + len > f->max_raw)
+			return 0;
+		pend_len = len;
+		f->nraw = pend_dst + len;
+		*off = pend_dst + (src - pend_src);
+		return 1;
+	}
+	for (i = 0; i < raw_ndone; i++) {
+		if (src >= raw_done[i].src && src + bytes <= raw_done[i].src + raw_done[i].len) {
+			*off = raw_done[i].dst + (src - raw_done[i].src);
+			return 1;
+		}
+	}
+	rawFlush(w);
+	uint32_t dst = ((f->nraw + 15u) & ~15u) + (src & 15u);
+	if (dst + bytes > f->max_raw)
+		return 0;
+	pend_src = src;
+	pend_len = bytes;
+	pend_dst = dst;
+	f->nraw = dst + bytes;
+	*off = dst;
+	return 1;
+}
+
+void geSgxBuildFinish(GeSgxWalker *w) {
+	if (raw_frame == w->frame)
+		rawFlush(w);
+	raw_frame = NULL;
+	uni_frame = NULL;
+}
+
 // Indices of the primitive (up to 65535, 4 bytes each), read once
 static uint32_t prim_index[65536];
 
@@ -914,6 +1135,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		}
 		cached_w = w;
 		w->state_dirty = 0;
+		uni_valid = 0;
 		f->state_builds++;
 	}
 	if (clk) {
@@ -991,13 +1213,35 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	// The vertex data: the range of a non-indexed or compact indexed primitive at once
 	uint32_t range = imax - imin + 1;
 	int compact = l->index_size && range <= count;
+
+	/*
+		GPU transform: the vertex range is copied as it is into the raw arena,
+		the vertex program decodes and transforms it. Sprites, morphing,
+		16 bit colours and 32 bit indices stay on the CPU path.
+	*/
+	int gpu = 0;
+	uint32_t raw_off = 0;
+	if (w->gpu_transform && f->raw && !xp->through && type != GE_PRIM_RECTANGLES && gpuLayout(w, l) &&
+	    range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES) {
+		if (gpuUniforms(w, f, l, xp) && rawCopy(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
+			gpu = 1;
+			for (i = 0; i < count; i++)
+				prim_index[i] -= imin;
+			nv = range;
+		}
+	}
+
 	bulk_count = 0;
-	if (!l->index_size)
+	if (gpu)
+		;
+	else if (!l->index_size)
 		bulkLoad(w, l, 0, count);
 	else if (compact)
 		bulkLoad(w, l, imin, range);
 
-	if (type == GE_PRIM_RECTANGLES) {
+	if (gpu) {
+		// Indices only (below)
+	} else if (type == GE_PRIM_RECTANGLES) {
 		// Sprites: two corners each, screen aligned (3D ones after the projection)
 		for (i = 0; i + 1 < count; i += 2) {
 			GeSgxVertex a, b;
@@ -1025,9 +1269,12 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			iout[ni++] = (uint16_t)(nv + 2);
 			nv += 4;
 		}
-	} else {
+	}
+	if (gpu || type != GE_PRIM_RECTANGLES) {
 		// Local vertex numbers: the compact index range, or one vertex per index
-		if (compact) {
+		if (gpu) {
+			// prim_index is already local
+		} else if (compact) {
 			for (i = 0; i < range; i++) {
 				if (!vertexOut(w, xp, imin + i, &vout[i]))
 					goto fail;
@@ -1102,9 +1349,11 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	if (ni == 0 || nv == 0)
 		return;
 
-	f->nvertices = vstart + nv;
+	if (!gpu) {
+		f->nvertices = vstart + nv;
+		f->vertices_built += nv;
+	}
 	f->nindices = istart + ni;
-	f->vertices_built += nv;
 	if (clk) {
 		t1 = clk();
 		if (type == GE_PRIM_RECTANGLES)
@@ -1116,10 +1365,40 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	if (!xp->through)
 		f->draws_3d++;
 
+	if (gpu) {
+		f->prims_gpu++;
+		d.gpu = 1;
+		d.vkey = (uint16_t)gpu_vkey;
+		d.vtype = reg(w, GE_CMD_VERTEXTYPE);
+		d.ucommon = gpu_ucommon;
+		d.uobject = gpu_uobject;
+
+		// The same vertex buffer as the previous draw: its indices continue from that base
+		if (f->ndraws > 0) {
+			GeSgxDraw *p = &f->draws[f->ndraws - 1];
+			if (p->gpu && p->first + p->count == istart && sameState(p, &d) && p->vtype == d.vtype &&
+			    p->ucommon == d.ucommon && p->uobject == d.uobject && raw_off >= p->base &&
+			    (raw_off - p->base) % l->size == 0 && (raw_off - p->base) / l->size + nv <= GE_SGX_MAX_DRAW_VERTICES) {
+				uint16_t delta = (uint16_t)((raw_off - p->base) / l->size);
+				if (delta) {
+					for (i = 0; i < ni; i++)
+						iout[i] = (uint16_t)(iout[i] + delta);
+				}
+				p->count += ni;
+				return;
+			}
+		}
+		d.base = raw_off;
+		d.first = istart;
+		d.count = ni;
+		f->draws[f->ndraws++] = d;
+		return;
+	}
+
 	// Lists of the same state follow each other: extend the previous draw
 	if (f->ndraws > 0) {
 		GeSgxDraw *p = &f->draws[f->ndraws - 1];
-		if (p->first + p->count == istart && sameState(p, &d) && vstart + nv - p->base <= GE_SGX_MAX_DRAW_VERTICES) {
+		if (!p->gpu && p->first + p->count == istart && sameState(p, &d) && vstart + nv - p->base <= GE_SGX_MAX_DRAW_VERTICES) {
 			uint16_t delta = (uint16_t)(vstart - p->base);
 			if (delta) {
 				for (i = 0; i < ni; i++)

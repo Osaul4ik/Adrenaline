@@ -309,6 +309,11 @@ const SceGxmProgram *geSgxShaderGet(uint32_t key) {
 	return NULL;
 }
 
+int geSgxShaderFailed(uint32_t key) {
+	Program *p = find(key);
+	return p && p->state == STATE_FAILED;
+}
+
 void geSgxShaderStats(GeSgxShaderStats *out) {
 	*out = stats;
 }

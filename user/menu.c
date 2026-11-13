@@ -281,7 +281,7 @@ static void drawSgxOverlay(vita2d_texture *tex, float tex_w, float tex_h, const 
   pgf_draw_textf(x, ty + 0 * 18.0f, WHITE, fs, "SGX %u fps  cmds %u  bad %u", (unsigned)(f->fps), (unsigned)(f->stats.commands), (unsigned)(f->stats.bad));
   pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "walk %u us/s  wait %u/%u", (unsigned)(f->walk_us), (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts));
   pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "2D %u draws %u vtx %u us", (unsigned)(r->draws), (unsigned)(r->vertices), (unsigned)(r->render_us));
-  pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "3D prims %u  wait %u  other fb %u", (unsigned)skipped_3d, (unsigned)(r->waiting), (unsigned)(r->other_fb));
+  pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "3D prims %u  gpu draws %u  wait %u  fb %u", (unsigned)skipped_3d, (unsigned)(r->gpu_draws), (unsigned)(r->waiting), (unsigned)(r->other_fb));
   if (ss.ready == 0 && ss.compiler < 0)
     pgf_draw_textf(x, ty + 4 * 18.0f, WHITE, fs, "no shaders: reboot, start Adrenaline");
   else

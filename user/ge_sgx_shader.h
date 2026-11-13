@@ -35,6 +35,9 @@ uint32_t geSgxShaderKey(const GeSgxDraw *d);
 */
 const SceGxmProgram *geSgxShaderGet(uint32_t key);
 
+// The program of key could not be made (not cached and no compiler, or a compile error)
+int geSgxShaderFailed(uint32_t key);
+
 typedef struct {
 	uint32_t ready;    // programs available
 	uint32_t queued;   // waiting for the compiler

@@ -195,7 +195,9 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	uint32_t rowbytes = geSgxTexRowBytes(d->format, d->bufw);
 	uint32_t rows = geSgxTexRows(d);
 	uint32_t size = rowbytes * rows;
-	if (!rowbytes || size > STAGING_BYTES || d->w > 512 || d->h > 512 || d->bufw < d->w)
+	// A buffer narrower than the texture (480 wide pictures in 512 textures) is fine:
+	// the texels past it are not used
+	if (!rowbytes || !d->bufw || size > STAGING_BYTES || d->w > 512 || d->h > 512)
 		return failed(d, "size");
 
 	const uint8_t *src = geSgxPspPtr(d->addr, size);
@@ -255,6 +257,8 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 
 	// Converted in cached memory, then one DMA into the GPU's (uncached) memory
 	uint8_t *out = linear == staging[0] ? staging[1] : staging[0];
+	if (stride * d->h <= STAGING_BYTES && d->bufw < d->w)
+		memset(out, 0, stride * d->h);
 	if (stride * d->h > STAGING_BYTES || !geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) ||
 	    sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) < 0) {
 		freeMemory(e);

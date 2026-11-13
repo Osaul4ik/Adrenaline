@@ -7,6 +7,7 @@
 #include <string.h>
 #include "ge_sgx_walk.h"
 #include "ge_sgx_texconv.h"
+#include "ge_sgx_gpu.h"
 
 #define RAM_BASE  0x08000000u
 #define RAM_SIZE  0x04000000u
@@ -767,6 +768,60 @@ static void testLightingSkinning(void) {
 	CHECK(r == 255 && ((a->color >> 8) & 0xFF) == r && al == 255, "lit colour %08x", a->color);
 }
 
+static uint8_t fraw[65536];
+static uint8_t funi[65536];
+
+static void testGpuTransform(void) {
+	resetFrame();
+	frame.raw = fraw;
+	frame.max_raw = sizeof(fraw);
+	frame.uniforms = funi;
+	frame.max_uniforms = sizeof(funi);
+	w->gpu_transform = 1;
+
+	/* 8 vertices: float uv, 8888, float xyz (24 bytes) at 0x08900008 (alignment kept modulo 16) */
+	uint32_t v = 0x08900008;
+	int i;
+	for (i = 0; i < 8; i++) {
+		wf(v + i * 24, (float)i);
+		wf(v + i * 24 + 4, 0.5f);
+		w32(v + i * 24 + 8, 0xFF000000u | (uint32_t)i);
+		wf(v + i * 24 + 12, (float)i);
+		wf(v + i * 24 + 16, 1.0f);
+		wf(v + i * 24 + 20, -2.0f);
+	}
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900008));
+	emit(&l, C(0x04, (4u << 16) | 4));    // strip of 4: vertices 0..3
+	emit(&l, C(0x04, (3u << 16) | 3));    // triangles: vertices 4..6, the same run, merged
+	emit(&l, C(0x12, VT_COL565 | VT_POSF)); // 16 bit colour: CPU transform
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	geSgxBuildFinish(w);
+
+	CHECK(frame.prims_gpu == 2 && frame.ndraws == 2, "gpu prims %u draws %u", frame.prims_gpu, frame.ndraws);
+	if (frame.ndraws == 2) {
+		GeSgxDraw *d = &fdraws[0];
+		CHECK(d->gpu && d->vkey == (GE_SGX_VS_BASE | GE_SGX_VS_TC | GE_SGX_VS_COLOR) && d->count == 9 && d->first == 0, "gpu draw %u key %x count %u", d->gpu, d->vkey, d->count);
+		CHECK((d->base & 15) == 8 && memcmp(fraw + d->base, host(v), 7 * 24) == 0, "raw copy at %u", d->base);
+		/* strip 0 1 2, 2 1 3; then 4 5 6 (vertex offset 4 in the same run) */
+		CHECK(fidx[0] == 0 && fidx[3] == 2 && fidx[4] == 1 && fidx[5] == 3 && fidx[6] == 4 && fidx[8] == 6, "gpu indices %u %u %u %u", fidx[3], fidx[5], fidx[6], fidx[8]);
+		const float *uc = (const float *)(funi + d->ucommon), *uo = (const float *)(funi + d->uobject);
+		CHECK(feq(uo[GE_SGX_UO_WORLD * 4 + 0], 1) && feq(uo[(GE_SGX_UO_WORLD + 3) * 4 + 3], 1) && feq(uo[GE_SGX_UO_SCALE * 4], 1) && feq(uo[GE_SGX_UO_UV * 4], 1),
+		      "object block world %f scale %f uv %f", uo[0], uo[GE_SGX_UO_SCALE * 4], uo[GE_SGX_UO_UV * 4]);
+		CHECK(feq(uc[(GE_SGX_UC_PROJ + 2) * 4 + 3], -1) && feq(uc[GE_SGX_UC_VP * 4], 480) && feq(uc[GE_SGX_UC_VP * 4 + 1], 480) && feq(uc[GE_SGX_UC_LIGHT * 4 + 3], -1),
+		      "common block proj %f vp %f %f light %f", uc[(GE_SGX_UC_PROJ + 2) * 4 + 3], uc[GE_SGX_UC_VP * 4], uc[GE_SGX_UC_VP * 4 + 1], uc[GE_SGX_UC_LIGHT * 4 + 3]);
+		CHECK(!fdraws[1].gpu && frame.nvertices == 3, "cpu fallback %u verts %u", fdraws[1].gpu, frame.nvertices);
+		CHECK(frame.nuniforms == (GE_SGX_UC_COUNT + GE_SGX_UO_COUNT) * 16, "one block each %u", frame.nuniforms);
+	}
+	w->gpu_transform = 0;
+}
+
 static void testTransferAlias(void) {
 	resetFrame();
 	L l = { 0x08800000 };
@@ -899,6 +954,7 @@ int main(void) {
 	testBuildClearAndClut();
 	testBuild3D();
 	testLightingSkinning();
+	testGpuTransform();
 	testTransferAlias();
 	testTexconv();
 
