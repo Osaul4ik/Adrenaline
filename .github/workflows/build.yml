@@ -131,7 +131,7 @@ jobs:
         # adrenaline_kernel.skprx, adrenaline_vsh.suprx, usbdevice.skprx and eboot.pbp
         # are the prebuilt ones from bubble/pkg (those modules are unchanged).
         run: |
-          cmake -S bubble -B build/bubble -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DVITA_VERSION=07.00 \
+          cmake -S bubble -B build/bubble -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
           cmake --build build/bubble -j"$(nproc)"
           unzip -l build/bubble/Adrenaline.vpk
