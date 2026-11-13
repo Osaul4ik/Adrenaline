@@ -38,6 +38,7 @@
 #include "pspdebug.h"
 
 #include "../adrenaline_compat.h"
+#include "../user/ge_sgx_cg.h"
 
 #define printf psvDebugScreenPrintf
 
@@ -141,6 +142,81 @@ ERROR_EXIT:
 	return ret;
 }
 
+static SceUID loadModule(const char *path) {
+	return sceKernelLoadStartModule(path, 0, NULL, 0, NULL, NULL);
+}
+
+static void *cgAlloc(unsigned int size) {
+	return malloc(size);
+}
+
+static void cgFree(void *ptr) {
+	free(ptr);
+}
+
+static void compileLog(uint32_t key, int line, const char *msg) {
+	printf("  %04X line %d: %s\n", (unsigned)key, line, msg);
+}
+
+/*
+	SGX renderer: adrenaline_user asks for its shaders (GE_SGX_CG_REQUEST)
+	when it cannot load libshacccg.suprx inside the emulator. Here, in a
+	normal app, it can: compile every program that is not cached yet.
+*/
+static void compileSgxShaders(void) {
+	SceIoStat stat;
+	if (sceIoGetstat(GE_SGX_CG_REQUEST, &stat) < 0)
+		return;
+
+	static uint32_t keys[512];
+	int n = geSgxCgAllKeys(keys, 512);
+	int i, missing = 0;
+	char path[96];
+	for (i = 0; i < n; i++) {
+		geSgxCgPath(keys[i], path, sizeof(path));
+		if (sceIoGetstat(path, &stat) < 0)
+			missing++;
+	}
+
+	if (missing > 0) {
+		printf("SGX renderer: compiling %d shaders (once)...\n", missing);
+		int res = geSgxCgInit(loadModule, cgAlloc, cgFree);
+		if (res != 1) {
+			printf("libshacccg.suprx could not be loaded (0x%08X).\n", res);
+			printf("It is expected in ur0:data/ or ur0:data/external/.\n");
+			sceKernelDelayThread(3 * 1000 * 1000);
+			return;
+		}
+
+		int done = 0, failed = 0;
+		int x = psvDebugScreenGetX(), y = psvDebugScreenGetY();
+		for (i = 0; i < n; i++) {
+			geSgxCgPath(keys[i], path, sizeof(path));
+			if (sceIoGetstat(path, &stat) >= 0)
+				continue;
+			uint32_t size = 0;
+			SceGxmProgram *program = geSgxCgCompile(keys[i], &size, compileLog);
+			if (program) {
+				geSgxCgSave(keys[i], program, size);
+				free(program);
+			} else {
+				failed++;
+			}
+			done++;
+			psvDebugScreenSetXY(x, y);
+			printf("%d / %d", done, missing);
+		}
+		geSgxCgTerm();
+		printf("\n");
+		if (failed) {
+			printf("%d shaders did not compile.\n", failed);
+			sceKernelDelayThread(3 * 1000 * 1000);
+		}
+	}
+
+	sceIoRemove(GE_SGX_CG_REQUEST);
+}
+
 static void initNet() {
 	static char memory[16 * 1024];
 
@@ -199,6 +275,9 @@ int main() {
 			}
 		}
 	}
+
+	// SGX renderer: the emulator could not load the shader compiler
+	compileSgxShaders();
 
 	// Load kernel module
 	res = taiLoadStartKernelModule("ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_kernel.skprx", 0, NULL, 0);

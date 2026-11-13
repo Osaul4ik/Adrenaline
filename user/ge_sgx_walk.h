@@ -162,7 +162,11 @@ typedef struct {
 	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];
 	int naliases;
 
-	// CLUT as loaded by the last LOADCLUT
+	// CLUT of the last LOADCLUT: where it is, read only when a draw needs it
+	// (3D draws load CLUTs all the time)
+	uint32_t clut_addr;
+	uint32_t clut_load_bytes;
+	int clut_read;
 	uint8_t clut[GE_SGX_CLUT_BYTES];
 	uint32_t clut_bytes;
 	uint32_t clut_hash;

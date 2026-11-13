@@ -228,6 +228,8 @@ uint32_t geSgxHash(const void *data, uint32_t size) {
 	return h;
 }
 
+static void readClut(GeSgxWalker *w);
+
 static int32_t drawTexture(GeSgxWalker *w) {
 	if (!w->texture_fn)
 		return -1;
@@ -243,6 +245,7 @@ static int32_t drawTexture(GeSgxWalker *w) {
 	d.format = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
 	d.swizzle = (uint8_t)(reg(w, GE_CMD_TEXMODE) & 1);
 	if (d.format >= 4 && d.format <= 7) {
+		readClut(w);
 		d.clut_format = reg(w, GE_CMD_CLUTFORMAT);
 		d.clut = w->clut;
 		d.clut_bytes = w->clut_bytes;
@@ -452,16 +455,23 @@ void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data) {
 	uint32_t bytes = (data & 0x3F) * 32;
 	if (bytes > GE_SGX_CLUT_BYTES)
 		bytes = GE_SGX_CLUT_BYTES;
+	w->clut_addr = (reg(w, GE_CMD_CLUTADDR) & 0x00FFFFF0u) | ((reg(w, GE_CMD_CLUTADDRUPPER) << 8) & 0x0F000000u);
+	w->clut_load_bytes = bytes;
+	w->clut_read = 0;
+}
 
-	uint32_t addr = (reg(w, GE_CMD_CLUTADDR) & 0x00FFFFF0u) | ((reg(w, GE_CMD_CLUTADDRUPPER) << 8) & 0x0F000000u);
-
-	if (bytes == 0 || !geSgxRead(w, addr, w->clut, bytes)) {
+// The CLUT of the last LOADCLUT, read the first time a draw uses it
+static void readClut(GeSgxWalker *w) {
+	if (w->clut_read)
+		return;
+	w->clut_read = 1;
+	if (w->clut_load_bytes == 0 || !geSgxRead(w, w->clut_addr, w->clut, w->clut_load_bytes)) {
 		w->clut_bytes = 0;
 		w->clut_hash = 0;
 		return;
 	}
-	w->clut_bytes = bytes;
-	w->clut_hash = geSgxHash(w->clut, bytes);
+	w->clut_bytes = w->clut_load_bytes;
+	w->clut_hash = geSgxHash(w->clut, w->clut_bytes);
 }
 
 void geSgxBuildTransfer(GeSgxWalker *w) {

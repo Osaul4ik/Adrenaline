@@ -22,6 +22,7 @@ add_executable(adrenaline
   utils.c
   scr_printf.c
   font.c
+  ../user/ge_sgx_cg.c
 )
 
 target_link_libraries(adrenaline
@@ -34,6 +35,10 @@ target_link_libraries(adrenaline
   SceNetCtl_stub
   SceSysmodule_stub
   ScePgf_stub_weak
+  SceGxm_stub
+  SceLibKernel_stub
+  SceKernelModulemgr_stub
+  SceIofilemgr_stub
 )
 
 vita_create_self(eboot.bin adrenaline UNSAFE)

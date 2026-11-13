@@ -60,6 +60,7 @@ add_executable(adrenaline_user
   ge_sgx_texconv.c
   ge_sgx_tex.c
   ge_sgx_shader.c
+  ge_sgx_cg.c
   ge_sgx_render.c
   lz4/lz4.c
 )

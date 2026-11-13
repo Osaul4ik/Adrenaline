@@ -23,8 +23,7 @@
 #include <psp2/gxm.h>
 #include "ge_sgx_frame.h"
 
-// Key of the vertex program (fragment program keys are below 0x800)
-#define GE_SGX_SHADER_VERTEX 0xFFFFu
+#include "ge_sgx_cg.h"
 
 // Fragment program key of a draw: the GE state the fragment shader depends on
 uint32_t geSgxShaderKey(const GeSgxDraw *d);
