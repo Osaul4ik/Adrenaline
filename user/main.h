@@ -129,6 +129,5 @@ void lockPower();
 void unlockPower();
 
 void SendAdrenalineRequest(int cmd);
-void SetNativeResolutionConfig();
 
 #endif

@@ -153,6 +153,7 @@ enum AdrenalineVitaCommands {
 	ADRENALINE_VITA_CMD_RESUME_POPS,
 	ADRENALINE_VITA_CMD_POWER_SHUTDOWN,
 	ADRENALINE_VITA_CMD_POWER_REBOOT,
+	ADRENALINE_VITA_CMD_GET_NATIVE_RESOLUTION, // response: 1 if enabled in the Adrenaline menu
 };
 
 enum AdrenalineVitaResponse {
@@ -185,9 +186,6 @@ typedef struct {
 #define DRAW_NATIVE 0xABCDEF00
 #define NATIVE_FRAMEBUFFER 0x0A400000
 
-// Native resolution option: written by the Vita side, read by systemctrl at game start
-#define NATIVE_RES_CONFIG 0xABCDEF04
-#define NATIVE_RES_MAGIC 0x4E415456 // 'NATV'
 
 #define CONVERT_ADDRESS(addr) (0x68000000 + (addr & 0x0FFFFFFF))
 

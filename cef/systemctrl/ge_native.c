@@ -25,6 +25,7 @@
 #include <pspge.h>
 
 #include "main.h"
+#include "adrenaline.h"
 #include "ge_native.h"
 
 /* Flips that show a new buffer without any upscaled draw before the native
@@ -143,8 +144,11 @@ int GeNativeInit(void) {
 	if (sceKernelInitKeyConfig() != PSP_INIT_KEYCONFIG_GAME)
 		return 0;
 
-	// Option from the Adrenaline menu (written by the Vita side)
-	if (_lw(NATIVE_RES_CONFIG) != NATIVE_RES_MAGIC)
+	// Option from the Adrenaline menu, asked from the Vita side (an older
+	// adrenaline_user that does not know the command answers -1)
+	int enabled = SendAdrenalineCmd(ADRENALINE_VITA_CMD_GET_NATIVE_RESOLUTION);
+	log("GeNative: option = %d\n", enabled);
+	if (enabled != 1)
 		return 0;
 
 	// 0x0A000000-0x0A900000 must not belong to the game (high memory layout)
