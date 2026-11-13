@@ -431,8 +431,12 @@ static int sceCompatWriteSharedCtrlPatched(SceCtrlDataPsp *pad_data) {
   return TAI_CONTINUE(int, sceCompatWriteSharedCtrlRef, pad_data);
 }
 
+static void startLog(const char *fmt, ...);
+
 static int sceCompatWaitSpecialRequestPatched(int mode) {
+  startLog("sceCompatWaitSpecialRequest: building flash0\n");
   ScePspemuBuildFlash0();
+  startLog("flash0 built\n");
 
   void *payloadex = (void *)&_binary_flash0_payloadex_bin_start;
   int size_payloadex = (int)&_binary_flash0_payloadex_bin_size;
@@ -467,6 +471,7 @@ static int sceCompatWaitSpecialRequestPatched(int mode) {
   sceDmacMemset((void *)0x63000000, 0, 16 * 1024 * 1024);
   sceCompatCache(SCE_COMPAT_CACHE_WRITEBACK, (void *)0x63000000, 16 * 1024 * 1024);
 
+  startLog("PSP side starting\n");
   return TAI_CONTINUE(int, sceCompatWaitSpecialRequestRef, mode);
 }
 
@@ -516,12 +521,30 @@ static int ScePspemuGetStartupPngPatched(int num, void *png_buf, int *png_size, 
   return num_startup_png;
 }
 
+// DEBUG BUILD: startup trace in ux0:data/adrenaline_start_log.txt, written with
+// SceLibKernel/SceIofilemgr only so it works even if newlib is broken.
+static void startLog(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  sceClibVsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  SceUID fd = sceIoOpen("ux0:data/adrenaline_start_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+  if (fd >= 0) {
+    sceIoWrite(fd, buf, sceClibStrnlen(buf, sizeof(buf)));
+    sceIoClose(fd);
+  }
+}
+
 void _start() __attribute__ ((weak, alias("module_start")));
 int module_start(SceSize args, void *argp) {
   int res;
 
+  startLog("--- module_start (build " __DATE__ " " __TIME__ ")\n");
+
   // Init vita newlib
   _init_vita_newlib();
+  startLog("newlib init done, malloc test %p\n", malloc(16));
 
   // Read config
   memset(&config, 0, sizeof(AdrenalineConfig));
@@ -539,6 +562,7 @@ int module_start(SceSize args, void *argp) {
   tai_module_info_t tai_info;
   tai_info.size = sizeof(tai_module_info_t);
   res = taiGetModuleInfo("ScePspemu", &tai_info);
+  startLog("taiGetModuleInfo(ScePspemu) = 0x%08X modid 0x%08X nid 0x%08X (sizeof tai_module_info_t %d)\n", res, tai_info.modid, tai_info.module_nid, (int)sizeof(tai_module_info_t));
   if (res < 0)
     return res;
 
@@ -546,6 +570,7 @@ int module_start(SceSize args, void *argp) {
   SceKernelModuleInfo mod_info;
   mod_info.size = sizeof(SceKernelModuleInfo);
   res = sceKernelGetModuleInfo(tai_info.modid, &mod_info);
+  startLog("sceKernelGetModuleInfo = 0x%08X\n", res);
   if (res < 0)
     return res;
 
@@ -815,6 +840,15 @@ int module_start(SceSize args, void *argp) {
     uids[n_uids++] = taiInjectData(tai_info.modid, 0, 0x20852, &movs_a1_0_nop_opcode, sizeof(movs_a1_0_nop_opcode));
     uids[n_uids++] = taiInjectData(tai_info.modid, 0, 0x301F0, &movs_a1_0_nop_opcode, sizeof(movs_a1_0_nop_opcode));
   }
+
+  int i;
+  for (i = 0; i < n_hooks; i++)
+    if (hooks[i] < 0)
+      startLog("hook %d failed: 0x%08X\n", i, hooks[i]);
+  for (i = 0; i < n_uids; i++)
+    if (uids[i] < 0)
+      startLog("inject %d failed: 0x%08X\n", i, uids[i]);
+  startLog("module_start done: %d hooks, %d injects\n", n_hooks, n_uids);
 
   return SCE_KERNEL_START_SUCCESS;
 }
