@@ -86,7 +86,23 @@ typedef struct {
 	uint32_t color_fmt; // GE_VTYPE color field (0: none, 4..7)
 	uint32_t pos_fmt;   // 1: s8, 2: s16, 3: float
 	uint32_t index_size;
+	uint32_t stride;    // bytes of one morph target
+	uint32_t morphs;    // 1..8
+	uint32_t wt_fmt;    // 0: none, 1: u8, 2: u16, 3: float (at offset 0)
+	uint32_t weights;   // 1..8
+	uint32_t nrm_fmt;   // 0: none, 1: s8, 2: s16, 3: float
+	uint32_t nrm_off;
 } GeSgxVertexLayout;
+
+// Matrices of the GE as the lists upload them (PPSSPP layout: 4x3 column-major)
+typedef struct {
+	float bone[8 * 12];
+	float world[12];
+	float view[12];
+	float proj[16];
+	float tgen[12];
+	uint8_t bone_n, world_n, view_n, proj_n, tgen_n;
+} GeSgxMatrices;
 
 #include "ge_sgx_frame.h"
 
@@ -136,6 +152,7 @@ typedef struct {
 	uint32_t offset;
 	uint32_t vaddr;
 	uint32_t iaddr;
+	GeSgxMatrices mtx;
 
 	// Vertex layout of regs[VERTEXTYPE], computed when first needed
 	GeSgxVertexLayout layout;
@@ -182,6 +199,13 @@ void geSgxBuildTransfer(GeSgxWalker *w);
 
 
 void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout);
+
+// GE float: the 24 upper bits of an IEEE float
+static inline float geSgxFloat24(uint32_t data) {
+	union { uint32_t u; float f; } v;
+	v.u = (data & 0x00FFFFFFu) << 8;
+	return v.f;
+}
 
 // Last value of a GE command (24 bits)
 static inline uint32_t geSgxReg(const GeSgxWalker *w, uint32_t cmd) {

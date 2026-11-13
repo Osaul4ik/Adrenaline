@@ -44,6 +44,16 @@
 #define GE_CMD_VERTEXTYPE 0x12u
 #define GE_CMD_OFFSETADDR 0x13u
 #define GE_CMD_ORIGIN     0x14u
+#define GE_CMD_BONEMATRIXNUMBER  0x2Au
+#define GE_CMD_BONEMATRIXDATA    0x2Bu
+#define GE_CMD_WORLDMATRIXNUMBER 0x3Au
+#define GE_CMD_WORLDMATRIXDATA   0x3Bu
+#define GE_CMD_VIEWMATRIXNUMBER  0x3Cu
+#define GE_CMD_VIEWMATRIXDATA    0x3Du
+#define GE_CMD_PROJMATRIXNUMBER  0x3Eu
+#define GE_CMD_PROJMATRIXDATA    0x3Fu
+#define GE_CMD_TGENMATRIXNUMBER  0x40u
+#define GE_CMD_TGENMATRIXDATA    0x41u
 #define GE_CMD_FRAMEBUFPTR   0x9Cu
 #define GE_CMD_FRAMEBUFWIDTH 0x9Du
 #define GE_CMD_CLEARMODE  0xD3u
@@ -190,8 +200,10 @@ void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout) {
 			biggest = color_size[col];
 	}
 
+	layout->nrm_off = 0;
 	if (nrm) {
 		size = alignUp(size, comp_size[nrm]);
+		layout->nrm_off = size;
 		size += comp_size[nrm] * 3;
 		if (comp_size[nrm] > biggest)
 			biggest = comp_size[nrm];
@@ -209,6 +221,11 @@ void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout) {
 	size = alignUp(size, biggest);
 
 	layout->size = size * morphs;
+	layout->stride = size;
+	layout->morphs = morphs;
+	layout->wt_fmt = wt;
+	layout->weights = weights;
+	layout->nrm_fmt = nrm;
 	layout->tc_fmt = tc;
 	layout->color_fmt = color_size[col] ? col : 0;
 	layout->pos_fmt = pos;
@@ -473,6 +490,16 @@ static const uint8_t special_cmd[256] = {
 	[GE_CMD_ORIGIN] = 1,
 	[GE_CMD_LOADCLUT] = 1,
 	[GE_CMD_TRANSFERSTART] = 1,
+	[GE_CMD_BONEMATRIXNUMBER] = 1,
+	[GE_CMD_BONEMATRIXDATA] = 1,
+	[GE_CMD_WORLDMATRIXNUMBER] = 1,
+	[GE_CMD_WORLDMATRIXDATA] = 1,
+	[GE_CMD_VIEWMATRIXNUMBER] = 1,
+	[GE_CMD_VIEWMATRIXDATA] = 1,
+	[GE_CMD_PROJMATRIXNUMBER] = 1,
+	[GE_CMD_PROJMATRIXDATA] = 1,
+	[GE_CMD_TGENMATRIXNUMBER] = 1,
+	[GE_CMD_TGENMATRIXDATA] = 1,
 	// BJUMP: the bounding box result is not known, the draws after it are
 	// walked (as if the box was visible); BASE, VERTEXTYPE, CLEARMODE, the
 	// framebuffer and the rest are read from regs[] where they are used
@@ -585,6 +612,46 @@ special:
 					break;
 				case GE_CMD_TRANSFERSTART:
 					geSgxBuildTransfer(w);
+					break;
+				// Matrix uploads: a number, then the values one by one
+				case GE_CMD_BONEMATRIXNUMBER:
+					w->mtx.bone_n = (uint8_t)(data & 0x7F);
+					break;
+				case GE_CMD_BONEMATRIXDATA:
+					if (w->mtx.bone_n < 8 * 12)
+						w->mtx.bone[w->mtx.bone_n] = geSgxFloat24(data);
+					w->mtx.bone_n = (uint8_t)((w->mtx.bone_n + 1) & 0x7F);
+					break;
+				case GE_CMD_WORLDMATRIXNUMBER:
+					w->mtx.world_n = (uint8_t)(data & 0xF);
+					break;
+				case GE_CMD_WORLDMATRIXDATA:
+					if (w->mtx.world_n < 12)
+						w->mtx.world[w->mtx.world_n] = geSgxFloat24(data);
+					w->mtx.world_n = (uint8_t)((w->mtx.world_n + 1) & 0xF);
+					break;
+				case GE_CMD_VIEWMATRIXNUMBER:
+					w->mtx.view_n = (uint8_t)(data & 0xF);
+					break;
+				case GE_CMD_VIEWMATRIXDATA:
+					if (w->mtx.view_n < 12)
+						w->mtx.view[w->mtx.view_n] = geSgxFloat24(data);
+					w->mtx.view_n = (uint8_t)((w->mtx.view_n + 1) & 0xF);
+					break;
+				case GE_CMD_PROJMATRIXNUMBER:
+					w->mtx.proj_n = (uint8_t)(data & 0xF);
+					break;
+				case GE_CMD_PROJMATRIXDATA:
+					w->mtx.proj[w->mtx.proj_n & 0xF] = geSgxFloat24(data);
+					w->mtx.proj_n = (uint8_t)((w->mtx.proj_n + 1) & 0xF);
+					break;
+				case GE_CMD_TGENMATRIXNUMBER:
+					w->mtx.tgen_n = (uint8_t)(data & 0xF);
+					break;
+				case GE_CMD_TGENMATRIXDATA:
+					if (w->mtx.tgen_n < 12)
+						w->mtx.tgen[w->mtx.tgen_n] = geSgxFloat24(data);
+					w->mtx.tgen_n = (uint8_t)((w->mtx.tgen_n + 1) & 0xF);
 					break;
 				default:
 					break;

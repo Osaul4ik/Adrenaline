@@ -157,8 +157,9 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 	(some draw thread loops after it was rendered).
 */
 #define FRAME_SLOTS 4
-#define FRAME_VERTICES 32768
-#define FRAME_DRAWS 4096
+#define FRAME_VERTICES 65536
+#define FRAME_INDICES (3 * 65536)
+#define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
 enum {
@@ -191,7 +192,9 @@ static int initSlots(void) {
 		return 1;
 	int i;
 	for (i = 0; i < FRAME_SLOTS; i++) {
-		uint32_t vsize = (FRAME_VERTICES * sizeof(GeSgxVertex) + 0xFFF) & ~0xFFFu;
+		// Vertices, then indices: one GPU mapped block
+		uint32_t vbytes = FRAME_VERTICES * sizeof(GeSgxVertex);
+		uint32_t vsize = (vbytes + FRAME_INDICES * sizeof(uint16_t) + 0xFFF) & ~0xFFFu;
 		uint32_t dsize = (FRAME_DRAWS * sizeof(GeSgxDraw) + 0xFFF) & ~0xFFFu;
 		SceUID vm = sceKernelAllocMemBlock("SceGeSgxVertices", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, vsize, NULL);
 		SceUID dm = sceKernelAllocMemBlock("SceGeSgxDraws", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, dsize, NULL);
@@ -205,6 +208,8 @@ static int initSlots(void) {
 		memset(&slots[i], 0, sizeof(slots[i]));
 		slots[i].data.vertices = (GeSgxVertex *)vb;
 		slots[i].data.max_vertices = FRAME_VERTICES;
+		slots[i].data.indices = (uint16_t *)((uint8_t *)vb + vbytes);
+		slots[i].data.max_indices = FRAME_INDICES;
 		slots[i].data.draws = (GeSgxDraw *)db;
 		slots[i].data.max_draws = FRAME_DRAWS;
 		slots[i].state = SLOT_FREE;
@@ -226,8 +231,9 @@ static void acquireSlot(void) {
 		if (st == SLOT_FREE || (st == SLOT_RENDERED && draw_tick - s->rendered_tick >= GPU_DONE_TICKS)) {
 			s->state = SLOT_BUILDING;
 			s->data.nvertices = 0;
+			s->data.nindices = 0;
 			s->data.ndraws = 0;
-			s->data.skipped_3d = 0;
+			s->data.draws_3d = 0;
 			s->data.skipped_other = 0;
 			building = s;
 			walker.frame = &s->data;
@@ -587,7 +593,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
-	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0;
+	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
 	SceUInt64 session_start = 0;
 
 	// Per second
@@ -643,6 +649,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 				if (building) {
 					building->data.ndraws = 0;
 					building->data.nvertices = 0;
+					building->data.nindices = 0;
 				}
 			}
 			rates.resyncs = 0;
@@ -734,7 +741,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 				case GE_SGX_EVENT_FLIP: {
 					int nrects = geSgxWalkerFlip(&walker, e->a, rects, GE_SGX_FRAME_RECTS, &frame_stats);
 					if (walker.texture_fn) {
-						frame_stats_3d = building ? building->data.skipped_3d : 0;
+						frame_stats_3d = building ? building->data.draws_3d : 0;
+						frame_stats_indices = building ? building->data.nindices : 0;
 						frame_stats_other = building ? building->data.skipped_other : 0;
 						frame_stats_draws = building ? building->data.ndraws : 0;
 						frame_stats_verts = building ? building->data.nvertices : 0;
@@ -804,8 +812,8 @@ per_second:;
 			if (walker.texture_fn && (now - log_start < 1000 || now - session_start < 30 * 1000 * 1000)) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u 3d %u other %u | published %u dropped %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
-					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_3d, (unsigned)frame_stats_other,
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | published %u dropped %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d, (unsigned)frame_stats_other,
 					(unsigned)frames_published, (unsigned)frames_dropped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);

@@ -32,19 +32,24 @@
 // Output resolution: the PSP's 480x272 times this
 #define GE_SGX_SCALE 2
 
-// Vertices of one draw (GXM 16 bit indices must stay below 64000)
-#define GE_SGX_MAX_DRAW_VERTICES 60000
+// Vertices one draw may reference (16 bit indices)
+#define GE_SGX_MAX_DRAW_VERTICES 65536
 
+/*
+	Homogeneous: x, y are 960x544 pixels and z the depth 0..1, all three
+	multiplied by w (the clip w of 3D draws, 1 for 2D), so the GPU clips and
+	interpolates perspective correct; the vertex shader only maps the pixels
+	to clip space.
+*/
 typedef struct {
-	float x, y, z; // 960x544 pixels, z 0..1
-	float u, v;    // normalized
+	float x, y, z, w;
+	float u, v;     // normalized
 	uint32_t color; // 0xAABBGGRR
-} GeSgxVertex; // 24 bytes, the vertex stream of the GXM program
+	float fog;      // 1: no fog, 0: fog colour
+} GeSgxVertex; // 32 bytes, the vertex stream of the GXM program
 
 enum GeSgxDrawPrims {
 	GE_SGX_DRAW_TRIANGLES,
-	GE_SGX_DRAW_TRIANGLE_STRIP,
-	GE_SGX_DRAW_TRIANGLE_FAN,
 	GE_SGX_DRAW_LINES,
 	GE_SGX_DRAW_POINTS,
 };
@@ -58,6 +63,8 @@ enum GeSgxDrawFlags {
 	GE_SGX_DRAW_CLEAR        = 1 << 5, // clear mode
 	GE_SGX_DRAW_WRITE_COLOR  = 1 << 6, // clear mode: colour is written
 	GE_SGX_DRAW_WRITE_ALPHA  = 1 << 7, // clear mode: alpha (stencil) is written
+	GE_SGX_DRAW_WRITE_DEPTH  = 1 << 8, // depth is written
+	GE_SGX_DRAW_FOG          = 1 << 9, // fog (the vertices carry the factor)
 };
 
 enum GeSgxTexModes {
@@ -69,18 +76,20 @@ enum GeSgxTexModes {
 
 typedef struct {
 	uint8_t prim;   // GeSgxDrawPrims
-	uint8_t flags;  // GeSgxDrawFlags
 	uint8_t tfunc;  // TEXFUNC 0..4 (modulate, decal, blend, replace, add)
 	uint8_t atest_func; // GE alpha test function
 	uint8_t atest_ref;
+	uint16_t flags; // GeSgxDrawFlags
 	uint8_t tex_mode;   // GeSgxTexModes
-	uint8_t reserved[2];
+	uint8_t ztest;      // GE depth function (1: always)
 	uint32_t blend;     // BLENDMODE: src 0-3, dst 4-7, equation 8-10
 	uint32_t fix_a, fix_b; // fixed blend colours, 0x00BBGGRR
 	uint32_t env;       // TEXENVCOLOR, 0x00BBGGRR
+	uint32_t fog_color; // 0x00BBGGRR
 	int16_t scissor[4]; // x0, y0, x1, y1 in 960x544 pixels, x1/y1 exclusive
-	uint32_t first;     // first vertex in the frame's vertex array
-	uint32_t count;
+	uint32_t base;      // first vertex: the indices count from it
+	uint32_t first;     // first index in the frame's index array
+	uint32_t count;     // indices
 	int32_t texture;    // handle from the texture callback, -1: none
 	uint32_t fb;        // VRAM offset of the framebuffer drawn into
 } GeSgxDraw;
@@ -90,13 +99,17 @@ typedef struct {
 	uint32_t max_vertices;
 	uint32_t nvertices;
 
+	uint16_t *indices;
+	uint32_t max_indices;
+	uint32_t nindices;
+
 	GeSgxDraw *draws;
 	uint32_t max_draws;
 	uint32_t ndraws;
 
-	// Counted, not drawn (yet)
-	uint32_t skipped_3d;    // transformed (not through mode) draws
+	uint32_t draws_3d;      // transformed (not through mode) primitives built
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
+	uint32_t build_us;      // time spent building (set by the caller)
 } GeSgxFrameData;
 
 #endif

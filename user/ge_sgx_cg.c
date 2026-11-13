@@ -53,21 +53,27 @@ static SceShaccCgSourceFile source_file;
 int geSgxCgSource(uint32_t key, char *buf, int size) {
 	if (key == GE_SGX_SHADER_VERTEX) {
 		return snprintf(buf, size,
+			// Pixels times w to clip space (see GeSgxVertex)
 			"void main(\n"
-			"	float3 aPosition,\n"
+			"	float4 aPosition,\n"
 			"	float2 aTexcoord,\n"
 			"	float4 aColor,\n"
+			"	float aFog,\n"
 			"	out float4 vPosition : POSITION,\n"
 			"	out float2 vTexcoord : TEXCOORD0,\n"
+			"	out float vFog : TEXCOORD1,\n"
 			"	out float4 vColor : COLOR)\n"
 			"{\n"
-			"	vPosition = float4(aPosition.x * (2.0 / 960.0) - 1.0, 1.0 - aPosition.y * (2.0 / 544.0), aPosition.z, 1.0);\n"
+			"	float w = aPosition.w;\n"
+			"	vPosition = float4(aPosition.x * (2.0 / 960.0) - w, w - aPosition.y * (2.0 / 544.0), aPosition.z, w);\n"
 			"	vTexcoord = aTexcoord;\n"
+			"	vFog = aFog;\n"
 			"	vColor = aColor;\n"
 			"}\n");
 	}
 
 	int clear = (key >> 10) & 1;
+	int fog = (key >> 11) & 1;
 	int textured = key & 1;
 	int tfunc = (key >> 1) & 7;
 	int tcc = (key >> 4) & 1;
@@ -76,13 +82,14 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	int afunc = (key >> 7) & 7;
 
 	int n = snprintf(buf, size,
-		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s) : COLOR\n"
+		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s) : COLOR\n"
 		"{\n"
 		"	float4 v = vColor;\n"
 		"	float4 c = v;\n",
 		textured ? ", uniform sampler2D uTexture" : "",
 		(textured && tfunc == 2) ? ", uniform float4 uEnv" : "",
-		atest ? ", uniform float uAlphaRef" : "");
+		atest ? ", uniform float uAlphaRef" : "",
+		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "");
 
 	if (!clear && textured) {
 		static const char *funcs[5] = {
@@ -113,6 +120,10 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	if (dbl)
 		n += snprintf(buf + n, size - n, "	c.rgb = c.rgb * 2.0;\n");
 
+	// Fog after texturing, on the colour only
+	if (fog)
+		n += snprintf(buf + n, size - n, "	c.rgb = lerp(uFogColor.rgb, saturate(c.rgb), vFog);\n");
+
 	if (atest) {
 		static const char *tests[8] = {
 			"false",                                   // never
@@ -133,19 +144,20 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 
 int geSgxCgAllKeys(uint32_t *keys, int max) {
 	int n = 0;
-	uint32_t textured, tfunc, tcc, dbl, atest;
+	uint32_t textured, tfunc, tcc, dbl, atest, fog;
 
 #define ADD(k) do { if (n < max) keys[n] = (k); n++; } while (0)
 	ADD(GE_SGX_SHADER_VERTEX);
 	ADD(1u << 10); // clear
 	// alpha test: off, or one of the functions but ALWAYS (= off)
 	static const int8_t atests[8] = { -1, 0, 2, 3, 4, 5, 6, 7 };
+	for (fog = 0; fog < 2; fog++)
 	for (textured = 0; textured < 2; textured++) {
 		for (tfunc = 0; tfunc < (textured ? 5u : 1u); tfunc++) {
 			for (tcc = 0; tcc < (textured ? 2u : 1u); tcc++) {
 				for (dbl = 0; dbl < 2; dbl++) {
 					for (atest = 0; atest < 8; atest++) {
-						uint32_t key = 0;
+						uint32_t key = fog << 11;
 						if (textured)
 							key |= 1 | (tfunc << 1) | (tcc << 4);
 						if (dbl)

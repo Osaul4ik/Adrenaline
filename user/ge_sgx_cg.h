@@ -36,8 +36,9 @@
 // Written by adrenaline_user when it could not compile: the app compiles all programs at its next start
 #define GE_SGX_CG_REQUEST GE_SGX_CG_DIR "/compile_request"
 
-// Key of the vertex program (fragment program keys are below 0x800)
-#define GE_SGX_SHADER_VERTEX 0xFFFFu
+// Key of the vertex program (fragment program keys are below 0x1000; 0xFFFF
+// was the vertex program of the 2D only renderer)
+#define GE_SGX_SHADER_VERTEX 0xFFFEu
 
 // Cg source of a program
 int geSgxCgSource(uint32_t key, char *buf, int size);

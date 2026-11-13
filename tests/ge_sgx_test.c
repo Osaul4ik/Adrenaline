@@ -38,6 +38,7 @@ static const void *pageFn(void *user, uint32_t page) {
 
 static void w32(uint32_t addr, uint32_t v) { memcpy(host(addr), &v, 4); }
 static void w16(uint32_t addr, uint16_t v) { memcpy(host(addr), &v, 2); }
+static void w8(uint32_t addr, uint8_t v) { memcpy(host(addr), &v, 1); }
 static void wf(uint32_t addr, float v) { memcpy(host(addr), &v, 4); }
 static uint32_t C(uint32_t cmd, uint32_t data) { return (cmd << 24) | (data & 0xFFFFFF); }
 
@@ -472,6 +473,7 @@ static void testLongList(void) {
 /* ---- draw building (stage 1: through mode) ---- */
 
 static GeSgxVertex fverts[4096];
+static uint16_t fidx[16384];
 static GeSgxDraw fdraws[64];
 static GeSgxFrameData frame;
 static GeSgxTexDesc last_desc;
@@ -489,6 +491,8 @@ static void resetFrame(void) {
 	memset(&frame, 0, sizeof(frame));
 	frame.vertices = fverts;
 	frame.max_vertices = 4096;
+	frame.indices = fidx;
+	frame.max_indices = 16384;
 	frame.draws = fdraws;
 	frame.max_draws = 64;
 	w->frame = &frame;
@@ -534,25 +538,27 @@ static void testBuildSprites(void) {
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
 
-	CHECK(frame.ndraws == 1 && frame.nvertices == 12, "draws %u vertices %u", frame.ndraws, frame.nvertices);
+	CHECK(frame.ndraws == 1 && frame.nvertices == 8 && frame.nindices == 12, "draws %u vertices %u indices %u", frame.ndraws, frame.nvertices, frame.nindices);
 	CHECK(tex_calls == 2, "texture lookups %d", tex_calls);
 	CHECK(last_desc.addr == 0x09123450 && last_desc.bufw == 64 && last_desc.w == 64 && last_desc.h == 16 && last_desc.format == GE_TFMT_8888 && !last_desc.swizzle,
 	      "desc addr %08x bufw %u %ux%u fmt %u", last_desc.addr, last_desc.bufw, last_desc.w, last_desc.h, last_desc.format);
 	if (frame.ndraws == 1) {
 		GeSgxDraw *d = &fdraws[0];
-		CHECK(d->prim == GE_SGX_DRAW_TRIANGLES && d->first == 0 && d->count == 12 && d->texture == 7, "prim %u first %u count %u tex %d", d->prim, d->first, d->count, d->texture);
+		CHECK(d->prim == GE_SGX_DRAW_TRIANGLES && d->base == 0 && d->first == 0 && d->count == 12 && d->texture == 7, "prim %u first %u count %u tex %d", d->prim, d->first, d->count, d->texture);
+		CHECK(d->ztest == 1 && !(d->flags & (GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_FOG)), "2D depth %u flags %x", d->ztest, d->flags);
 		CHECK((d->flags & (GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_BLEND | GE_SGX_DRAW_TCC)) == (GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_BLEND | GE_SGX_DRAW_TCC) && !(d->flags & GE_SGX_DRAW_CLEAR),
 		      "flags %02x", d->flags);
 		CHECK(d->blend == 0x32 && d->tfunc == 0, "blend %x tfunc %u", d->blend, d->tfunc);
 		CHECK(d->scissor[0] == 0 && d->scissor[1] == 0 && d->scissor[2] == 960 && d->scissor[3] == 544, "scissor %d %d %d %d", d->scissor[0], d->scissor[1], d->scissor[2], d->scissor[3]);
 		CHECK(d->fb == 0x44000, "fb %x", d->fb);
 	}
-	/* first sprite: corners (20,40) (84,40) (20,72) | (84,40) (84,72) (20,72), colour of vertex 2 */
-	CHECK(feq(fverts[0].x, 20) && feq(fverts[0].y, 40) && feq(fverts[0].u, 0) && feq(fverts[0].v, 0), "v0 %f %f %f %f", fverts[0].x, fverts[0].y, fverts[0].u, fverts[0].v);
+	/* first sprite: corners (20,40) (84,40) (20,72) (84,72), triangles 0 1 2, 1 3 2, colour of vertex 2 */
+	CHECK(feq(fverts[0].x, 20) && feq(fverts[0].y, 40) && feq(fverts[0].u, 0) && feq(fverts[0].v, 0) && feq(fverts[0].w, 1), "v0 %f %f %f %f", fverts[0].x, fverts[0].y, fverts[0].u, fverts[0].v);
 	CHECK(feq(fverts[1].x, 84) && feq(fverts[1].y, 40) && feq(fverts[1].u, 0.5f) && feq(fverts[1].v, 0), "v1 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[1].u, fverts[1].v);
-	CHECK(feq(fverts[4].x, 84) && feq(fverts[4].y, 72) && feq(fverts[4].u, 0.5f) && feq(fverts[4].v, 1.0f), "v4 %f %f %f %f", fverts[4].x, fverts[4].y, fverts[4].u, fverts[4].v);
-	CHECK(fverts[0].color == 0xFF00FF00u && fverts[5].color == 0xFF00FF00u, "sprite colour %08x", fverts[0].color);
-	CHECK(feq(fverts[6].x, 200) && feq(fverts[6].u, 0.5f) && fverts[6].color == 0xFF0000FFu, "second sprite %f %f %08x", fverts[6].x, fverts[6].u, fverts[6].color);
+	CHECK(feq(fverts[3].x, 84) && feq(fverts[3].y, 72) && feq(fverts[3].u, 0.5f) && feq(fverts[3].v, 1.0f), "v3 %f %f %f %f", fverts[3].x, fverts[3].y, fverts[3].u, fverts[3].v);
+	CHECK(fverts[0].color == 0xFF00FF00u && fverts[2].color == 0xFF00FF00u && feq(fverts[0].fog, 1), "sprite colour %08x", fverts[0].color);
+	CHECK(fidx[0] == 0 && fidx[1] == 1 && fidx[2] == 2 && fidx[3] == 1 && fidx[4] == 3 && fidx[5] == 2, "sprite indices %u %u %u %u %u %u", fidx[0], fidx[1], fidx[2], fidx[3], fidx[4], fidx[5]);
+	CHECK(feq(fverts[4].x, 200) && feq(fverts[4].u, 0.5f) && fverts[4].color == 0xFF0000FFu && fidx[6] == 4 && fidx[11] == 6, "second sprite %f %f %08x idx %u", fverts[4].x, fverts[4].u, fverts[4].color, fidx[6]);
 }
 
 static void testBuildOther(void) {
@@ -573,7 +579,7 @@ static void testBuildOther(void) {
 	emit(&l, C(0x04, (2u << 16) | 3));   // line strip of 3 -> 2 lines
 	emit(&l, C(0x01, 0x900000));
 	emit(&l, C(0x04, (5u << 16) | 5));   // fan of 5
-	emit(&l, C(0x12, VT_COL565 | VT_POS16)); // 3D: counted, not built
+	emit(&l, C(0x12, VT_COL565 | VT_POS16)); // 3D, same state: joins the fan's draw
 	emit(&l, C(0x04, (3u << 16) | 3));
 	emit(&l, C(0x12, VT_COL565 | VT_POS16 | VT_THROUGH));
 	emit(&l, C(0x1E, 1));
@@ -585,13 +591,18 @@ static void testBuildOther(void) {
 	geSgxWalkerRun(w);
 
 	CHECK(frame.ndraws == 2, "draws %u", frame.ndraws);
-	CHECK(frame.skipped_3d == 1 && frame.skipped_other == 1, "skipped 3d %u other %u", frame.skipped_3d, frame.skipped_other);
+	CHECK(frame.draws_3d == 1 && frame.skipped_other == 1, "3d %u skipped other %u", frame.draws_3d, frame.skipped_other);
 	if (frame.ndraws == 2) {
-		CHECK(fdraws[0].prim == GE_SGX_DRAW_LINES && fdraws[0].count == 4, "line strip -> %u, %u verts", fdraws[0].prim, fdraws[0].count);
-		CHECK(fdraws[1].prim == GE_SGX_DRAW_TRIANGLE_FAN && fdraws[1].count == 5 && fdraws[1].first == 4, "fan %u %u %u", fdraws[1].prim, fdraws[1].count, fdraws[1].first);
+		CHECK(fdraws[0].prim == GE_SGX_DRAW_LINES && fdraws[0].count == 4 && fidx[0] == 0 && fidx[1] == 1 && fidx[2] == 1 && fidx[3] == 2,
+		      "line strip -> %u, %u indices", fdraws[0].prim, fdraws[0].count);
+		/* fan 0 1 2, 0 2 3, 0 3 4 over vertices 3..7, then the 3D triangle 8..10 */
+		CHECK(fdraws[1].prim == GE_SGX_DRAW_TRIANGLES && fdraws[1].count == 12 && fdraws[1].first == 4 && fdraws[1].base == 3,
+		      "fan %u %u %u base %u", fdraws[1].prim, fdraws[1].count, fdraws[1].first, fdraws[1].base);
+		CHECK(fidx[4] == 0 && fidx[5] == 1 && fidx[6] == 2 && fidx[7] == 0 && fidx[8] == 2 && fidx[9] == 3 && fidx[13] == 5 && fidx[15] == 7,
+		      "fan/3d indices %u %u %u .. %u %u", fidx[4], fidx[5], fidx[6], fidx[13], fidx[15]);
 	}
 	/* lines: (0,0)-(10,5), (10,5)-(20,10) scaled */
-	CHECK(feq(fverts[2].x, 20) && feq(fverts[2].y, 10) && feq(fverts[3].x, 40) && feq(fverts[3].z, 1.0f), "line 2 %f %f %f %f", fverts[2].x, fverts[2].y, fverts[3].x, fverts[3].z);
+	CHECK(feq(fverts[1].x, 20) && feq(fverts[1].y, 10) && feq(fverts[2].x, 40) && feq(fverts[2].z, 1.0f), "line 2 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[2].x, fverts[2].z);
 	CHECK(fverts[0].color == 0xFFFF0000u, "565 blue %08x", fverts[0].color);
 }
 
@@ -633,6 +644,126 @@ static void testBuildClearAndClut(void) {
 	CHECK(e5 == 0xFF000005u, "clut snapshot entry 5 %08x", e5);
 	CHECK(frame.ndraws == 2 && (fdraws[1].flags & GE_SGX_DRAW_CLEAR) && (fdraws[1].flags & GE_SGX_DRAW_WRITE_COLOR) && !(fdraws[1].flags & GE_SGX_DRAW_TEXTURED) && fdraws[1].texture == -1,
 	      "clear draw %u flags %02x", frame.ndraws, frame.ndraws > 1 ? fdraws[1].flags : 0);
+}
+
+static uint32_t F24(float f) {
+	uint32_t u;
+	memcpy(&u, &f, 4);
+	return u >> 8;
+}
+
+
+static void matrix(L *l, uint32_t num_cmd, const float *m, int n) {
+	int i;
+	emit(l, C(num_cmd, 0));
+	for (i = 0; i < n; i++)
+		emit(l, C(num_cmd + 1, F24(m[i])));
+}
+
+/* identity world and view, w = -z, PSP viewport 480x272 around 2048 */
+static void setup3D(L *l) {
+	static const float ident[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+	static const float proj[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1, 0, 0, 0, 0 };
+	matrix(l, 0x3A, ident, 12);
+	matrix(l, 0x3C, ident, 12);
+	matrix(l, 0x3E, proj, 16);
+	emit(l, C(0x42, F24(240.0f)));
+	emit(l, C(0x43, F24(-136.0f)));
+	emit(l, C(0x44, F24(-32767.5f)));
+	emit(l, C(0x45, F24(2048.0f)));
+	emit(l, C(0x46, F24(2048.0f)));
+	emit(l, C(0x47, F24(32767.5f)));
+	emit(l, C(0x4C, (2048 - 240) * 16));
+	emit(l, C(0x4D, (2048 - 136) * 16));
+	emit(l, C(0x48, F24(1.0f)));
+	emit(l, C(0x49, F24(1.0f)));
+	emit(l, C(0x4A, F24(0.0f)));
+	emit(l, C(0x4B, F24(0.0f)));
+}
+
+static void testBuild3D(void) {
+	resetFrame();
+	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
+	uint32_t v = 0x08900000;
+	static const float pos[6][3] = { { 9, 9, 9 }, { 9, 9, 9 }, { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 }, { 1, -1, -4 } };
+	int i;
+	for (i = 0; i < 6; i++) {
+		wf(v + i * 24, 0.25f);
+		wf(v + i * 24 + 4, 0.75f);
+		w32(v + i * 24 + 8, 0x80FF0000u + (uint32_t)i);
+		wf(v + i * 24 + 12, pos[i][0]);
+		wf(v + i * 24 + 16, pos[i][1]);
+		wf(v + i * 24 + 20, pos[i][2]);
+	}
+	w32(0x08910000, 0x05040302u);         // 8 bit indices 2 3 4 5
+
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x1F, 1));                 // fog: end 2, slope 0.25
+	emit(&l, C(0xCD, F24(2.0f)));
+	emit(&l, C(0xCE, F24(0.25f)));
+	emit(&l, C(0xCF, 0x123456));
+	emit(&l, C(0x23, 1));                 // depth test GEQUAL, written
+	emit(&l, C(0xDE, 7));
+	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF | VT_IDX8));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x02, 0x910000));
+	emit(&l, C(0x04, (4u << 16) | 4));    // indexed strip of 4
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 1 && frame.nvertices == 4 && frame.nindices == 6 && frame.draws_3d == 1, "3d draws %u verts %u idx %u", frame.ndraws, frame.nvertices, frame.nindices);
+	if (frame.ndraws == 1) {
+		GeSgxDraw *d = &fdraws[0];
+		CHECK(d->ztest == 7 && (d->flags & GE_SGX_DRAW_WRITE_DEPTH) && (d->flags & GE_SGX_DRAW_FOG) && d->fog_color == 0x123456, "3d state z %u flags %x fog %x", d->ztest, d->flags, d->fog_color);
+	}
+	/* strip 0 1 2, then 2 1 3 (odd triangle swapped) over vertices 2..5 */
+	CHECK(fidx[0] == 0 && fidx[1] == 1 && fidx[2] == 2 && fidx[3] == 2 && fidx[4] == 1 && fidx[5] == 3, "strip %u %u %u %u %u %u", fidx[0], fidx[1], fidx[2], fidx[3], fidx[4], fidx[5]);
+	GeSgxVertex *a = &fverts[0], *b = &fverts[1];
+	CHECK(feq(a->w, 2) && feq(a->x / a->w, 480) && feq(a->y / a->w, 272) && feq(a->z / a->w, 1.0f), "centre %f %f %f w %f", a->x / a->w, a->y / a->w, a->z / a->w, a->w);
+	CHECK(feq(b->x / b->w, 720) && feq(b->y / b->w, 136), "corner %f %f", b->x / b->w, b->y / b->w);
+	CHECK(feq(a->u, 0.25f) && feq(a->v, 0.75f) && a->color == 0x80FF0002u, "uv %f %f colour %08x", a->u, a->v, a->color);
+	CHECK(feq(a->fog, 0.0f) && feq(fverts[2].fog, 0.0f), "fog %f %f", a->fog, fverts[2].fog);
+	CHECK(w->iaddr == 0x08910004, "iaddr advanced %08x", w->iaddr);
+}
+
+static void testLightingSkinning(void) {
+	resetFrame();
+	/* weight u8, normal s8, position s16: 1 + 3 (+pad to 2) + 6 = 10 */
+	uint32_t v = 0x08900000;
+	w8(v + 0, 128);                       // weight 1.0
+	w8(v + 1, 0); w8(v + 2, 0); w8(v + 3, 127);
+	w16(v + 4, 0); w16(v + 6, 0); w16(v + 8, (uint16_t)(int16_t)-16384); // z -0.5
+
+	L l = { 0x08800000 };
+	setup3D(&l);
+	static const float bone[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5f, 0, -1.5f }; // moves to (0.5, 0, -2)
+	matrix(&l, 0x2A, bone, 12);
+	emit(&l, C(0x17, 1));                 // lighting, light 0 directional (0, 0, 1), white diffuse
+	emit(&l, C(0x18, 1));
+	emit(&l, C(0x5F, 0));
+	emit(&l, C(0x63, F24(0.0f)));
+	emit(&l, C(0x64, F24(0.0f)));
+	emit(&l, C(0x65, F24(1.0f)));
+	emit(&l, C(0x90, 0xFFFFFF));
+	emit(&l, C(0x56, 0xFFFFFF));          // material diffuse white
+	emit(&l, C(0x58, 0xFF));
+	emit(&l, C(0x5D, 0xFF));
+	emit(&l, C(0x12, VT_WT8 | VT_NRM8 | VT_POS16));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (0u << 16) | 1));    // one point
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 1 && frame.nvertices == 1 && fdraws[0].prim == GE_SGX_DRAW_POINTS, "point draws %u verts %u", frame.ndraws, frame.nvertices);
+	GeSgxVertex *a = &fverts[0];
+	CHECK(feq(a->w, 2) && feq(a->x / a->w, 600), "skinned %f w %f", a->x / a->w, a->w);
+	uint32_t r = a->color & 0xFF, al = a->color >> 24;
+	CHECK(r == 255 && ((a->color >> 8) & 0xFF) == r && al == 255, "lit colour %08x", a->color);
 }
 
 static void testTransferAlias(void) {
@@ -736,6 +867,8 @@ int main(void) {
 	testBuildSprites();
 	testBuildOther();
 	testBuildClearAndClut();
+	testBuild3D();
+	testLightingSkinning();
 	testTransferAlias();
 	testTexconv();
 
