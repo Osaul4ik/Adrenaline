@@ -69,6 +69,7 @@ typedef struct {
 
 typedef struct {
 	int qid;
+	uint32_t start;
 	uint32_t pc;
 	uint32_t stall; // 0: none
 	int started;
@@ -110,6 +111,13 @@ typedef struct {
 	int layout_valid;
 
 	GeSgxStats stats;
+
+	// The last list stopped as bad, for the log
+	struct {
+		uint32_t count; // lists stopped as bad so far
+		int qid;
+		uint32_t start, pc, depth;
+	} last_bad;
 
 	GeSgxRect rects[GE_SGX_MAX_RECTS];
 	int nrects;

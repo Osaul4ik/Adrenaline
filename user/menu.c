@@ -519,6 +519,12 @@ int AdrenalineDraw(SceSize args, void *argp) {
   static GeSgxFrame sgx_frame;
   vita2d_texture *sgx_tex = NULL;
   int sgx_tex_failed = 0;
+  struct {
+    SceUInt64 start, sgx, build, copy, swap, sync;
+    uint32_t loops;
+  } prof;
+  memset(&prof, 0, sizeof(prof));
+  prof.start = sceKernelGetProcessTimeWide();
   int sgx_scenes = 0;
   int last_sgx_active = 0;
 
@@ -619,6 +625,9 @@ int AdrenalineDraw(SceSize args, void *argp) {
       continue;
     }
 
+    // SGX renderer: where the draw thread's time goes (logged every 5 s)
+    SceUInt64 prof_t0 = sgx_active ? sceKernelGetProcessTimeWide() : 0, prof_t;
+
     // SGX renderer: the shown framebuffer's clears, at 960x544, into its own target
     if (sgx_active) {
       // This scene resets the vertex pool for the frame, the display scene
@@ -638,6 +647,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
         sgx_scenes++;
         GeSgxLog("GeSgx: draw scene %d, %d rects\n", sgx_scenes, sgx_frame.nrects);
       }
+
+      prof_t = sceKernelGetProcessTimeWide();
+      prof.sgx += prof_t - prof_t0;
+      prof_t0 = prof_t;
     }
 
     // Draw display
@@ -674,7 +687,17 @@ int AdrenalineDraw(SceSize args, void *argp) {
 
     if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops) {
       // Copy PSP framebuffer
+      if (sgx_active) {
+        prof_t = sceKernelGetProcessTimeWide();
+        prof.build += prof_t - prof_t0;
+        prof_t0 = prof_t;
+      }
       sceDmacMemcpy(psp_data, (void *)SCE_PSPEMU_FRAMEBUFFER, SCE_PSPEMU_FRAMEBUFFER_SIZE);
+      if (sgx_active) {
+        prof_t = sceKernelGetProcessTimeWide();
+        prof.copy += prof_t - prof_t0;
+        prof_t0 = prof_t;
+      }
 
       // Draw psp screen
       float scale_x = 2.00f;
@@ -747,16 +770,43 @@ int AdrenalineDraw(SceSize args, void *argp) {
       frames = 0;
     }
 
+    if (sgx_active) {
+      prof_t = sceKernelGetProcessTimeWide();
+      prof.build += prof_t - prof_t0;
+      prof_t0 = prof_t;
+    }
+
     // End drawing
     vita2d_end_drawing();
     vita2d_swap_buffers();
     frames++;
+
+    if (sgx_active) {
+      prof_t = sceKernelGetProcessTimeWide();
+      prof.swap += prof_t - prof_t0;
+      prof_t0 = prof_t;
+    }
 
     // Sync
     if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
       sceCompatLCDCSync();
     else
       sceDisplayWaitVblankStart();
+
+    if (sgx_active) {
+      prof_t = sceKernelGetProcessTimeWide();
+      prof.sync += prof_t - prof_t0;
+      prof.loops++;
+      if (prof_t - prof.start >= 5 * 1000 * 1000) {
+        uint32_t n = prof.loops ? prof.loops : 1;
+        GeSgxLog("GeSgx draw: %u loops/s, us per loop: sgx scene %u, build %u, fb copy %u, end+swap %u, sync %u\n",
+          (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
+          (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
+          (unsigned)(prof.swap / n), (unsigned)(prof.sync / n));
+        memset(&prof, 0, sizeof(prof));
+        prof.start = prof_t;
+      }
+    }
 
     // Ctrl
     if (menu_open)

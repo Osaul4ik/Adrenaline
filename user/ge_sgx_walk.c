@@ -606,6 +606,7 @@ void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int
 	memset(l, 0, sizeof(*l));
 	l->qid = qid;
 	l->pc = normalize(list) & ~3u;
+	l->start = l->pc;
 	l->stall = stall ? (normalize(stall) & ~3u) : 0;
 }
 
@@ -630,8 +631,15 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 		int res = walkList(w, &w->lists[0]);
 		if (res == WALK_STALLED)
 			break;
-		if (res == WALK_BAD)
+		if (res == WALK_BAD) {
+			GeSgxList *l = &w->lists[0];
 			w->stats.bad++;
+			w->last_bad.count++;
+			w->last_bad.qid = l->qid;
+			w->last_bad.start = l->start;
+			w->last_bad.pc = l->pc;
+			w->last_bad.depth = (uint32_t)l->depth;
+		}
 		else
 			w->stats.lists++;
 		removeList(w, 0);

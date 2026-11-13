@@ -421,7 +421,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t seen_seq = 0;
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
 	uint32_t read = 0, last_lost = 0;
-	uint32_t logged_types = 0, slow_logs = 0;
+	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	SceUInt64 session_start = 0;
 
 	// Per second
@@ -570,6 +570,18 @@ static int GeSgxThread(SceSize args, void *argp) {
 				walk_max_us = dt;
 		}
 
+		if (walker.last_bad.count != bad_logged && bad_logs < 10) {
+			bad_logged = walker.last_bad.count;
+			bad_logs++;
+			uint32_t op = 0;
+			const uint8_t *b = blockFn(NULL, walker.last_bad.pc & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1));
+			if (b)
+				memcpy(&op, b + (walker.last_bad.pc & (GE_SGX_BLOCK_SIZE - 1) & ~3u), 4);
+			GeSgxLog("GeSgx: bad list %d: start %08X stopped at %08X (op %08X), call depth %u\n",
+				walker.last_bad.qid, (unsigned)walker.last_bad.start, (unsigned)walker.last_bad.pc,
+				(unsigned)op, (unsigned)walker.last_bad.depth);
+		}
+
 		read += i;
 		events += i;
 		if (gap) {
@@ -627,9 +639,13 @@ int GeSgxStart(uint32_t ring_addr) {
 		return 0;
 
 	if (thid < 0) {
-		// Cores 0-2 only: core 3 is busy with other work on this system
+		/*
+			Core 0: measured in Carbon, the emulator keeps core 1 for audio
+			(~37%) and core 2 for the media engine (25-55%), core 0 has only
+			ScePspemuMain and Msfs (~5-10%). Core 3 is busy with other work.
+		*/
 		thid = sceKernelCreateThread("AdrenalineGeSgx", GeSgxThread, 0x90, 0x4000, 0,
-			SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2, NULL);
+			SCE_KERNEL_CPU_MASK_USER_0, NULL);
 		if (thid < 0)
 			return 0;
 		GeSgxTrackThread(thid, "AdrenalineGeSgx");
