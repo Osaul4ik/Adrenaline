@@ -17,7 +17,7 @@ jobs:
     name: Unit tests (GE native patcher)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run tests
         if: hashFiles('tests/Makefile') != ''
@@ -27,7 +27,7 @@ jobs:
     name: PSP side (systemctrl)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install PSPDEV
         run: |
@@ -56,7 +56,7 @@ jobs:
           if [ -f cef/systemctrl/ge_native.c ]; then required="SysMemForKernel:0xC4EEAF20"; fi
           python3 ci/check_prx.py user/flash0/kd/systemctrl.prx $required
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: systemctrl
           path: user/flash0/kd/systemctrl.prx
@@ -67,9 +67,9 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [tests, psp]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: systemctrl
           path: user/flash0/kd
@@ -81,7 +81,7 @@ jobs:
           /tmp/vdpm/bootstrap-vitasdk.sh
           export PATH="$VITASDK/bin:$PATH"
           # taihen for the user module, the rest for vita2d
-          vdpm install taihen zlib libpng libjpeg-turbo freetype
+          VDPM_NONINTERACTIVE=1 vdpm install taihen zlib libpng libjpeg-turbo freetype
           echo "VITASDK=$VITASDK" >> "$GITHUB_ENV"
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
 
@@ -119,13 +119,13 @@ jobs:
           cmake --build build/bubble -j"$(nproc)"
           unzip -l build/bubble/Adrenaline.vpk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Adrenaline-vpk
           path: build/bubble/Adrenaline.vpk
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: modules
           path: |
