@@ -224,6 +224,41 @@ int ResetAdrenalineSettings() {
   return 0;
 }
 
+/*
+  sceCompatLCDCSync waits for the next vblank of the PSP display by spinning:
+  measured, the draw thread used ~90% of a core, ~14.3 of every 16.7 ms in
+  this call. Sleep through most of the wait, then let it spin only for the
+  last lcdc_margin us. The PSP display runs at 59.94 Hz; the anchor is the
+  return of the previous sync, so there is no drift. If a sleep ever ends
+  after the vblank (a whole period spent in the sync), the margin grows.
+*/
+#define LCDC_PERIOD_US 16683
+#define LCDC_MARGIN_MIN_US 1500
+#define LCDC_MARGIN_MAX_US 6000
+
+static SceUInt64 lcdc_last = 0;
+static uint32_t lcdc_margin = LCDC_MARGIN_MIN_US;
+static uint32_t lcdc_misses = 0;
+
+static void waitPspLcdc(void) {
+  SceUInt64 now = sceKernelGetProcessTimeWide();
+
+  if (lcdc_last && now > lcdc_last && now - lcdc_last < LCDC_PERIOD_US - lcdc_margin)
+    sceKernelDelayThread((SceUInt)(lcdc_last + LCDC_PERIOD_US - lcdc_margin - now));
+
+  SceUInt64 before = sceKernelGetProcessTimeWide();
+  sceCompatLCDCSync();
+  lcdc_last = sceKernelGetProcessTimeWide();
+
+  // Slept past the vblank: the sync then waits for most of the next period
+  int slept = before > now + 200;
+  if (slept && lcdc_last - before > LCDC_PERIOD_US / 2) {
+    lcdc_misses++;
+    if (lcdc_margin < LCDC_MARGIN_MAX_US)
+      lcdc_margin += 500;
+  }
+}
+
 // SGX renderer test stage: what the Vita GPU drew (top right) and the measurements
 static void drawSgxOverlay(vita2d_texture *tex, const GeSgxFrame *f) {
   const float w = SCREEN_WIDTH / 4.0f, h = SCREEN_HEIGHT / 4.0f;
@@ -580,7 +615,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
 
       // Sync
       if (!adrenaline->pops_mode)
-        sceCompatLCDCSync();
+        waitPspLcdc();
 
       continue;
     }
@@ -789,7 +824,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
 
     // Sync
     if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
-      sceCompatLCDCSync();
+      waitPspLcdc();
     else
       sceDisplayWaitVblankStart();
 
@@ -799,10 +834,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
       prof.loops++;
       if (prof_t - prof.start >= 5 * 1000 * 1000) {
         uint32_t n = prof.loops ? prof.loops : 1;
-        GeSgxLog("GeSgx draw: %u loops/s, us per loop: sgx scene %u, build %u, fb copy %u, end+swap %u, sync %u\n",
+        GeSgxLog("GeSgx draw: %u loops/s, us per loop: sgx scene %u, build %u, fb copy %u, end+swap %u, sync %u (margin %u, misses %u)\n",
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
-          (unsigned)(prof.swap / n), (unsigned)(prof.sync / n));
+          (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }
