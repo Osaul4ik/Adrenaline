@@ -8,7 +8,9 @@ vita-headers NID database of firmware 3.60 (the oldest firmware Adrenaline
 supports), otherwise the module would fail to load on that firmware.
 Libraries that are not in the database (taiHEN, Adrenaline's own kubridge)
 are only listed. With a reference module, imports that were not there before
-are printed as well.
+are printed as well, and a library the reference module did not import must be
+weak: the user module is loaded before most system libraries are, and a strong
+import of a library that is not loaded yet fails with 0x8002D003 (NO_LIB).
 """
 
 import glob
@@ -76,9 +78,11 @@ def imports(d):
     it, ib = struct.unpack_from("<II", d, mi + 0x2C)
 
     result = {}
+    weak = set()
     va = base + it
     while va < base + ib:
         size = rd(va, 1)[0]
+        flags = struct.unpack("<H", rd(va + 4, 2))[0]
         if size == 0x34:
             nf = struct.unpack("<H", rd(va + 6, 2))[0]
             lnid, lname = struct.unpack("<II", rd(va + 0x10, 8))
@@ -90,8 +94,10 @@ def imports(d):
             sys.exit("unknown import entry size 0x%x" % size)
         name = cstr(lname)
         result.setdefault((name, lnid), set()).update(u32(fnids + 4 * i) for i in range(nf))
+        if flags & 0x8:
+            weak.add(name)
         va += size
-    return result
+    return result, weak
 
 
 def load_db(db_dir):
@@ -115,19 +121,19 @@ def main():
     paths = args[:i] + args[i + 2:]
 
     db = load_db(db_dir)
-    new = imports(load(paths[0]))
-    ref = imports(load(paths[1])) if len(paths) > 1 else None
+    new, new_weak = imports(load(paths[0]))
+    ref = imports(load(paths[1]))[0] if len(paths) > 1 else None
 
     missing = []
     for (lname, lnid), nids in sorted(new.items()):
         known = db.get(lnid)
         if not known:
-            print("  %-28s 0x%08X  %3d imports (not in the 3.60 database)" % (lname, lnid, len(nids)))
+            print("  %-28s 0x%08X  %3d imports%s (not in the 3.60 database)" % (lname, lnid, len(nids), " weak" if lname in new_weak else ""))
             continue
         for nid in sorted(nids):
             if nid not in known[1]:
                 missing.append((lname, nid))
-        print("  %-28s 0x%08X  %3d imports" % (lname, lnid, len(nids)))
+        print("  %-28s 0x%08X  %3d imports%s" % (lname, lnid, len(nids), " weak" if lname in new_weak else ""))
 
     if ref is not None:
         ref_pairs = {(l, n) for (l, _), ns in ref.items() for n in ns}
@@ -138,10 +144,20 @@ def main():
             fname = known[1].get(n, "?") if known else "?"
             print("  + %s 0x%08X %s" % (l, n, fname))
 
+    strong_new_libs = []
+    if ref is not None:
+        ref_libs = {l for (l, _) in ref}
+        strong_new_libs = [l for (l, _) in new if l not in ref_libs and l not in new_weak]
+        for l in strong_new_libs:
+            print("FAIL: new library %s is imported strongly (link its _stub_weak)" % l)
+
     if missing:
         print("FAIL: imports that firmware 3.60 does not export:")
         for l, n in missing:
             print("  %s 0x%08X" % (l, n))
+        sys.exit(1)
+
+    if strong_new_libs:
         sys.exit(1)
 
     print("OK: all imports of known libraries exist in firmware 3.60")
