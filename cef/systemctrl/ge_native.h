@@ -102,6 +102,7 @@ void *ge_host_ptr(u32 addr);
 #define GE_CMD_REGION1           0x15u
 #define GE_CMD_REGION2           0x16u
 #define GE_CMD_TEXTUREMAPENABLE  0x1Eu
+#define GE_CMD_ALPHABLENDENABLE  0x21u
 #define GE_CMD_BONEMATRIXDATA    0x2Bu
 #define GE_CMD_VIEWPORTXSCALE    0x42u
 #define GE_CMD_VIEWPORTYSCALE    0x43u
@@ -122,6 +123,7 @@ void *ge_host_ptr(u32 addr);
 #define GE_CMD_TRANSFERDST       0xB4u
 #define GE_CMD_TRANSFERDSTW      0xB5u
 #define GE_CMD_FRAMEBUFPIXFORMAT 0xD2u
+#define GE_CMD_CLEARMODE         0xD3u
 #define GE_CMD_SCISSOR1          0xD4u
 #define GE_CMD_SCISSOR2          0xD5u
 #define GE_CMD_TRANSFERSTART     0xEAu
@@ -169,6 +171,11 @@ void geNativeListPatch(u32 list, u32 stall);
 int geNativeListHasDraws(void);
 u32 geNativeListTakeFrameDraws(void);   /* upscaled draws since last call */
 int geNativeListBuildCopy(u32 *list);   /* fills a framebuffer copy list, returns words */
+
+#ifdef GE_NATIVE_TRACE
+extern int geNativeTraceOn;
+void geNativeTrace(const char *fmt, ...);
+#endif
 
 /* Integration (ge_native.c) */
 int GeNativeInit(void);

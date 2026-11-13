@@ -45,6 +45,140 @@ static u32 last_topaddr = 0;
 static int idle_flips = 0;
 static int passthrough = 0;
 
+#ifdef GE_NATIVE_TRACE
+/*
+	Frame trace (debug builds only). Hold L + R + SELECT in a game: the GE
+	work of the next two frames is recorded and written to
+	ms0:/ge_trace_N.txt. The buffer lives in RAM above the native buffers.
+*/
+#include <stdarg.h>
+
+#define TRACE_BUFFER      0x0AA00000
+#define TRACE_BUFFER_SIZE 0x00500000 /* up to 0x0AF00000 */
+#define TRACE_FRAMES      2
+
+static char *trace_buf = (char *)TRACE_BUFFER;
+static u32 trace_len = 0;
+static int trace_frames_left = 0;
+static int trace_armed = 1;
+static int trace_count = 0;
+static int (* _ctrlPeek)(SceCtrlData *pad_data, int count);
+
+static void traceAppend(const char *s, int n) {
+	if (trace_len + n > TRACE_BUFFER_SIZE)
+		return;
+	memcpy(trace_buf + trace_len, s, n);
+	trace_len += n;
+}
+
+/* Minimal formatter: %s %c %d %u %x %X %p with optional 0-padding and width */
+void geNativeTrace(const char *fmt, ...) {
+	char out[256];
+	int o = 0;
+	va_list ap;
+	va_start(ap, fmt);
+
+	while (*fmt && o < (int)sizeof(out) - 12) {
+		if (*fmt != '%') {
+			out[o++] = *fmt++;
+			continue;
+		}
+		fmt++;
+		int pad = 0, width = 0;
+		if (*fmt == '0') {
+			pad = 1;
+			fmt++;
+		}
+		while (*fmt >= '0' && *fmt <= '9')
+			width = width * 10 + (*fmt++ - '0');
+
+		char c = *fmt++;
+		if (c == 's') {
+			const char *str = va_arg(ap, const char *);
+			while (str && *str && o < (int)sizeof(out) - 12)
+				out[o++] = *str++;
+		} else if (c == 'c') {
+			out[o++] = (char)va_arg(ap, int);
+		} else if (c == 'd' || c == 'u' || c == 'x' || c == 'X' || c == 'p') {
+			u32 v = va_arg(ap, u32);
+			int neg = 0;
+			u32 base = (c == 'd' || c == 'u') ? 10 : 16;
+			if (c == 'd' && (int)v < 0) {
+				neg = 1;
+				v = -(int)v;
+			}
+			char tmp[12];
+			int t = 0;
+			do {
+				u32 d = v % base;
+				tmp[t++] = d < 10 ? '0' + d : (c == 'X' ? 'A' : 'a') + d - 10;
+				v /= base;
+			} while (v);
+			if (neg)
+				out[o++] = '-';
+			while (t < width--)
+				out[o++] = pad ? '0' : ' ';
+			while (t)
+				out[o++] = tmp[--t];
+		} else {
+			out[o++] = c;
+		}
+	}
+
+	va_end(ap);
+	traceAppend(out, o);
+}
+
+static void traceWrite(void) {
+	char path[32] = "ms0:/ge_trace_0.txt";
+	path[14] = '0' + (trace_count % 10);
+
+	int k1 = pspSdkSetK1(0);
+	SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, trace_buf, trace_len);
+		sceIoClose(fd);
+	}
+	pspSdkSetK1(k1);
+
+	trace_count++;
+}
+
+/* Called on every display flip */
+static void traceFlip(u32 top, int bufferwidth, int pixelformat, u32 draws) {
+	if (trace_frames_left > 0) {
+		geNativeTrace("S flip top %08x width %d format %d draws %u passthrough %d\n", top, bufferwidth, pixelformat, draws, passthrough);
+		if (--trace_frames_left == 0) {
+			geNativeTraceOn = 0;
+			traceWrite();
+		} else {
+			geNativeTrace("--- frame\n");
+		}
+		return;
+	}
+
+	if (!_ctrlPeek)
+		return;
+
+	SceCtrlData pad;
+	memset(&pad, 0, sizeof(pad));
+	_ctrlPeek(&pad, 1);
+	u32 combo = PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER | PSP_CTRL_SELECT;
+	if ((pad.Buttons & combo) == combo) {
+		if (trace_armed) {
+			trace_armed = 0;
+			trace_len = 0;
+			trace_frames_left = TRACE_FRAMES;
+			geNativeTrace("GE trace %d, frames %d\n--- frame\n", trace_count, TRACE_FRAMES);
+			geNativeTraceOn = 1;
+		}
+	} else {
+		trace_armed = 1;
+	}
+}
+#endif
+
+
 static void copyFrameBuffer(void) {
 	if (passthrough)
 		return;
@@ -106,8 +240,13 @@ static int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, 
 
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
 	u32 top = (u32)topaddr & 0x0FFFFFFF;
+	u32 draws = geNativeListTakeFrameDraws();
 
-	if (geNativeListTakeFrameDraws()) {
+#ifdef GE_NATIVE_TRACE
+	traceFlip(top, bufferwidth, pixelformat, draws);
+#endif
+
+	if (draws) {
 		idle_flips = 0;
 	} else if (top && top != last_topaddr) {
 		// A different buffer is shown and the GE drew nothing into ours:
@@ -174,6 +313,9 @@ int GeNativeInit(void) {
 			return 0;
 		}
 	}
+#ifdef GE_NATIVE_TRACE
+	_ctrlPeek = _sceCtrlPeekBufferPositive;
+#endif
 
 	_sceGeEdramGetAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
 	_sceGeEdramGetSize = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1F6752AD);

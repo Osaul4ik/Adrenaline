@@ -26,6 +26,14 @@
 
 #include "ge_native.h"
 
+#ifdef GE_NATIVE_TRACE
+/* Frame trace (debug builds): ge_native.c collects the lines */
+int geNativeTraceOn = 0;
+#define TRACE(...) do { if (geNativeTraceOn) geNativeTrace(__VA_ARGS__); } while (0)
+#else
+#define TRACE(...) do { } while (0)
+#endif
+
 #define GE_MAX_COMMANDS   (1 << 20)
 #define GE_STACK_SIZE     64
 #define GE_MAX_FRAMEBUFS  16
@@ -71,6 +79,8 @@ typedef struct {
 
 	u32 framebuf_addr[GE_MAX_FRAMEBUFS];
 	u32 framebuf_count;
+
+	u32 tex0; /* address of texture level 0, for the trace */
 } GeState;
 
 typedef struct {
@@ -583,6 +593,14 @@ static int setDrawEnabled(u32 addr, u32 cur, u32 op) {
 	return 1;
 }
 
+static void traceDraw(u32 addr, u32 op, int enabled) {
+	TRACE("D %08x op %08x vt %06x v %08x clr %d tex %d %08x blend %d fb %08x %s\n", addr, op, state.vertex_type, state.vertex_addr,
+	      state.ge_cmd[GE_CMD_CLEARMODE] & 1, state.ge_cmd[GE_CMD_TEXTUREMAPENABLE] & 1, state.tex0,
+	      state.ge_cmd[GE_CMD_ALPHABLENDENABLE] & 1, state.framebuf,
+	      enabled ? "on" : (state.ignore_framebuf ? "OFF fb" : "OFF tex"));
+	(void)addr; (void)op; (void)enabled;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Public                                                                     */
 /* ------------------------------------------------------------------------ */
@@ -615,6 +633,8 @@ void geNativeListPatch(u32 list, u32 stall) {
 
 	list &= 0x0FFFFFFF;
 	stall &= 0x0FFFFFFF;
+
+	TRACE("L %08x stall %08x\n", list, stall);
 
 	for (n = 0; list && (!stall || list != stall) && n < GE_MAX_COMMANDS; list += 4, n++) {
 		if (!geAddrOk(list, 4))
@@ -662,6 +682,7 @@ void geNativeListPatch(u32 list, u32 stall) {
 					break;
 				}
 
+				TRACE("C call %08x -> %08x\n", list, target);
 				if (push(list, state.base, state.offset) == 0)
 					list = target - 4;
 				break;
@@ -671,6 +692,7 @@ void geNativeListPatch(u32 list, u32 stall) {
 				target = ((state.base | data) + state.offset) & 0x0FFFFFFC;
 				if (!geAddrOk(target, 4))
 					return;
+				TRACE("C %s %08x -> %08x\n", cmd == GE_CMD_JUMP ? "jump" : "bjump", list, target);
 				list = target - 4;
 				break;
 
@@ -732,6 +754,7 @@ void geNativeListPatch(u32 list, u32 stall) {
 					}
 
 					case GE_CMD_FINISH:
+						TRACE("C finish %08x\n", list);
 						return;
 
 					default:
@@ -759,7 +782,9 @@ void geNativeListPatch(u32 list, u32 stall) {
 			{
 				state.has_draws = 1;
 
-				if (!setDrawEnabled(list, cur, op))
+				int enabled = setDrawEnabled(list, cur, op);
+				traceDraw(list, op, enabled);
+				if (!enabled)
 					break;
 
 				if ((state.vertex_type & GE_VTYPE_THROUGH) == GE_VTYPE_THROUGH) {
@@ -787,7 +812,9 @@ void geNativeListPatch(u32 list, u32 stall) {
 			{
 				state.has_draws = 1;
 
-				if (!setDrawEnabled(list, cur, op))
+				int enabled = setDrawEnabled(list, cur, op);
+				traceDraw(list, op, enabled);
+				if (!enabled)
 					break;
 
 				if ((state.vertex_type & GE_VTYPE_THROUGH) == GE_VTYPE_THROUGH) {
@@ -835,6 +862,8 @@ void geNativeListPatch(u32 list, u32 stall) {
 
 					insertFramebuf(state.framebuf);
 
+					TRACE("F %08x ptr %06x width %06x -> %s\n", list, state.framebufptr & 0xFFFFFF, state.framebufwidth & 0xFFFFFF, state.ignore_framebuf ? "IGNORED" : "hires");
+
 					state.framebufptr = 0;
 					state.framebufwidth = 0;
 				}
@@ -866,6 +895,9 @@ void geNativeListPatch(u32 list, u32 stall) {
 				if (state.texbufptr[index] && state.texbufwidth[index]) {
 					u32 texaddr = ((state.texbufwidth[index] & 0x0F0000) << 8) | (state.texbufptr[index] & 0xFFFFFF);
 					state.ignore_texture = (texaddr != state.framebuf && findFramebuf(texaddr) >= 0);
+					if (index == 0)
+						state.tex0 = texaddr;
+					TRACE("T%d %08x tex %08x w %d%s\n", index, list, texaddr, state.texbufwidth[index] & 0xFFFF, findFramebuf(texaddr) >= 0 ? (texaddr == state.framebuf ? " =current fb" : " =OTHER fb") : "");
 
 					state.texbufptr[index] = 0;
 					state.texbufwidth[index] = 0;
@@ -883,26 +915,42 @@ void geNativeListPatch(u32 list, u32 stall) {
 			case GE_CMD_VIEWPORTXSCALE:
 			case GE_CMD_VIEWPORTYSCALE:
 				geSet(list, op, (cmd << 24) | geToF24(geF24(data) * 2.0f));
+				TRACE("V %02x %08x %06x -> %06x\n", cmd, list, data, geRead(list) & 0xFFFFFF);
 				break;
 
 			case GE_CMD_VIEWPORTXCENTER:
 			case GE_CMD_VIEWPORTYCENTER:
 				geSet(list, op, (cmd << 24) | geToF24(geF24(data) * 2.0f - 2048.0f));
+				TRACE("V %02x %08x %06x -> %06x\n", cmd, list, data, geRead(list) & 0xFFFFFF);
 				break;
 
 			case GE_CMD_OFFSETX:
 			case GE_CMD_OFFSETY:
 				geSet(list, op, (cmd << 24) | clampU((int)(data & 0xFFFF) * 2 - 2048 * 16, 0xFFFF));
+				TRACE("V %02x %08x %06x -> %06x\n", cmd, list, data, geRead(list) & 0xFFFFFF);
 				break;
 
 			case GE_CMD_REGION1:
 			case GE_CMD_SCISSOR1:
 				geSet(list, op, (cmd << 24) | scaleCornerStart(data));
+				TRACE("V %02x %08x %06x -> %06x\n", cmd, list, data, geRead(list) & 0xFFFFFF);
 				break;
 
 			case GE_CMD_REGION2:
 			case GE_CMD_SCISSOR2:
 				geSet(list, op, (cmd << 24) | scaleCornerEnd(data));
+				TRACE("V %02x %08x %06x -> %06x\n", cmd, list, data, geRead(list) & 0xFFFFFF);
+				break;
+
+			case GE_CMD_TRANSFERSTART:
+				TRACE("X %08x src %06x/%06x pos %06x dst %06x/%06x pos %06x size %06x bpp %d\n", list,
+				      state.ge_cmd[GE_CMD_TRANSFERSRC], state.ge_cmd[GE_CMD_TRANSFERSRCW], state.ge_cmd[GE_CMD_TRANSFERSRCPOS],
+				      state.ge_cmd[GE_CMD_TRANSFERDST], state.ge_cmd[GE_CMD_TRANSFERDSTW], state.ge_cmd[GE_CMD_TRANSFERDSTPOS],
+				      state.ge_cmd[GE_CMD_TRANSFERSIZE], (data & 1) ? 32 : 16);
+				break;
+
+			case GE_CMD_CLEARMODE:
+				TRACE("M %08x clear %06x\n", list, data);
 				break;
 
 			default:
