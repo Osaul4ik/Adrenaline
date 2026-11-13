@@ -703,7 +703,9 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	GeSgxTextureFn texture_fn = w->texture_fn;
 	void *texture_user = w->texture_user;
 	GeSgxBulkFn bulk_fn = w->bulk_fn;
+	uint32_t (* clock_fn)(void) = w->clock_fn;
 	geSgxWalkerInit(w, w->page_fn, w->user);
+	w->clock_fn = clock_fn;
 	w->frame = frame;
 	w->texture_fn = texture_fn;
 	w->texture_user = texture_user;

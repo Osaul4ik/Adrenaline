@@ -183,6 +183,8 @@ typedef struct {
 	GeSgxTextureFn texture_fn;
 	void *texture_user;
 	GeSgxBulkFn bulk_fn;
+	// Optional microsecond clock, for the build profile in the frame
+	uint32_t (* clock_fn)(void);
 	// A register, matrix or CLUT changed since the last primitive built
 	int state_dirty;
 	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];

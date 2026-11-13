@@ -150,6 +150,10 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 	return NULL;
 }
 
+static uint32_t clockUs(void) {
+	return sceKernelGetProcessTimeLow();
+}
+
 // Vertices of big primitives: one DMA (about 80 us a call, then 2 ns/byte against 11 for a copy)
 static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 	const uint8_t *src = geSgxPspPtr(addr, size);
@@ -243,6 +247,9 @@ static void acquireSlot(void) {
 			s->data.nindices = 0;
 			s->data.ndraws = 0;
 			s->data.draws_3d = 0;
+			s->data.vertices_built = 0;
+			s->data.state_builds = 0;
+			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
 			s->data.skipped_other = 0;
 			building = s;
 			walker.frame = &s->data;
@@ -609,7 +616,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
-	uint32_t built_vertices = 0, built_states = 0; // per log interval
+	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[4] = { 0 }; // per log interval
 	SceUInt64 session_start = 0;
 
 	// Per second
@@ -647,6 +654,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
+			walker.clock_fn = clockUs;
 			acquireSlot();
 		}
 	}
@@ -766,6 +774,11 @@ static int GeSgxThread(SceSize args, void *argp) {
 							frame_stats_verts = building->data.nvertices;
 							built_vertices += building->data.vertices_built;
 							built_states += building->data.state_builds;
+							built_us[0] += building->data.us_state;
+							built_us[1] += building->data.us_texture;
+							built_us[2] += building->data.us_vertices;
+							built_us[3] += building->data.us_indices;
+							built_frames++;
 						}
 						publishSlot(e->a);
 
@@ -849,13 +862,15 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | interval: vertices %u states %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d, (unsigned)frame_stats_other,
-					(unsigned)built_vertices, (unsigned)built_states,
+					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
+					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[2], (unsigned)built_us[3],
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
-				built_vertices = built_states = 0;
+				built_vertices = built_states = built_frames = 0;
+				memset(built_us, 0, sizeof(built_us));
 			}
 
 			if (now - thread_report >= LOG_INTERVAL_US) {

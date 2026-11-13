@@ -241,11 +241,14 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	e->bytes = bytes;
 	total_bytes += bytes;
 
-	if (!geSgxTexConvert(d, linear, rowbytes, (uint8_t *)gpu, stride, clut_rgba) ||
+	// Converted in cached memory, then one DMA into the GPU's (uncached) memory
+	uint8_t *out = linear == staging[0] ? staging[1] : staging[0];
+	if (stride * d->h > STAGING_BYTES || !geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) ||
 	    sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) < 0) {
 		freeMemory(e);
 		return -1;
 	}
+	sceDmacMemcpy(gpu, out, stride * d->h);
 
 	e->key = *d;
 	e->key.clut = NULL;

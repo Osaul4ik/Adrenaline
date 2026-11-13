@@ -837,12 +837,24 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	static GeSgxDraw cached_d;
 	static Xform cached_x;
 	static const GeSgxWalker *cached_w = NULL;
+	uint32_t (* clk)(void) = w->clock_fn;
+	uint32_t t0 = clk ? clk() : 0, t1;
 	if (w->state_dirty || cached_w != w) {
 		drawState(w, &cached_d);
 		xformInit(w, l, &cached_x);
 		cached_x.tex_w = cached_x.tex_h = 1.0f;
 		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
+			if (clk) {
+				t1 = clk();
+				f->us_state += t1 - t0;
+				t0 = t1;
+			}
 			cached_d.texture = drawTexture(w);
+			if (clk) {
+				t1 = clk();
+				f->us_texture += t1 - t0;
+				t0 = t1;
+			}
 			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
 			cached_x.tex_w = 1.0f / (float)(1u << (size & 0xF));
 			cached_x.tex_h = 1.0f / (float)(1u << ((size >> 8) & 0xF));
@@ -850,6 +862,11 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		cached_w = w;
 		w->state_dirty = 0;
 		f->state_builds++;
+	}
+	if (clk) {
+		t1 = clk();
+		f->us_state += t1 - t0;
+		t0 = t1;
 	}
 	if ((cached_d.flags & GE_SGX_DRAW_TEXTURED) && cached_d.texture < 0) {
 		f->skipped_other++;
@@ -916,6 +933,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	GeSgxVertex *vout = &f->vertices[vstart];
 	uint16_t *iout = &f->indices[istart];
 	uint32_t nv = 0, ni = 0;
+	uint32_t t_vert = 0;
 
 	// The vertex data: the range of a non-indexed or compact indexed primitive at once
 	uint32_t range = imax - imin + 1;
@@ -973,6 +991,11 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			nv = count;
 		}
 		const uint32_t *s = prim_index;
+		if (clk) {
+			t1 = clk();
+			t_vert = t1 - t0;
+			t0 = t1;
+		}
 
 		switch (type) {
 			case GE_PRIM_POINTS:
@@ -1029,6 +1052,14 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	f->nvertices = vstart + nv;
 	f->nindices = istart + ni;
 	f->vertices_built += nv;
+	if (clk) {
+		t1 = clk();
+		if (type == GE_PRIM_RECTANGLES)
+			t_vert += t1 - t0; // corners and indices together
+		else
+			f->us_indices += t1 - t0;
+		f->us_vertices += t_vert;
+	}
 	if (!xp->through)
 		f->draws_3d++;
 

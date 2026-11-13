@@ -111,6 +111,9 @@ typedef struct {
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew
+	// Build profile (with a clock): state setup, texture lookups, vertices
+	// (reading and transforming), indices and the rest of a primitive
+	uint32_t us_state, us_texture, us_vertices, us_indices;
 } GeSgxFrameData;
 
 #endif
