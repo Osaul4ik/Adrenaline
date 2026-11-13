@@ -282,7 +282,10 @@ static void drawSgxOverlay(vita2d_texture *tex, float tex_w, float tex_h, const 
   pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "walk %u us/s  wait %u/%u", (unsigned)(f->walk_us), (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts));
   pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "2D %u draws %u vtx %u us", (unsigned)(r->draws), (unsigned)(r->vertices), (unsigned)(r->render_us));
   pgf_draw_textf(x, ty + 3 * 18.0f, WHITE, fs, "3D %u  wait %u  other fb %u", (unsigned)skipped_3d, (unsigned)(r->waiting), (unsigned)(r->other_fb));
-  pgf_draw_textf(x, ty + 4 * 18.0f, WHITE, fs, "shaders %u+%u fail %u cg %d", (unsigned)ss.ready, (unsigned)ss.queued, (unsigned)ss.failed, ss.compiler);
+  if (ss.ready == 0 && ss.compiler < 0)
+    pgf_draw_textf(x, ty + 4 * 18.0f, WHITE, fs, "no shaders: reboot, start Adrenaline");
+  else
+    pgf_draw_textf(x, ty + 4 * 18.0f, WHITE, fs, "shaders %u+%u fail %u cg %d", (unsigned)ss.ready, (unsigned)ss.queued, (unsigned)ss.failed, ss.compiler);
 }
 
 void drawMenu() {

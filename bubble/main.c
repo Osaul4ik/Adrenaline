@@ -39,6 +39,8 @@
 
 #include "../adrenaline_compat.h"
 #include "../user/ge_sgx_cg.h"
+#include "../user/main.h"
+#include <stddef.h>
 
 #define printf psvDebugScreenPrintf
 
@@ -155,17 +157,41 @@ static void cgFree(void *ptr) {
 }
 
 static void compileLog(uint32_t key, int line, const char *msg) {
-	printf("  %04X line %d: %s\n", (unsigned)key, line, msg);
+	char buf[256];
+	int n = snprintf(buf, sizeof(buf), "%04X line %d: %s\n", (unsigned)key, line, msg);
+	printf("  %s", buf);
+	SceUID fd = sceIoOpen(GE_SGX_CG_DIR "/compile_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, buf, n > 0 && n < (int)sizeof(buf) ? n : 0);
+		sceIoClose(fd);
+	}
+}
+
+// The SGX renderer option of the Adrenaline menu (adrenaline.bin), 0 if not set
+static int sgxRendererOption(void) {
+	int value = 0;
+	SceUID fd = sceIoOpen("ux0:app/" ADRENALINE_TITLEID "/adrenaline.bin", SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return 0;
+	if (sceIoLseek(fd, offsetof(AdrenalineConfig, sgx_renderer), SCE_SEEK_SET) < 0 ||
+	    sceIoRead(fd, &value, sizeof(value)) != sizeof(value))
+		value = 0;
+	sceIoClose(fd);
+	return value;
 }
 
 /*
-	SGX renderer: adrenaline_user asks for its shaders (GE_SGX_CG_REQUEST)
-	when it cannot load libshacccg.suprx inside the emulator. Here, in a
-	normal app, it can: compile every program that is not cached yet.
+	SGX renderer: libshacccg.suprx cannot be loaded inside the emulator
+	(ScePspemu), only in a normal app like this one. With the renderer on
+	(or when adrenaline_user asked for it, GE_SGX_CG_REQUEST), compile every
+	program that is not cached yet. This app runs at the first start of
+	Adrenaline after a reboot (afterwards the system starts the emulator
+	directly).
 */
 static void compileSgxShaders(void) {
 	SceIoStat stat;
-	if (sceIoGetstat(GE_SGX_CG_REQUEST, &stat) < 0)
+	int requested = sceIoGetstat(GE_SGX_CG_REQUEST, &stat) >= 0;
+	if (!requested && sgxRendererOption() < 2)
 		return;
 
 	static uint32_t keys[512];
