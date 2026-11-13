@@ -112,7 +112,18 @@ jobs:
           cmake -S user -B build/user -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
           cmake --build build/user -j"$(nproc)"
-          cp build/user/adrenaline_user.suprx bubble/pkg/sce_module/adrenaline_user.suprx
+
+      - name: Check adrenaline_user.suprx imports
+        # Every import must exist in firmware 3.60, or the module fails to load;
+        # also lists what is new compared to the prebuilt module
+        run: |
+          pip install --quiet pyyaml
+          git clone --depth 1 https://github.com/vitasdk/vita-headers /tmp/vita-headers
+          python3 ci/check_vita_imports.py build/user/adrenaline_user.suprx \
+            bubble/pkg/sce_module/adrenaline_user.suprx --db /tmp/vita-headers/db
+
+      - name: Use the new adrenaline_user.suprx
+        run: cp build/user/adrenaline_user.suprx bubble/pkg/sce_module/adrenaline_user.suprx
 
       - name: Build VPK
         # adrenaline_kernel.skprx, adrenaline_vsh.suprx, usbdevice.skprx and eboot.pbp
