@@ -71,6 +71,8 @@ jobs:
     name: Vita side and VPK
     runs-on: ubuntu-24.04
     needs: [tests, psp]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -147,3 +149,21 @@ jobs:
             build/user/adrenaline_user.suprx
             user/flash0/kd/systemctrl.prx
           if-no-files-found: error
+
+      - name: Publish branch build as prerelease
+        # One rolling prerelease per branch (tag build-<branch>) with a direct VPK link
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          tag="build-${BRANCH//\//-}"
+          cp build/user/adrenaline_user build/adrenaline_user.elf
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" --prerelease --target "$GITHUB_SHA" \
+            --title "Build ${BRANCH} ${GITHUB_SHA::7}" \
+            --notes "Automatic build of ${BRANCH} at ${GITHUB_SHA}. Not a release." \
+            build/bubble/Adrenaline.vpk \
+            build/user/adrenaline_user.suprx \
+            build/adrenaline_user.elf \
+            user/flash0/kd/systemctrl.prx
