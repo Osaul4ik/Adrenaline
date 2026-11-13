@@ -389,11 +389,13 @@ static int InitAdrenaline() {
   SceUID compat_thid = sceKernelCreateThread("AdrenalineCompat", AdrenalineCompat, 0x60, 0x8000, 0, 0, NULL);
   if (compat_thid >= 0)
     sceKernelStartThread(compat_thid, 0, NULL);
+  GeSgxTrackThread(compat_thid, "AdrenalineCompat");
 
   // Create and start AdrenalineDraw thread
   SceUID draw_thid = sceKernelCreateThread("AdrenalineDraw", AdrenalineDraw, 0xA0, 0x10000, 0, 0, NULL);
   if (draw_thid >= 0)
     sceKernelStartThread(draw_thid, 0, NULL);
+  GeSgxTrackThread(draw_thid, "AdrenalineDraw");
 
   return 0;
 }
@@ -484,7 +486,9 @@ static SceUID sceKernelCreateThreadPatched(const char *name, SceKernelThreadEntr
     entry = (SceKernelThreadEntry)ScePspemuRemoteMsfs;
   }
 
-  return TAI_CONTINUE(SceUID, sceKernelCreateThreadRef, name, entry, initPriority, stackSize, attr, cpuAffinityMask, option);
+  SceUID uid = TAI_CONTINUE(SceUID, sceKernelCreateThreadRef, name, entry, initPriority, stackSize, attr, cpuAffinityMask, option);
+  GeSgxTrackThread(uid, name);
+  return uid;
 }
 
 static int ScePspemuGetParamPatched(char *discid, int *parentallevel, char *gamedataid, char *appver, int *bootable, int *isPops, int *isPocketStation) {

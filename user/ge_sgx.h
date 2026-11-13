@@ -20,6 +20,7 @@
 #define __GE_SGX_H__
 
 #include <stdint.h>
+#include <psp2/types.h>
 #include "ge_sgx_walk.h"
 
 #define GE_SGX_FRAME_RECTS 64
@@ -51,6 +52,9 @@ typedef struct {
 
 // Appends a line to ux0:data/adrenaline_sgx_log.txt
 void GeSgxLog(const char *fmt, ...);
+
+// Thread to report in the log (CPU use, core), no-op when the option is off
+void GeSgxTrackThread(SceUID uid, const char *name);
 
 // Kermit command from systemctrl: start reading the ring (1) or not (0)
 int GeSgxStart(uint32_t ring_addr);

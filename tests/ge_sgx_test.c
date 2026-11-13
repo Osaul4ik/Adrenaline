@@ -199,12 +199,12 @@ static void testStall(void) {
 	emit(&l2, C(0x0C, 0));
 	geSgxWalkerList(w, 4, 0x08810000, 0, 0);
 	geSgxWalkerRun(w);
-	CHECK(w->count == 2 && w->fbp == 0, "second list must wait: count %d fbp %06x", w->count, w->fbp);
+	CHECK(w->count == 2 && geSgxReg(w, 0x9C) == 0, "second list must wait: count %d fbp %06x", w->count, geSgxReg(w, 0x9C));
 
 	geSgxWalkerStall(w, 3, mid + 4);
 	geSgxWalkerRun(w);
 	CHECK(w->count == 0, "both finished, count %d", w->count);
-	CHECK(w->fbp == 0x44000, "second list ran after: fbp %06x", w->fbp);
+	CHECK(geSgxReg(w, 0x9C) == 0x44000, "second list ran after: fbp %06x", geSgxReg(w, 0x9C));
 
 	GeSgxRect out[4];
 	GeSgxStats st;
@@ -231,8 +231,8 @@ static void testCallJumpOrigin(void) {
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
 	CHECK(w->count == 0 && w->stats.bad == 0, "count %d bad %u", w->count, w->stats.bad);
-	CHECK(w->fbw == 0x123, "sub ran: fbw %x", w->fbw);
-	CHECK(w->fbp == 0, "jump skipped the FBP: %x", w->fbp);
+	CHECK(geSgxReg(w, 0x9D) == 0x123, "sub ran: fbw %x", geSgxReg(w, 0x9D));
+	CHECK(geSgxReg(w, 0x9C) == 0, "jump skipped the FBP: %x", geSgxReg(w, 0x9C));
 	CHECK(w->offset == 0, "RET restored the offset: %x", w->offset);
 	CHECK(w->stats.commands == 7, "commands %u", w->stats.commands);
 
@@ -273,7 +273,7 @@ static void testSignals(void) {
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
 	CHECK(w->count == 0 && w->stats.bad == 0, "count %d bad %u", w->count, w->stats.bad);
-	CHECK(w->fbw == 0x77 && w->fbp == 0x22000, "fbw %x fbp %x", w->fbw, w->fbp);
+	CHECK(geSgxReg(w, 0x9D) == 0x77 && geSgxReg(w, 0x9C) == 0x22000, "fbw %x fbp %x", geSgxReg(w, 0x9D), geSgxReg(w, 0x9C));
 	CHECK(w->stats.signals == 4, "signals %u", w->stats.signals);
 
 	// RJUMP: relative to the SIGNAL
@@ -287,7 +287,7 @@ static void testSignals(void) {
 	emit(&r, C(0x0C, 0));
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
-	CHECK(w->fbp == 0x33000, "rjump fbp %x", w->fbp);
+	CHECK(geSgxReg(w, 0x9C) == 0x33000, "rjump fbp %x", geSgxReg(w, 0x9C));
 }
 
 static void testBadAndRunaway(void) {
@@ -325,7 +325,7 @@ static void testBadAndRunaway(void) {
 	emit(&a, C(0x0C, 0));
 	geSgxWalkerList(w, 1, 0x48800002, 0, 0);
 	geSgxWalkerRun(w);
-	CHECK(w->fbp == 0x1000 && w->stats.bad == 0, "uncached unaligned list address: fbp %x", w->fbp);
+	CHECK(geSgxReg(w, 0x9C) == 0x1000 && w->stats.bad == 0, "uncached unaligned list address: fbp %x", geSgxReg(w, 0x9C));
 }
 
 static void testQueue(void) {
@@ -343,7 +343,7 @@ static void testQueue(void) {
 	CHECK(w->lists[0].qid == 2, "head list first: %d", w->lists[0].qid);
 	geSgxWalkerStall(w, 1, 0);
 	geSgxWalkerRun(w);
-	CHECK(w->fbw == 0xA, "A ran last: fbw %x", w->fbw);
+	CHECK(geSgxReg(w, 0x9D) == 0xA, "A ran last: fbw %x", geSgxReg(w, 0x9D));
 
 	// head list while one is running: goes after the running one
 	reset();
@@ -463,7 +463,7 @@ static void testLongList(void) {
 	int calls = page_calls;
 	geSgxWalkerList(w, 1, 0x088000F8, 0, 0);
 	geSgxWalkerRun(w);
-	CHECK(w->fbw == 999 && w->stats.commands == 1001, "long list: fbw %u commands %u", w->fbw, w->stats.commands);
+	CHECK(geSgxReg(w, 0x9D) == 999 && w->stats.commands == 1001, "long list: fbw %u commands %u", geSgxReg(w, 0x9D), w->stats.commands);
 	// 4004 bytes from offset 0xF8: blocks 0x08800000 .. 0x08800F00 -> 16
 	CHECK(page_calls - calls == (int)((0xF8 + 4004 + GE_SGX_BLOCK_SIZE - 1) / GE_SGX_BLOCK_SIZE), "block fetches %d", page_calls - calls);
 }

@@ -117,7 +117,7 @@ static int readValue(GeSgxWalker *w, uint32_t addr, int n, uint32_t *out) {
 }
 
 static uint32_t relativeAddress(const GeSgxWalker *w, uint32_t data) {
-	return normalize((((w->base & 0x000F0000u) << 8) | data) + w->offset);
+	return normalize((((w->regs[GE_CMD_BASE] & 0x000F0000u) << 8) | data) + w->offset);
 }
 
 static uint32_t alignUp(uint32_t v, uint32_t a) {
@@ -299,13 +299,13 @@ static void addRect(GeSgxWalker *w, int32_t x0, int32_t y0, int32_t x1, int32_t 
 	r->x1 = clampCoord(x1);
 	r->y1 = clampCoord(y1);
 	r->color = color;
-	r->fb = (((w->fbw & 0x00FF0000u) << 8) | (w->fbp & 0x00FFFFFFu)) & 0x001FFFFFu;
+	r->fb = (((w->regs[GE_CMD_FRAMEBUFWIDTH] & 0x00FF0000u) << 8) | (w->regs[GE_CMD_FRAMEBUFPTR] & 0x00FFFFFFu)) & 0x001FFFFFu;
 	r->frame = w->flips;
 }
 
 // Clear mode sprites in through mode: rectangles of one colour
 static void clearSprites(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t count) {
-	if (!(w->vtype & GE_VTYPE_THROUGH) || !l->pos_fmt)
+	if (!(w->regs[GE_CMD_VERTEXTYPE] & GE_VTYPE_THROUGH) || !l->pos_fmt)
 		return;
 
 	uint32_t i;
@@ -335,20 +335,25 @@ static void prim(GeSgxWalker *w, uint32_t data) {
 	uint32_t count = data & 0xFFFF;
 	uint32_t type = (data >> 16) & 7;
 
-	GeSgxVertexLayout l;
-	geSgxVertexLayout(w->vtype, &l);
+	uint32_t vtype = w->regs[GE_CMD_VERTEXTYPE] & 0x00FFFFFF;
+	if (!w->layout_valid || w->layout_vtype != vtype) {
+		geSgxVertexLayout(vtype, &w->layout);
+		w->layout_vtype = vtype;
+		w->layout_valid = 1;
+	}
+	const GeSgxVertexLayout *l = &w->layout;
 
 	w->stats.prims++;
 	w->stats.vertices += count;
 
-	if ((w->clearmode & 1) && type == GE_PRIM_SPRITES)
-		clearSprites(w, &l, count);
+	if ((w->regs[GE_CMD_CLEARMODE] & 1) && type == GE_PRIM_SPRITES)
+		clearSprites(w, l, count);
 
 	// The next PRIM continues after these vertices (or indices)
-	if (l.index_size)
-		w->iaddr = normalize(w->iaddr + count * l.index_size);
+	if (l->index_size)
+		w->iaddr = normalize(w->iaddr + count * l->index_size);
 	else
-		w->vaddr = normalize(w->vaddr + count * l.size);
+		w->vaddr = normalize(w->vaddr + count * l->size);
 }
 
 static int push(GeSgxList *list, uint32_t ret, uint32_t offset) {
@@ -397,7 +402,7 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 			break;
 		case GE_SIGNAL_OJUMP:
 		case GE_SIGNAL_OCALL:
-			target = normalize((((w->base & 0x000F0000u) << 8) | target) + w->offset);
+			target = normalize((((w->regs[GE_CMD_BASE] & 0x000F0000u) << 8) | target) + w->offset);
 			break;
 		case GE_SIGNAL_RET:
 			if (!pop(w, list))
@@ -418,86 +423,140 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 	return 1;
 }
 
+/*
+	Commands that need more than being stored in regs[]. Everything else is
+	plain state, which the fast loop below only records.
+*/
+static const uint8_t special_cmd[256] = {
+	[GE_CMD_VADDR] = 1,
+	[GE_CMD_IADDR] = 1,
+	[GE_CMD_PRIM] = 1,
+	[GE_CMD_BEZIER] = 1,
+	[GE_CMD_SPLINE] = 1,
+	[GE_CMD_JUMP] = 1,
+	[GE_CMD_CALL] = 1,
+	[GE_CMD_RET] = 1,
+	[GE_CMD_END] = 1,
+	[GE_CMD_SIGNAL] = 1,
+	[GE_CMD_OFFSETADDR] = 1,
+	[GE_CMD_ORIGIN] = 1,
+	// BJUMP: the bounding box result is not known, the draws after it are
+	// walked (as if the box was visible); BASE, VERTEXTYPE, CLEARMODE, the
+	// framebuffer and the rest are read from regs[] where they are used
+};
+
+static int fetchBlock(GeSgxWalker *w, uint32_t block) {
+	if (block == w->page && w->page_ptr)
+		return 1;
+	w->page_ptr = (const uint8_t *)w->page_fn(w->user, block);
+	w->page = w->page_ptr ? block : NO_PAGE;
+	return w->page_ptr != NULL;
+}
+
 static int walkList(GeSgxWalker *w, GeSgxList *list) {
-	uint32_t n;
+	uint32_t *regs = w->regs;
+	uint32_t pc = list->pc;
+	// No stall: an address the list can never reach (it is 4 aligned)
+	const uint32_t stall = list->stall ? list->stall : 0xFFFFFFFFu;
+	uint32_t commands = 0;
+	int res = WALK_BAD;
+
 	list->started = 1;
 
-	for (n = 0; n < GE_SGX_MAX_COMMANDS; n++) {
-		if (list->stall && list->pc == list->stall)
-			return WALK_STALLED;
-
-		uint32_t op;
-		if (!readWord(w, list->pc, &op))
-			return WALK_BAD;
-
-		w->stats.commands++;
-
-		uint32_t cmd = op >> 24;
-		uint32_t data = op & 0x00FFFFFF;
-
-		switch (cmd) {
-			case GE_CMD_VADDR:
-				w->vaddr = relativeAddress(w, data);
-				break;
-			case GE_CMD_IADDR:
-				w->iaddr = relativeAddress(w, data);
-				break;
-			case GE_CMD_PRIM:
-				prim(w, data);
-				break;
-			case GE_CMD_BEZIER:
-			case GE_CMD_SPLINE:
-				w->stats.curves++;
-				break;
-			case GE_CMD_JUMP:
-				list->pc = relativeAddress(w, data & 0x00FFFFFC);
-				continue;
-			case GE_CMD_CALL:
-				if (!push(list, list->pc + 4, w->offset))
-					return WALK_BAD;
-				list->pc = relativeAddress(w, data & 0x00FFFFFC);
-				continue;
-			case GE_CMD_RET:
-				if (pop(w, list))
-					continue;
-				break;
-			case GE_CMD_END:
-				return WALK_FINISHED;
-			case GE_CMD_SIGNAL:
-				if (!signal(w, list, data))
-					return WALK_BAD;
-				continue;
-			case GE_CMD_BASE:
-				w->base = data;
-				break;
-			case GE_CMD_VERTEXTYPE:
-				w->vtype = data;
-				break;
-			case GE_CMD_OFFSETADDR:
-				w->offset = data << 8;
-				break;
-			case GE_CMD_ORIGIN:
-				w->offset = list->pc;
-				break;
-			case GE_CMD_FRAMEBUFPTR:
-				w->fbp = data;
-				break;
-			case GE_CMD_FRAMEBUFWIDTH:
-				w->fbw = data;
-				break;
-			case GE_CMD_CLEARMODE:
-				w->clearmode = data;
-				break;
-			default:
-				// BJUMP: the bounding box result is not known, the draws
-				// after it are walked (as if the box was visible)
-				break;
+	while (commands < GE_SGX_MAX_COMMANDS) {
+		if (pc == stall) {
+			res = WALK_STALLED;
+			break;
 		}
 
-		list->pc += 4;
+		uint32_t block = pc & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1);
+		if ((pc & 3) || !fetchBlock(w, block))
+			break;
+
+		// The commands up to the end of the block, or up to the stall
+		const uint8_t *ptr = w->page_ptr;
+		uint32_t off = pc - block;
+		uint32_t end = GE_SGX_BLOCK_SIZE;
+		if (stall > pc && stall - block < end)
+			end = stall - block;
+		uint32_t start = off;
+		uint32_t op = 0, cmd = 0;
+
+		while (off < end) {
+			memcpy(&op, ptr + off, 4);
+			off += 4;
+			cmd = op >> 24;
+			regs[cmd] = op;
+			if (special_cmd[cmd])
+				goto special;
+		}
+
+		commands += (off - start) / 4;
+		pc = block + off;
+		continue;
+
+special:
+		commands += (off - start) / 4;
+		{
+			uint32_t data = op & 0x00FFFFFF;
+			uint32_t cmd_pc = block + off - 4;
+			pc = block + off;
+
+			switch (cmd) {
+				case GE_CMD_VADDR:
+					w->vaddr = relativeAddress(w, data);
+					break;
+				case GE_CMD_IADDR:
+					w->iaddr = relativeAddress(w, data);
+					break;
+				case GE_CMD_PRIM:
+					prim(w, data);
+					break;
+				case GE_CMD_BEZIER:
+				case GE_CMD_SPLINE:
+					w->stats.curves++;
+					break;
+				case GE_CMD_JUMP:
+					pc = relativeAddress(w, data & 0x00FFFFFC);
+					break;
+				case GE_CMD_CALL:
+					if (!push(list, pc, w->offset)) {
+						list->pc = cmd_pc;
+						goto out;
+					}
+					pc = relativeAddress(w, data & 0x00FFFFFC);
+					break;
+				case GE_CMD_RET:
+					list->pc = pc;
+					if (pop(w, list))
+						pc = list->pc;
+					break;
+				case GE_CMD_END:
+					list->pc = cmd_pc;
+					res = WALK_FINISHED;
+					goto out;
+				case GE_CMD_SIGNAL:
+					list->pc = cmd_pc;
+					if (!signal(w, list, data))
+						goto out;
+					pc = list->pc;
+					break;
+				case GE_CMD_OFFSETADDR:
+					w->offset = data << 8;
+					break;
+				case GE_CMD_ORIGIN:
+					w->offset = cmd_pc;
+					break;
+				default:
+					break;
+			}
+		}
 	}
 
-	return WALK_BAD;
+	list->pc = pc;
+out:
+	w->stats.commands += commands;
+	return res;
 }
 
 static void removeList(GeSgxWalker *w, int i) {

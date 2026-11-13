@@ -77,6 +77,15 @@ typedef struct {
 } GeSgxList;
 
 typedef struct {
+	uint32_t size;      // bytes per vertex (all morph targets)
+	uint32_t color_off; // offsets inside the vertex
+	uint32_t pos_off;
+	uint32_t color_fmt; // GE_VTYPE color field (0: none, 4..7)
+	uint32_t pos_fmt;   // 1: s8, 2: s16, 3: float
+	uint32_t index_size;
+} GeSgxVertexLayout;
+
+typedef struct {
 	GeSgxPageFn page_fn;
 	void *user;
 
@@ -88,15 +97,17 @@ typedef struct {
 	GeSgxList lists[GE_SGX_MAX_LISTS];
 	int count;
 
-	// GE state (kept across lists, like the hardware)
-	uint32_t base;
+	// GE state (kept across lists, like the hardware): the last command
+	// of each kind, and the addresses the GE keeps itself
+	uint32_t regs[256];
 	uint32_t offset;
 	uint32_t vaddr;
 	uint32_t iaddr;
-	uint32_t vtype;
-	uint32_t clearmode;
-	uint32_t fbp;
-	uint32_t fbw;
+
+	// Vertex layout of regs[VERTEXTYPE], computed when first needed
+	GeSgxVertexLayout layout;
+	uint32_t layout_vtype;
+	int layout_valid;
 
 	GeSgxStats stats;
 
@@ -105,16 +116,13 @@ typedef struct {
 	uint32_t flips;
 } GeSgxWalker;
 
-typedef struct {
-	uint32_t size;      // bytes per vertex (all morph targets)
-	uint32_t color_off; // offsets inside the vertex
-	uint32_t pos_off;
-	uint32_t color_fmt; // GE_VTYPE color field (0: none, 4..7)
-	uint32_t pos_fmt;   // 1: s8, 2: s16, 3: float
-	uint32_t index_size;
-} GeSgxVertexLayout;
 
 void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout);
+
+// Last value of a GE command (24 bits)
+static inline uint32_t geSgxReg(const GeSgxWalker *w, uint32_t cmd) {
+	return w->regs[cmd & 0xFF] & 0x00FFFFFF;
+}
 
 void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user);
 void geSgxWalkerReset(GeSgxWalker *w);

@@ -32,6 +32,7 @@
 #include <psp2/kernel/dmac.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <stdarg.h>
@@ -136,6 +137,76 @@ static GeSgxFrame frame;
 static volatile SceUInt64 last_flip_time = 0;
 
 static uint32_t cdram_kb = 0, ram_kb = 0;
+
+// Threads of the emulator and ours, to see which cores are busy
+#define MAX_TRACKED_THREADS 48
+static struct {
+	SceUID uid;
+	char name[32];
+	SceUInt64 last_run;
+	volatile int valid;
+} tracked[MAX_TRACKED_THREADS];
+static int n_tracked = 0; // slots taken
+
+void GeSgxTrackThread(SceUID uid, const char *name) {
+	if (uid < 0 || config.sgx_renderer == GE_SGX_MODE_OFF)
+		return;
+	// Threads may be created concurrently: take a slot atomically
+	int i = __sync_fetch_and_add(&n_tracked, 1);
+	if (i >= MAX_TRACKED_THREADS)
+		return;
+	tracked[i].uid = uid;
+	strncpy(tracked[i].name, name, sizeof(tracked[i].name) - 1);
+	tracked[i].name[sizeof(tracked[i].name) - 1] = '\0';
+	tracked[i].last_run = 0;
+	__sync_synchronize();
+	tracked[i].valid = 1;
+}
+
+// CPU use of each thread since the last report, the busy ones only
+static void reportThreads(SceUInt64 elapsed_us) {
+	char line[480];
+	int len = 0, i, n = n_tracked;
+	if (n > MAX_TRACKED_THREADS)
+		n = MAX_TRACKED_THREADS;
+
+	len += snprintf(line + len, sizeof(line) - len, "GeSgx threads (%%cpu core mask prio):");
+	for (i = 0; i < n; i++) {
+		if (!tracked[i].valid)
+			continue;
+		SceKernelThreadInfo info;
+		memset(&info, 0, sizeof(info));
+		info.size = sizeof(info);
+		if (sceKernelGetThreadInfo(tracked[i].uid, &info) < 0)
+			continue;
+
+		SceUInt64 run = info.runClocks;
+		SceUInt64 delta = run - tracked[i].last_run;
+		int first = tracked[i].last_run == 0;
+		tracked[i].last_run = run;
+		if (first || elapsed_us == 0)
+			continue;
+
+		uint32_t permille = (uint32_t)(delta * 1000 / elapsed_us);
+		if (permille < 5)
+			continue;
+
+		int k = snprintf(line + len, sizeof(line) - len, " %s %u.%u %d %X %X;",
+			tracked[i].name, (unsigned)(permille / 10), (unsigned)(permille % 10),
+			(int)info.lastExecutedCpuId, (unsigned)info.currentCpuAffinityMask, (unsigned)info.currentPriority);
+		if (k < 0 || len + k >= (int)sizeof(line) - 2) {
+			GeSgxLog("%s\n", line);
+			len = snprintf(line, sizeof(line), "GeSgx threads (cont):");
+			k = snprintf(line + len, sizeof(line) - len, " %s %u.%u %d %X %X;",
+				tracked[i].name, (unsigned)(permille / 10), (unsigned)(permille % 10),
+				(int)info.lastExecutedCpuId, (unsigned)info.currentCpuAffinityMask, (unsigned)info.currentPriority);
+			if (k < 0)
+				continue;
+		}
+		len += k;
+	}
+	GeSgxLog("%s\n", line);
+}
 
 static void writeAck(uint32_t session, uint32_t read) {
 	uint8_t *block = (uint8_t *)ScePspemuConvertAddress(ADRENALINE_ADDRESS, KERMIT_OUTPUT_MODE, ADRENALINE_SIZE);
@@ -356,6 +427,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	// Per second
 	SceUInt64 second_start = sceKernelGetProcessTimeWide();
 	SceUInt64 log_start = second_start;
+	SceUInt64 thread_report = second_start;
 	uint32_t flips = 0, events = 0, walk_us = 0, walk_max_us = 0, fetches_start = block_copies;
 	uint32_t calls_start = block_calls;
 	GeSgxFrame rates;
@@ -527,6 +599,11 @@ per_second:;
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
 			}
 
+			if (now - thread_report >= LOG_INTERVAL_US) {
+				reportThreads(now - thread_report);
+				thread_report = now;
+			}
+
 			second_start = now;
 			flips = events = walk_us = walk_max_us = 0;
 			fetches_start = block_copies;
@@ -550,9 +627,12 @@ int GeSgxStart(uint32_t ring_addr) {
 		return 0;
 
 	if (thid < 0) {
-		thid = sceKernelCreateThread("AdrenalineGeSgx", GeSgxThread, 0x90, 0x4000, 0, 0, NULL);
+		// Cores 0-2 only: core 3 is busy with other work on this system
+		thid = sceKernelCreateThread("AdrenalineGeSgx", GeSgxThread, 0x90, 0x4000, 0,
+			SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2, NULL);
 		if (thid < 0)
 			return 0;
+		GeSgxTrackThread(thid, "AdrenalineGeSgx");
 		if (sceKernelStartThread(thid, 0, NULL) < 0) {
 			sceKernelDeleteThread(thid);
 			thid = -1;
