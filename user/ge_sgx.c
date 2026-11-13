@@ -29,6 +29,7 @@
 */
 
 #include <psp2/io/fcntl.h>
+#include <psp2/kernel/dmac.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
@@ -73,6 +74,8 @@ static const void *ram_ptr[RAM_PAGES];
 static uint32_t vram_epoch[VRAM_PAGES];
 static const void *vram_ptr[VRAM_PAGES];
 static uint32_t page_fetches = 0;
+static uint32_t page_calls = 0;   // page lookups by the walker (switches between pages)
+static uint32_t inval_us = 0;     // time spent in the invalidating ScePspemuConvertAddress
 
 // Published frame (seqlock: odd while it is written)
 static volatile uint32_t frame_seq = 0;
@@ -103,9 +106,13 @@ static const void *pageFn(void *user, uint32_t page) {
 		return NULL;
 	}
 
+	page_calls++;
+
 	if (*ep != epoch) {
 		// Aligned address and size: cacheable mapping, invalidated
+		SceUInt64 t0 = sceKernelGetProcessTimeWide();
 		const void *p = (const void *)ScePspemuConvertAddress(psp, KERMIT_INPUT_MODE, GE_SGX_PAGE_SIZE);
+		inval_us += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
 		if (!p)
 			return NULL;
 		*pp = p;
@@ -127,7 +134,7 @@ static void writeAck(uint32_t session, uint32_t read) {
 }
 
 void GeSgxLog(const char *fmt, ...) {
-	char buf[256];
+	char buf[512];
 	va_list ap;
 	va_start(ap, fmt);
 	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -208,6 +215,108 @@ int GeSgxGetFrame(GeSgxFrame *out) {
 	return (sceKernelGetProcessTimeWide() - last_flip_time) < 500 * 1000;
 }
 
+static uint32_t sumWords(const volatile uint32_t *p, int n) {
+	uint32_t sum = 0;
+	int i;
+	for (i = 0; i < n; i++)
+		sum += p[i];
+	return sum;
+}
+
+/*
+	Cost of the ways to read PSP RAM, for the choice of the renderer's
+	memory access. 64 pages of 4 KB of the game's memory, times in us.
+*/
+static void benchmarkMemory(void) {
+	enum { PAGES = 64, WORDS = GE_SGX_PAGE_SIZE / 4 };
+	const uint32_t first = 0x88800000u;
+	uint32_t sum = 0;
+	uint32_t *buf = NULL;
+	SceUID buf_id = sceKernelAllocMemBlock("SceGeSgxBench", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, PAGES * GE_SGX_PAGE_SIZE, NULL);
+	if (buf_id < 0)
+		return;
+	sceKernelGetMemBlockBase(buf_id, (void **)&buf);
+	int i;
+	SceUInt64 t;
+
+	const uint8_t *cached = (const uint8_t *)ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	const uint8_t *plain = (const uint8_t *)ScePspemuConvertAddress(first, 0, 0);
+	GeSgxLog("GeSgx bench: cached map %08X, plain map %08X, CONVERT_ADDRESS %08X\n",
+		(unsigned)(uintptr_t)cached, (unsigned)(uintptr_t)plain, (unsigned)CONVERT_ADDRESS(first));
+	if (!cached || !plain) {
+		sceKernelFreeMemBlock(buf_id);
+		return;
+	}
+
+	// the same memory?
+	GeSgxLog("GeSgx bench: same data %d\n", memcmp(cached, plain, 256) == 0);
+
+	t = sceKernelGetProcessTimeWide();
+	for (i = 0; i < 1000; i++)
+		sceKernelGetProcessTimeWide();
+	uint32_t t_clock = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// invalidate only, one call per page
+	t = sceKernelGetProcessTimeWide();
+	for (i = 0; i < PAGES; i++)
+		ScePspemuConvertAddress(first + i * GE_SGX_PAGE_SIZE, KERMIT_INPUT_MODE, GE_SGX_PAGE_SIZE);
+	uint32_t t_inval_page = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// invalidate the 256 KB in one call
+	t = sceKernelGetProcessTimeWide();
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	uint32_t t_inval_all = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// read after invalidation (cache misses)
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	t = sceKernelGetProcessTimeWide();
+	sum += sumWords((const volatile uint32_t *)cached, PAGES * WORDS);
+	uint32_t t_read_cold = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// read again (cache hits as far as 256 KB stay in the cache)
+	t = sceKernelGetProcessTimeWide();
+	sum += sumWords((const volatile uint32_t *)cached, PAGES * WORDS);
+	uint32_t t_read_warm = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// one page, again and again: L1 hits
+	t = sceKernelGetProcessTimeWide();
+	for (i = 0; i < PAGES; i++)
+		sum += sumWords((const volatile uint32_t *)cached, WORDS);
+	uint32_t t_read_l1 = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// through the other mapping (uncached?)
+	t = sceKernelGetProcessTimeWide();
+	sum += sumWords((const volatile uint32_t *)plain, PAGES * WORDS);
+	uint32_t t_read_plain = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// DMA into our buffer: one copy per page, then all at once
+	t = sceKernelGetProcessTimeWide();
+	for (i = 0; i < PAGES; i++)
+		sceDmacMemcpy(&buf[i * WORDS], cached + i * GE_SGX_PAGE_SIZE, GE_SGX_PAGE_SIZE);
+	uint32_t t_dma_page = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	t = sceKernelGetProcessTimeWide();
+	sceDmacMemcpy(buf, cached, PAGES * GE_SGX_PAGE_SIZE);
+	uint32_t t_dma_all = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	t = sceKernelGetProcessTimeWide();
+	sum += sumWords(buf, PAGES * WORDS);
+	uint32_t t_read_buf = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	// memcpy with the CPU from the invalidated mapping
+	ScePspemuConvertAddress(first, KERMIT_INPUT_MODE, PAGES * GE_SGX_PAGE_SIZE);
+	t = sceKernelGetProcessTimeWide();
+	memcpy(buf, cached, PAGES * GE_SGX_PAGE_SIZE);
+	uint32_t t_memcpy = (uint32_t)(sceKernelGetProcessTimeWide() - t);
+
+	GeSgxLog("GeSgx bench (us, 64 x 4 KB): clock x1000 %u | inval per page %u, all %u | read cold %u, warm %u, L1 %u, plain map %u | dma per page %u, all %u, read copy %u | memcpy %u (sum %08X)\n",
+		(unsigned)t_clock, (unsigned)t_inval_page, (unsigned)t_inval_all,
+		(unsigned)t_read_cold, (unsigned)t_read_warm, (unsigned)t_read_l1, (unsigned)t_read_plain,
+		(unsigned)t_dma_page, (unsigned)t_dma_all, (unsigned)t_read_buf, (unsigned)t_memcpy, (unsigned)sum);
+
+	sceKernelFreeMemBlock(buf_id);
+}
+
 static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t seen_seq = 0;
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
@@ -219,6 +328,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	SceUInt64 second_start = sceKernelGetProcessTimeWide();
 	SceUInt64 log_start = second_start;
 	uint32_t flips = 0, events = 0, walk_us = 0, walk_max_us = 0, fetches_start = page_fetches;
+	uint32_t calls_start = page_calls, inval_start = inval_us;
 	GeSgxFrame rates;
 	memset(&rates, 0, sizeof(rates));
 
@@ -228,6 +338,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	cdram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 64);
 	ram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64);
 	GeSgxLog("GeSgx: free CDRAM %u KB, free RAM %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb);
+
+	benchmarkMemory();
 
 	geSgxWalkerInit(&walker, pageFn, NULL);
 
@@ -369,16 +481,20 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) pages %u | lists %u cmds %u prims %u verts %u clears %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
-					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events, (unsigned)rates.walk_us, (unsigned)rates.walk_max_us, (unsigned)rates.invalidates,
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) inval %u us pages %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
+					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
+					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
+					(unsigned)(inval_us - inval_start), (unsigned)rates.invalidates, (unsigned)(page_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
-					(unsigned)frame_stats.clears, (unsigned)frame_stats.bad,
+					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
 			}
 
 			second_start = now;
 			flips = events = walk_us = walk_max_us = 0;
 			fetches_start = page_fetches;
+			calls_start = page_calls;
+			inval_start = inval_us;
 		}
 	}
 
