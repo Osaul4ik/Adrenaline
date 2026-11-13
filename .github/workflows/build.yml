@@ -1,0 +1,134 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Toolchain versions are pinned so a toolchain update cannot silently change the build
+  PSPDEV_RELEASE: v20261101
+  PSP_PACKER_VERSION: 0.1.0
+  # frangarcj/vita2dlib, branch "fbo": the vita2d fork with custom shader support used by Adrenaline
+  VITA2D_FORK_COMMIT: c221adb
+
+jobs:
+  tests:
+    name: Unit tests (GE native patcher)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        if: hashFiles('tests/Makefile') != ''
+        run: make -C tests
+
+  psp:
+    name: PSP side (systemctrl)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSPDEV
+        run: |
+          curl -fsSL "https://github.com/pspdev/pspdev/releases/download/${PSPDEV_RELEASE}/pspdev-ubuntu-latest-x86_64.tar.gz" | tar xz -C "$HOME"
+          echo "PSPDEV=$HOME/pspdev" >> "$GITHUB_ENV"
+          echo "$HOME/pspdev/bin" >> "$GITHUB_PATH"
+
+      - name: Install psp-packer
+        run: cargo install psp-packer --version "${PSP_PACKER_VERSION}" --locked
+
+      - name: Build systemctrl
+        # The cef sources predate GCC 15 / C23 and the current PSPSDK stub names:
+        # build as gnu17, keep the old implicit-declaration leniency and map the
+        # old sceKernelInitKeyConfig stub name.
+        run: |
+          make -C cef _systemctrl CC="psp-gcc -std=gnu17 \
+            -Wno-error=implicit-function-declaration \
+            -Wno-error=incompatible-pointer-types \
+            -Wno-error=int-conversion \
+            -Wl,--defsym=InitForKernel_7233B5BC=sceKernelInitKeyConfig"
+
+      - name: Check systemctrl.prx
+        run: |
+          required=""
+          # native resolution code imports sceKernelQueryMemoryPartitionInfo (6.61 NID)
+          if [ -f cef/systemctrl/ge_native.c ]; then required="SysMemForKernel:0xC4EEAF20"; fi
+          python3 ci/check_prx.py user/flash0/kd/systemctrl.prx $required
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systemctrl
+          path: user/flash0/kd/systemctrl.prx
+          if-no-files-found: error
+
+  vita:
+    name: Vita side and VPK
+    runs-on: ubuntu-24.04
+    needs: [tests, psp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: systemctrl
+          path: user/flash0/kd
+
+      - name: Install VitaSDK
+        run: |
+          export VITASDK="$HOME/vitasdk"
+          git clone --depth 1 https://github.com/vitasdk/vdpm /tmp/vdpm
+          /tmp/vdpm/bootstrap-vitasdk.sh
+          export PATH="$VITASDK/bin:$PATH"
+          # taihen for the user module, the rest for vita2d
+          vdpm install taihen zlib libpng libjpeg-turbo freetype
+          echo "VITASDK=$VITASDK" >> "$GITHUB_ENV"
+          echo "$VITASDK/bin" >> "$GITHUB_PATH"
+
+      - name: Install vita2d fork and vitashaders
+        # The shaders are compiled into user/includes, so the vitashaders library
+        # the user module links against only has to exist.
+        run: |
+          git clone https://github.com/frangarcj/vita2dlib /tmp/vita2dlib
+          git -C /tmp/vita2dlib checkout "${VITA2D_FORK_COMMIT}"
+          make -C /tmp/vita2dlib/libvita2d -j"$(nproc)" \
+            CFLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wl,-q -Wall -O3 -Iinclude -I$VITASDK/arm-vita-eabi/include/freetype2"
+          make -C /tmp/vita2dlib/libvita2d install
+          arm-vita-eabi-ar rcs "$VITASDK/arm-vita-eabi/lib/libvitashaders.a"
+
+      - name: Build kernel stubs
+        run: |
+          cmake -S ci/kernel-stubs -B build/kernel-stubs -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build build/kernel-stubs
+          cmake --install build/kernel-stubs
+
+      - name: Build adrenaline_user.suprx
+        run: |
+          # the sources predate GCC 14, where these warnings became errors
+          cmake -S user -B build/user -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_C_FLAGS="-Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+          cmake --build build/user -j"$(nproc)"
+          cp build/user/adrenaline_user.suprx bubble/pkg/sce_module/adrenaline_user.suprx
+
+      - name: Build VPK
+        # adrenaline_kernel.skprx, adrenaline_vsh.suprx, usbdevice.skprx and eboot.pbp
+        # are the prebuilt ones from bubble/pkg (those modules are unchanged).
+        run: |
+          cmake -S bubble -B build/bubble -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DVITA_VERSION=07.00 \
+            -DCMAKE_C_FLAGS="-Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+          cmake --build build/bubble -j"$(nproc)"
+          unzip -l build/bubble/Adrenaline.vpk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Adrenaline-vpk
+          path: build/bubble/Adrenaline.vpk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: modules
+          path: |
+            build/user/adrenaline_user.suprx
+            user/flash0/kd/systemctrl.prx
+          if-no-files-found: error
