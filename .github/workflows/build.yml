@@ -108,6 +108,15 @@ jobs:
           cmake --build build/kernel-stubs
           cmake --install build/kernel-stubs
 
+      - name: Build adrenaline_kernel.skprx (ge-debug only)
+        # Diagnostic kernel module; other branches ship the prebuilt one
+        if: github.ref_name == 'ge-debug'
+        run: |
+          cmake -S kernel -B build/kernel -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+          cmake --build build/kernel -j"$(nproc)"
+          cp build/kernel/adrenaline_kernel.skprx bubble/pkg/sce_module/adrenaline_kernel.skprx
+
       - name: Build adrenaline_user.suprx
         run: |
           # the sources predate C23 (default of current vita-gcc) and GCC 14, where these warnings became errors
@@ -166,4 +175,5 @@ jobs:
             build/bubble/Adrenaline.vpk \
             build/user/adrenaline_user.suprx \
             build/adrenaline_user.elf \
+            bubble/pkg/sce_module/adrenaline_kernel.skprx \
             user/flash0/kd/systemctrl.prx

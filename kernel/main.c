@@ -22,6 +22,7 @@
 #include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/cpu.h>
+#include <psp2kern/kernel/sysroot.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +32,11 @@
 #include "utils.h"
 
 #include "../adrenaline_compat.h"
+
+// Renamed in current vita-headers
+#ifndef ksceKernelCpuDcacheWritebackRange
+#define ksceKernelCpuDcacheWritebackRange ksceKernelDcacheCleanRange
+#endif
 
 int ksceKernelSysrootGetShellPid();
 int module_get_export_func(SceUID pid, const char *modname, uint32_t libnid, uint32_t funcnid, uintptr_t *func);
@@ -129,7 +135,10 @@ static int ksceKernelStartPreloadedModulesPatched(SceUID pid) {
   if (strcmp(titleid, "main") == 0) {
     ksceKernelLoadStartModuleForPid(pid, "ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_vsh.suprx", 0, NULL, 0, NULL, NULL);
   } else if (strcmp(titleid, ADRENALINE_TITLEID) == 0) {
-    ksceKernelLoadStartModuleForPid(pid, "ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_user.suprx", 0, NULL, 0, NULL, NULL);
+    // DEBUG BUILD: log the result of loading the user module
+    int status = 0;
+    SceUID modid = ksceKernelLoadStartModuleForPid(pid, "ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_user.suprx", 0, NULL, 0, NULL, &status);
+    debugPrintf("StartPreloadedModules(pid 0x%08X) = 0x%08X, load user module = 0x%08X status 0x%08X\n", pid, res, modid, status);
   }
 
   return res;
@@ -201,6 +210,11 @@ int module_start(SceSize args, void *argp) {
   if (hooks[n_hooks] < 0)
     hooks[n_hooks] = taiHookFunctionExportForKernel(KERNEL_PID, &ksceKernelStartPreloadedModulesRef, "SceKernelModulemgr", 0x92C9FFC2, 0x998C7AE9, ksceKernelStartPreloadedModulesPatched);
   n_hooks++;
+
+  debugPrintf("--- adrenaline_kernel module_start (debug build " __DATE__ " " __TIME__ "), SceCompat nid 0x%08X\n", (unsigned int)module_nid);
+  for (int i = 0; i < n_hooks; i++)
+    if (hooks[i] < 0)
+      debugPrintf("hook %d failed: 0x%08X\n", i, hooks[i]);
 
   SceUID shell_pid = ksceKernelSysrootGetShellPid();
   ksceKernelLoadStartModuleForPid(shell_pid, "ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_vsh.suprx", 0, NULL, 0, NULL, NULL);
