@@ -39,12 +39,10 @@
 #include "ge_sgx_texconv.h"
 
 #define MAX_TEXTURES 512
-#define BUDGET_BYTES (10 * 1024 * 1024)
+#define BUDGET_BYTES (12 * 1024 * 1024)
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)
-// RAM always left to the emulator
-#define RESERVE_RAM_KB (2 * 1024)
 
 // Frames an entry is kept after its last use: published frames in flight plus the GPU
 #define KEEP_FRAMES 6
@@ -57,7 +55,6 @@ typedef struct {
 	uint32_t last_used;
 	uint32_t last_checked;
 	uint32_t dead_since;
-	uint32_t dead_seq; // freed once the GPU is done with this frame (the one being built when it died)
 	SceUID mem;
 	uint32_t bytes;
 	SceGxmTexture tex;
@@ -104,7 +101,6 @@ static void kill(Entry *e) {
 	if (e->live) {
 		e->live = 0;
 		e->dead_since = cur_frame;
-		e->dead_seq = GeSgxBuildingSeq();
 	}
 }
 
@@ -118,28 +114,9 @@ void geSgxTexReset(void) {
 }
 
 static int sameKey(const GeSgxTexDesc *a, const GeSgxTexDesc *b) {
-	if (!(a->addr == b->addr && a->bufw == b->bufw && a->w == b->w && a->h == b->h &&
-		a->format == b->format && a->swizzle == b->swizzle && a->levels == b->levels &&
-		a->clut_format == b->clut_format && a->clut_hash == b->clut_hash))
-		return 0;
-	int i;
-	for (i = 1; i < a->levels; i++) {
-		if (a->level_addr[i] != b->level_addr[i] || a->level_bufw[i] != b->level_bufw[i])
-			return 0;
-	}
-	return 1;
-}
-
-// The descriptor of mipmap level lv (0: d itself)
-static void levelDesc(const GeSgxTexDesc *d, int lv, GeSgxTexDesc *out) {
-	*out = *d;
-	out->levels = 1;
-	if (lv == 0)
-		return;
-	out->addr = d->level_addr[lv];
-	out->bufw = d->level_bufw[lv];
-	out->w = (uint16_t)(d->w >> lv);
-	out->h = (uint16_t)(d->h >> lv);
+	return a->addr == b->addr && a->bufw == b->bufw && a->w == b->w && a->h == b->h &&
+		a->format == b->format && a->swizzle == b->swizzle &&
+		a->clut_format == b->clut_format && a->clut_hash == b->clut_hash;
 }
 
 static uint32_t sourceBytes(const GeSgxTexDesc *d) {
@@ -182,7 +159,7 @@ static void makeRoom(uint32_t need) {
 	// Dead entries whose frames are done
 	for (i = 0; i < MAX_TEXTURES; i++) {
 		Entry *e = &entries[i];
-		if (e->used && !e->live && (int32_t)(ge_sgx_gpu_done_seq - e->dead_seq) >= 0) {
+		if (e->used && !e->live && cur_frame - e->dead_since >= KEEP_FRAMES) {
 			freeMemory(e);
 			e->used = 0;
 		}
@@ -232,50 +209,15 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	// CLUT4/8: indices (P8) and a 256 entry palette after them (64 byte aligned)
 	int indexed = geSgxTexIndexed(d->format);
 	uint32_t stride = indexed ? ((d->w + 7u) & ~7u) : geSgxTexOutStride(d);
-
-	/*
-		Mipmaps: GXM linear textures keep the levels one after the other,
-		each in rows of a multiple of 8 texels (all levels here are at least
-		8x8). Levels that do not fit the staging buffer are left out.
-	*/
-	uint32_t level_off[GE_SGX_MAX_LEVELS], level_stride[GE_SGX_MAX_LEVELS];
-	int nlevels = d->levels ? d->levels : 1, lv;
-	uint32_t levels_bytes = 0;
-	for (lv = 0; lv < nlevels; lv++) {
-		GeSgxTexDesc ld;
-		levelDesc(d, lv, &ld);
-		uint32_t ls = indexed ? ((ld.w + 7u) & ~7u) : geSgxTexOutStride(&ld);
-		uint32_t lsrc = geSgxTexRowBytes(ld.format, ld.bufw) * geSgxTexRows(&ld);
-		if (lv > 0 && (levels_bytes + ls * ld.h + (indexed ? 1088 : 0) > STAGING_BYTES || !lsrc || 2 * lsrc + 64 > STAGING_BYTES ||
-		               !geSgxPspPtr(ld.addr, lsrc)))
-			break;
-		level_off[lv] = levels_bytes;
-		level_stride[lv] = ls;
-		levels_bytes += ls * ld.h;
-	}
-	nlevels = lv;
-	uint32_t pal_off = (levels_bytes + 63u) & ~63u;
-	uint32_t data_bytes = indexed ? pal_off + 1024 : levels_bytes;
+	uint32_t pal_off = (stride * d->h + 63u) & ~63u;
+	uint32_t data_bytes = indexed ? pal_off + 1024 : stride * d->h;
 	uint32_t bytes = (data_bytes + 0xFFF) & ~0xFFFu;
 	if (data_bytes > STAGING_BYTES)
 		return failed(d, "size");
-	// Mipmaps: mapped slack after the levels, in case GXM pads them differently
-	// (a GPU read outside the block is a GPU crash, a wrong level only a wrong picture)
-	if (nlevels > 1)
-		bytes += (stride * d->h + 0xFFF) & ~0xFFFu;
 
 	makeRoom(bytes);
 	if (total_bytes + bytes > budget)
 		return failed(d, "budget");
-
-	// The emulator keeps a reserve of RAM: older textures make room, or this one waits
-	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
-		uint32_t saved = budget;
-		budget = total_bytes > bytes ? total_bytes - bytes : 0;
-		makeRoom(bytes);
-		budget = saved;
-		return failed(d, "memory reserve");
-	}
 
 	int slot = -1, i;
 	for (i = 0; i < MAX_TEXTURES; i++) {
@@ -332,68 +274,14 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	int ok;
 	if (indexed) {
 		geSgxTexPalette(d, clut_rgba, (uint32_t *)(out + pal_off));
-		ok = geSgxTexConvertIndices(d, linear, rowbytes, out, stride);
+		ok = geSgxTexConvertIndices(d, linear, rowbytes, out, stride) &&
+			sceGxmTextureInitLinear(&e->tex, gpu, SCE_GXM_TEXTURE_FORMAT_P8_ABGR, d->w, d->h, 0) >= 0 &&
+			sceGxmTextureSetPalette(&e->tex, (uint8_t *)gpu + pal_off) >= 0;
 	} else {
 		if (d->bufw < d->w)
 			memset(out, 0, stride * d->h);
-		ok = geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba);
-	}
-
-	// The other mipmap levels, through the staging buffer that is free now
-	uint8_t *spare = out == staging[0] ? staging[1] : staging[0];
-	for (lv = 1; ok && lv < nlevels; lv++) {
-		GeSgxTexDesc ld;
-		levelDesc(d, lv, &ld);
-		uint32_t lrow = geSgxTexRowBytes(ld.format, ld.bufw), lrows = geSgxTexRows(&ld);
-		const uint8_t *lsrc = geSgxPspPtr(ld.addr, lrow * lrows);
-		if (!lsrc)
-			break;
-		if (lrow * lrows >= 16 * 1024)
-			sceDmacMemcpy(spare, lsrc, lrow * lrows);
-		else
-			memcpy(spare, lsrc, lrow * lrows);
-		const uint8_t *llin = spare;
-		if (ld.swizzle && ld.format < GE_TFMT_DXT1) {
-			uint8_t *un = spare + ((lrow * lrows + 63u) & ~63u);
-			geSgxUnswizzle(un, spare, lrow, lrows);
-			llin = un;
-		}
-		uint8_t *ldst = out + level_off[lv];
-		int lok;
-		if (indexed) {
-			lok = geSgxTexConvertIndices(&ld, llin, lrow, ldst, level_stride[lv]);
-		} else {
-			if (ld.bufw < ld.w)
-				memset(ldst, 0, level_stride[lv] * ld.h);
-			lok = geSgxTexConvert(&ld, llin, lrow, ldst, level_stride[lv], clut_rgba);
-		}
-		if (!lok)
-			break;
-	}
-	if (lv < nlevels)
-		nlevels = lv;
-	if (nlevels > 1) {
-		static int mip_logs = 0;
-		stats.mip_uploads++;
-		if (mip_logs < 6) {
-			mip_logs++;
-			GeSgxLog("GeSgx texture: %ux%u fmt %u with %d of %u mipmap levels (%u bytes)\n",
-				(unsigned)d->w, (unsigned)d->h, (unsigned)d->format, nlevels, (unsigned)d->levels, (unsigned)levels_bytes);
-		}
-	}
-
-	if (ok) {
-		SceGxmTextureFormat fmt = indexed ? SCE_GXM_TEXTURE_FORMAT_P8_ABGR : gxmFormat(d->format);
-		int res = sceGxmTextureInitLinear(&e->tex, gpu, fmt, d->w, d->h, nlevels > 1 ? nlevels : 0);
-		if (res < 0 && nlevels > 1) {
-			if (fail_logs < 16) {
-				fail_logs++;
-				GeSgxLog("GeSgx texture: %ux%u fmt %u with %d mipmap levels refused by GXM (%08X), level 0 only\n",
-					(unsigned)d->w, (unsigned)d->h, (unsigned)d->format, nlevels, (unsigned)res);
-			}
-			res = sceGxmTextureInitLinear(&e->tex, gpu, fmt, d->w, d->h, 0);
-		}
-		ok = res >= 0 && (!indexed || sceGxmTextureSetPalette(&e->tex, (uint8_t *)gpu + pal_off) >= 0);
+		ok = geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) &&
+			sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) >= 0;
 	}
 	if (!ok) {
 		freeMemory(e);
@@ -506,13 +394,6 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 
 void geSgxTexFrameDone(void) {
 	cur_frame++;
-	// A budget lowered when memory ran out comes back up while there is memory again
-	if ((cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
-	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
-		budget += 512 * 1024;
-		if (budget > BUDGET_BYTES)
-			budget = BUDGET_BYTES;
-	}
 }
 
 void geSgxTexStats(GeSgxTexStats *out) {
@@ -525,7 +406,7 @@ void geSgxTexStats(GeSgxTexStats *out) {
 	stats.entries = n;
 	stats.kb = total_bytes / 1024;
 	*out = stats;
-	stats.uploads = stats.upload_kb = stats.upload_us = stats.checks = stats.failed = stats.mip_uploads = 0;
+	stats.uploads = stats.upload_kb = stats.upload_us = stats.checks = stats.failed = 0;
 }
 
 const SceGxmTexture *geSgxTexGet(int32_t handle) {

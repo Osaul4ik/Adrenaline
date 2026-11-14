@@ -8,7 +8,6 @@
 #include "ge_sgx_walk.h"
 #include "ge_sgx_texconv.h"
 #include "ge_sgx_gpu.h"
-#include "ge_sgx_blend.h"
 
 #define RAM_BASE  0x08000000u
 #define RAM_SIZE  0x04000000u
@@ -559,7 +558,7 @@ static void testBuildSprites(void) {
 	CHECK(feq(fverts[0].x, 20) && feq(fverts[0].y, 40) && feq(fverts[0].u, 0) && feq(fverts[0].v, 0) && feq(fverts[0].w, 1), "v0 %f %f %f %f", fverts[0].x, fverts[0].y, fverts[0].u, fverts[0].v);
 	CHECK(feq(fverts[1].x, 84) && feq(fverts[1].y, 40) && feq(fverts[1].u, 0.5f) && feq(fverts[1].v, 0), "v1 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[1].u, fverts[1].v);
 	CHECK(feq(fverts[3].x, 84) && feq(fverts[3].y, 72) && feq(fverts[3].u, 0.5f) && feq(fverts[3].v, 1.0f), "v3 %f %f %f %f", fverts[3].x, fverts[3].y, fverts[3].u, fverts[3].v);
-	CHECK(fverts[0].color == 0xFF00FF00u && fverts[2].color == 0xFF00FF00u && fverts[0].spec_fog == GE_SGX_NO_FOG, "sprite colour %08x", fverts[0].color);
+	CHECK(fverts[0].color == 0xFF00FF00u && fverts[2].color == 0xFF00FF00u && feq(fverts[0].fog, 1), "sprite colour %08x", fverts[0].color);
 	CHECK(fidx[0] == 0 && fidx[1] == 1 && fidx[2] == 2 && fidx[3] == 1 && fidx[4] == 3 && fidx[5] == 2, "sprite indices %u %u %u %u %u %u", fidx[0], fidx[1], fidx[2], fidx[3], fidx[4], fidx[5]);
 	CHECK(feq(fverts[4].x, 200) && feq(fverts[4].u, 0.5f) && fverts[4].color == 0xFF0000FFu && fidx[6] == 4 && fidx[11] == 6, "second sprite %f %f %08x idx %u", fverts[4].x, fverts[4].u, fverts[4].color, fidx[6]);
 }
@@ -728,7 +727,7 @@ static void testBuild3D(void) {
 	CHECK(feq(a->w, 2) && feq(a->x / a->w, 480) && feq(a->y / a->w, 272) && feq(a->z / a->w, 1.0f), "centre %f %f %f w %f", a->x / a->w, a->y / a->w, a->z / a->w, a->w);
 	CHECK(feq(b->x / b->w, 720) && feq(b->y / b->w, 136), "corner %f %f", b->x / b->w, b->y / b->w);
 	CHECK(feq(a->u, 0.25f) && feq(a->v, 0.75f) && a->color == 0x80FF0002u, "uv %f %f colour %08x", a->u, a->v, a->color);
-	CHECK(a->spec_fog == 0 && fverts[2].spec_fog == 0, "fog %08x %08x", a->spec_fog, fverts[2].spec_fog);
+	CHECK(feq(a->fog, 0.0f) && feq(fverts[2].fog, 0.0f), "fog %f %f", a->fog, fverts[2].fog);
 	CHECK(w->iaddr == 0x08910004, "iaddr advanced %08x", w->iaddr);
 }
 
@@ -1057,204 +1056,6 @@ static void testTexconv(void) {
 	CHECK(geSgxDecodeColor16(0, 0x07E0) == 0xFF00FF00u && geSgxDecodeColor16(2, 0x8F00) == 0x88FF0000u, "colour decode %08x %08x", geSgxDecodeColor16(0, 0x07E0), geSgxDecodeColor16(2, 0x8F00));
 }
 
-/* ---- blending with fixed colours (ge_sgx_blend.h) ---- */
-static void testBlend(void) {
-	GeSgxDraw d;
-	GeSgxBlend b;
-	memset(&d, 0, sizeof(d));
-
-	// src alpha, 1 - src alpha: as it is
-	d.blend = (3 << 4) | 2;
-	geSgxBlendSetup(&d, &b);
-	CHECK(!b.fix && b.src == GE_SGX_BF_SRC_ALPHA && b.dst == GE_SGX_BF_INV_SRC_ALPHA && !b.alpha_bogus, "plain %u %u fix %u", b.src, b.dst, b.fix);
-
-	// additive with white / black fixed colours: ONE, ZERO, no program help
-	d.blend = (10 << 4) | 10;
-	d.fix_a = 0xFFFFFF;
-	d.fix_b = 0x000000;
-	geSgxBlendSetup(&d, &b);
-	CHECK(!b.fix && b.src == GE_SGX_BF_ONE && b.dst == GE_SGX_BF_ZERO, "trivial fix %u %u", b.src, b.dst);
-
-	// cross-fade FIXA = 0x40, FIXB = 0xBF: colour * 0.25, alpha 0.25, dst 1 - src alpha
-	d.fix_a = 0x404040;
-	d.fix_b = 0xBFBFBF;
-	geSgxBlendSetup(&d, &b);
-	CHECK(b.fix && b.src == GE_SGX_BF_ONE && b.dst == GE_SGX_BF_INV_SRC_ALPHA && feq(b.rgb[0], 0x40 / 255.0f) &&
-	      b.am == 0.0f && feq(b.aa, 0x40 / 255.0f) && b.alpha_bogus, "cross-fade src %u dst %u rgb %f aa %f", b.src, b.dst, b.rgb[0], b.aa);
-
-	// FIXA and another FIXB: dst SRC_ALPHA with FIXB as the alpha
-	d.fix_b = 0x808080;
-	geSgxBlendSetup(&d, &b);
-	CHECK(b.fix && b.dst == GE_SGX_BF_SRC_ALPHA && feq(b.aa, 0x80 / 255.0f), "two fixes dst %u aa %f", b.dst, b.aa);
-
-	// src alpha, dst FIXB: the source alpha moves into the program
-	d.blend = (10 << 4) | 2;
-	d.fix_b = 0x202020;
-	geSgxBlendSetup(&d, &b);
-	CHECK(b.fix && b.src == GE_SGX_BF_ONE && b.dst == GE_SGX_BF_SRC_ALPHA && b.as == 1.0f && b.ab == 0.0f && feq(b.aa, 0x20 / 255.0f),
-	      "src alpha + fixb src %u dst %u as %f ab %f", b.src, b.dst, b.as, b.ab);
-
-	// FIXA with dst 1 - src alpha: colour times FIXA, alpha kept
-	d.blend = (3 << 4) | 10;
-	d.fix_a = 0x806040;
-	geSgxBlendSetup(&d, &b);
-	CHECK(b.fix && b.src == GE_SGX_BF_ONE && b.dst == GE_SGX_BF_INV_SRC_ALPHA && b.am == 1.0f && !b.alpha_bogus &&
-	      feq(b.rgb[0], 0x40 / 255.0f) && feq(b.rgb[2], 0x80 / 255.0f), "fixa rgb %f %f %f", b.rgb[0], b.rgb[1], b.rgb[2]);
-}
-
-/* ---- culling, alpha writes, separate specular, mipmap levels ---- */
-static void testCullAlphaSpecular(void) {
-	resetFrame();
-	uint32_t v = 0x08900000;
-	int i;
-	/* float xyz: three points around the centre */
-	static const float pos[4][3] = { { 0, 0, -2 }, { 1, 0, -2 }, { 0, 1, -2 }, { 1, 1, -2 } };
-	for (i = 0; i < 4; i++) {
-		wf(v + i * 12, pos[i][0]);
-		wf(v + i * 12 + 4, pos[i][1]);
-		wf(v + i * 12 + 8, pos[i][2]);
-	}
-	L l = { 0x08800000 };
-	setup3D(&l);
-	emit(&l, C(0x1D, 1));                 // culling on, CULL 1 (clockwise culled)
-	emit(&l, C(0x9B, 1));
-	emit(&l, C(0xE9, 0x00));              // alpha written (no stencil test)
-	emit(&l, C(0x12, VT_POSF));
-	emit(&l, C(0x10, 0x080000));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (3u << 16) | 3));    // triangles: culled
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (6u << 16) | 2));    // sprites: never culled
-	emit(&l, C(0x9B, 0));                 // CULL 0, stencil test on: alpha is the stencil's
-	emit(&l, C(0x24, 1));
-	emit(&l, C(0xDC, (0xFF << 16) | (0x10 << 8) | 2)); // EQUAL 0x10
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (3u << 16) | 3));
-	emit(&l, C(0x24, 0));
-	emit(&l, C(0xE9, 0xFF));              // alpha masked: not written
-	emit(&l, C(0x1D, 0));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (3u << 16) | 3));
-	emit(&l, C(0x0C, 0));
-	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
-	geSgxWalkerRun(w);
-
-	CHECK(frame.ndraws == 4, "draws %u", frame.ndraws);
-	if (frame.ndraws == 4) {
-		CHECK(fdraws[0].cull == GE_SGX_CULL_CW && (fdraws[0].flags & GE_SGX_DRAW_WRITE_ALPHA), "tris cull %u flags %x", fdraws[0].cull, fdraws[0].flags);
-		CHECK(fdraws[1].cull == GE_SGX_CULL_NONE, "sprites cull %u", fdraws[1].cull);
-		CHECK(fdraws[2].cull == GE_SGX_CULL_CCW && !(fdraws[2].flags & GE_SGX_DRAW_WRITE_ALPHA) && fdraws[2].sfunc == 2 && fdraws[2].sref == 0x10,
-		      "stencil draw cull %u flags %x sfunc %u sref %x", fdraws[2].cull, fdraws[2].flags, fdraws[2].sfunc, fdraws[2].sref);
-		CHECK(fdraws[3].cull == GE_SGX_CULL_NONE && !(fdraws[3].flags & GE_SGX_DRAW_WRITE_ALPHA), "masked cull %u flags %x", fdraws[3].cull, fdraws[3].flags);
-	}
-
-	/* Separate specular: a light straight at the normal, white specular, exponent 1 */
-	resetFrame();
-	w8(v + 0, 0); w8(v + 1, 0); w8(v + 2, 127); w8(v + 3, 0);        // normal s8 (0,0,1), pad
-	w16(v + 4, 0); w16(v + 6, 0); w16(v + 8, (uint16_t)(int16_t)-16384); w16(v + 10, 0);
-	l.pos = 0x08800000;
-	setup3D(&l);
-	emit(&l, C(0x17, 1));
-	emit(&l, C(0x18, 1));
-	emit(&l, C(0x5F, 1));                 // directional, diffuse + specular
-	emit(&l, C(0x63, F24(0.0f)));
-	emit(&l, C(0x64, F24(0.0f)));
-	emit(&l, C(0x65, F24(1.0f)));
-	emit(&l, C(0x90, 0x404040));          // diffuse light grey
-	emit(&l, C(0x91, 0xFFFFFF));          // specular light white
-	emit(&l, C(0x56, 0xFFFFFF));
-	emit(&l, C(0x57, 0x808080));          // material specular half
-	emit(&l, C(0x5B, F24(1.0f)));
-	emit(&l, C(0x58, 0xFF));
-	emit(&l, C(0x5D, 0xFF));
-	emit(&l, C(0x5E, 1));                 // separate specular
-	emit(&l, C(0x12, VT_NRM8 | VT_POS16));
-	emit(&l, C(0x10, 0x080000));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (0u << 16) | 1));
-	emit(&l, C(0x5E, 0));                 // added into the colour
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (0u << 16) | 1));
-	emit(&l, C(0x0C, 0));
-	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
-	geSgxWalkerRun(w);
-	CHECK(frame.nvertices == 2, "specular verts %u", frame.nvertices);
-	uint32_t c0 = fverts[0].color & 0xFF, s0 = fverts[0].spec_fog & 0xFF, c1 = fverts[1].color & 0xFF, s1 = fverts[1].spec_fog & 0xFF;
-	CHECK(c0 >= 0x3E && c0 <= 0x42 && s0 >= 0x7E && s0 <= 0x82 && (fverts[0].spec_fog >> 24) == 255,
-	      "separate: colour %08x secondary %08x", fverts[0].color, fverts[0].spec_fog);
-	CHECK(c1 >= 0xBE && c1 <= 0xC2 && s1 == 0, "added: colour %08x secondary %08x", fverts[1].color, fverts[1].spec_fog);
-
-	/* Mipmap levels: 64x64 CLUT8 with levels 32 and 16 (and a 4x4 that is too small), mipmap filter */
-	resetFrame();
-	l.pos = 0x08800000;
-	emit(&l, C(0x9C, 0x44000));
-	emit(&l, C(0x9D, 512));
-	emit(&l, C(0xD5, (271 << 10) | 479));
-	emit(&l, C(0x1E, 1));
-	emit(&l, C(0xC3, 3));                 // 8888
-	emit(&l, C(0xC2, 3 << 16));           // 3 more levels
-	emit(&l, C(0xC6, 0x107));             // linear, linear mipmap linear
-	emit(&l, C(0xA0, 0x100000)); emit(&l, C(0xA8, (0x09 << 16) | 64)); emit(&l, C(0xB8, 0x606));
-	emit(&l, C(0xA1, 0x110000)); emit(&l, C(0xA9, (0x09 << 16) | 32)); emit(&l, C(0xB9, 0x505));
-	emit(&l, C(0xA2, 0x120000)); emit(&l, C(0xAA, (0x09 << 16) | 16)); emit(&l, C(0xBA, 0x404));
-	emit(&l, C(0xA3, 0x130000)); emit(&l, C(0xAB, (0x09 << 16) | 8));  emit(&l, C(0xBB, 0x202));
-	spriteVertex(v, 0, 0, 0xFFFFFFFF, 0, 0);
-	spriteVertex(v + 16, 64, 64, 0xFFFFFFFF, 64, 64);
-	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
-	emit(&l, C(0x10, 0x080000));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (6u << 16) | 2));
-	emit(&l, C(0x0C, 0));
-	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
-	geSgxWalkerRun(w);
-	CHECK(tex_calls == 1 && last_desc.levels == 3 && last_desc.level_addr[1] == 0x09110000 && last_desc.level_bufw[2] == 16,
-	      "mip desc calls %d levels %u addr1 %08x bufw2 %u", tex_calls, last_desc.levels, last_desc.level_addr[1], last_desc.level_bufw[2]);
-	CHECK(frame.ndraws == 1 && (fdraws[0].tex_mode & GE_SGX_TEX_MIP_LINEAR), "mip filter %x", frame.ndraws ? fdraws[0].tex_mode : 0);
-}
-
-/* ---- bezier and spline surfaces ---- */
-static void testCurves(void) {
-	resetFrame();
-	/* 4x4 control points of the plane z = -2, x, y in -1.5 .. 1.5 (float xyz) */
-	uint32_t v = 0x08900000;
-	int i, j;
-	for (j = 0; j < 4; j++)
-		for (i = 0; i < 4; i++) {
-			uint32_t a = v + (j * 4 + i) * 12;
-			wf(a, -1.5f + i);
-			wf(a + 4, -1.5f + j);
-			wf(a + 8, -2.0f);
-		}
-	L l = { 0x08800000 };
-	setup3D(&l);
-	emit(&l, C(0x36, (2 << 8) | 2));      // 2 x 2 divisions
-	emit(&l, C(0x37, 0));                 // triangles
-	emit(&l, C(0x12, VT_POSF));
-	emit(&l, C(0x10, 0x080000));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x05, (4 << 8) | 4));      // bezier 4 x 4
-	emit(&l, C(0x06, (4 << 8) | 4 | (3 << 16) | (3 << 18))); // spline 4 x 4, clamped ends
-	emit(&l, C(0x37, 1));                 // lines
-	emit(&l, C(0x05, (4 << 8) | 4));
-	emit(&l, C(0x0C, 0));
-	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
-	geSgxWalkerRun(w);
-
-	CHECK(frame.curves == 3 && frame.ndraws == 3, "curves %u draws %u", frame.curves, frame.ndraws);
-	CHECK(frame.nvertices == 27 && fdraws[0].count == 24 && fdraws[0].prim == GE_SGX_DRAW_TRIANGLES, "bezier verts %u count %u", frame.nvertices, fdraws[0].count);
-	/* bezier grid: corners are the corner control points (x -1.5 / w 2 -> 480 - 0.75 * 480), the middle the centre */
-	GeSgxVertex *c0 = &fverts[0], *m = &fverts[4], *c8 = &fverts[8];
-	CHECK(feq(c0->x / c0->w, 120) && feq(m->x / m->w, 480) && feq(m->y / m->w, 272) && feq(c8->x / c8->w, 840),
-	      "bezier points %f %f %f", c0->x / c0->w, m->x / m->w, c8->x / c8->w);
-	/* clamped uniform spline over one patch: the same end points */
-	GeSgxVertex *s0 = &fverts[9], *s8 = &fverts[17], *sm = &fverts[13];
-	CHECK(feq(s0->x / s0->w, 120) && feq(s8->y / s8->w, 68) && feq(sm->x / sm->w, 480),
-	      "spline points %f %f %f", s0->x / s0->w, s8->y / s8->w, sm->x / sm->w);
-	CHECK(fdraws[2].prim == GE_SGX_DRAW_LINES && fdraws[2].count == 24, "curve lines prim %u count %u", fdraws[2].prim, fdraws[2].count);
-	CHECK(fidx[0] == 0 && fidx[1] == 3 && fidx[2] == 1 && fidx[3] == 1 && fidx[4] == 3 && fidx[5] == 4, "curve indices %u %u %u %u %u %u",
-	      fidx[0], fidx[1], fidx[2], fidx[3], fidx[4], fidx[5]);
-}
-
 int main(void) {
 	ram = calloc(1, RAM_SIZE);
 	vram = calloc(1, VRAM_SIZE);
@@ -1283,9 +1084,6 @@ int main(void) {
 	testFbTexture();
 	testTransferAlias();
 	testTexconv();
-	testBlend();
-	testCullAlphaSpecular();
-	testCurves();
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);
 	free(ram);

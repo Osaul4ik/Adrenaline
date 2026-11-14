@@ -582,15 +582,6 @@ special:
 				case GE_CMD_BEZIER:
 				case GE_CMD_SPLINE:
 					w->stats.curves++;
-					if (w->frame) {
-						uint32_t vtype = w->regs[GE_CMD_VERTEXTYPE] & 0x00FFFFFF;
-						if (!w->layout_valid || w->layout_vtype != vtype) {
-							geSgxVertexLayout(vtype, &w->layout);
-							w->layout_vtype = vtype;
-							w->layout_valid = 1;
-						}
-						geSgxBuildCurve(w, cmd == GE_CMD_SPLINE, data, &w->layout);
-					}
 					break;
 				case GE_CMD_JUMP:
 					pc = relativeAddress(w, data & 0x00FFFFFC);

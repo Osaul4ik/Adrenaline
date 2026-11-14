@@ -174,7 +174,7 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 #define FRAME_VERTICES 16384      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
 #define FRAME_UNIFORMS (512 * 1024)
-#define FRAME_RAW (512 * 1024)    // PSP vertex data for the GPU transform (most is read where it is: direct)
+#define FRAME_RAW (1280 * 1024)   // PSP vertex data for the GPU transform
 #define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
@@ -297,8 +297,6 @@ static void acquireSlot(void) {
 			s->data.state_builds = 0;
 			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
 			s->data.skipped_other = 0;
-			s->data.curves = 0;
-			s->data.nfbs = 0;
 			building = s;
 			walker.frame = &s->data;
 			walker.gpu_transform = !ge_sgx_gpu_failed;
@@ -377,26 +375,8 @@ void GeSgxFrameRendered(const GeSgxFrameRef *ref) {
 	s->state = SLOT_RENDERED;
 }
 
-/*
-	The newest frame the GPU is done with: a frame rendered GPU_DONE_TICKS
-	draw loops ago (the slots are reused by the same rule). Textures of
-	frames up to it may be freed (geSgxTexFrameDone counts flips, which
-	come much faster than frames are drawn while the walker catches up).
-*/
-volatile uint32_t ge_sgx_gpu_done_seq = 0;
-
-uint32_t GeSgxBuildingSeq(void) {
-	return frame_seq_counter + 1;
-}
-
 void GeSgxDrawTick(void) {
 	draw_tick++;
-	int i;
-	for (i = 0; i < FRAME_SLOTS; i++) {
-		FrameSlot *s = &slots[i];
-		if (s->state == SLOT_RENDERED && draw_tick - s->rendered_tick >= GPU_DONE_TICKS && (int32_t)(s->seq - ge_sgx_gpu_done_seq) > 0)
-			ge_sgx_gpu_done_seq = s->seq;
-	}
 }
 
 // Published frame (seqlock: odd while it is written)
@@ -506,21 +486,25 @@ void GeSgxLog(const char *fmt, ...) {
 
 // How much memory the renderer could still get, in 1 MB blocks (64 MB at most:
 // the blocks are taken from the emulator for a moment)
-/*
-	Free memory of the process, without allocating it (probing takes all of
-	it for a moment: the emulator's own allocations at that moment fail).
-*/
+static uint32_t probeMemory(SceKernelMemBlockType type, int max_blocks) {
+	SceUID blocks[256];
+	int n = 0;
+	if (max_blocks > 256)
+		max_blocks = 256;
+	while (n < max_blocks) {
+		SceUID id = sceKernelAllocMemBlock("SceGeSgxProbe", type, 1024 * 1024, NULL);
+		if (id < 0)
+			break;
+		blocks[n++] = id;
+	}
+	int i;
+	for (i = 0; i < n; i++)
+		sceKernelFreeMemBlock(blocks[i]);
+	return (uint32_t)n * 1024;
+}
+
 uint32_t GeSgxFreeKB(SceKernelMemBlockType type) {
-	SceKernelFreeMemorySizeInfo info;
-	memset(&info, 0, sizeof(info));
-	info.size = sizeof(info);
-	if (sceKernelGetFreeMemorySize(&info) < 0)
-		return 0;
-	if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW)
-		return (uint32_t)info.size_cdram / 1024;
-	if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW || type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW)
-		return (uint32_t)info.size_phycont / 1024;
-	return (uint32_t)info.size_user / 1024;
+	return probeMemory(type, 64);
 }
 
 static void publish(const GeSgxRect *rects, int nrects, const GeSgxStats *stats, const GeSgxFrame *rates) {
@@ -690,7 +674,6 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
-	uint32_t frame_stats_curves = 0, frame_stats_fbs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
 	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0, frame_stats_cpu[3] = { 0 };
 	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[4] = { 0 }; // per log interval
@@ -708,10 +691,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 	GeSgxStats frame_stats;
 	GeSgxRect rects[GE_SGX_FRAME_RECTS];
 
-	cdram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-	ram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
-	GeSgxLog("GeSgx: free CDRAM %u KB, free RAM %u KB, phycont %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb,
-		(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW));
+	cdram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 64);
+	ram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64);
+	GeSgxLog("GeSgx: free CDRAM %u KB, free RAM %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb);
 
 	benchmarkMemory();
 
@@ -747,7 +729,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		int slots_ok = initSlots();
 		int tex_ok = geSgxTexInit();
 		GeSgxLog("GeSgx: frames %d, texture cache %d, free RAM now %u KB\n", slots_ok, tex_ok,
-			(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
+			(unsigned)probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64));
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
@@ -876,8 +858,6 @@ static int GeSgxThread(SceSize args, void *argp) {
 							memcpy(frame_stats_cpu, building->data.cpu_reason, sizeof(frame_stats_cpu));
 							frame_stats_indices = building->data.nindices;
 							frame_stats_other = building->data.skipped_other;
-							frame_stats_curves = building->data.curves;
-							frame_stats_fbs = building->data.nfbs;
 							frame_stats_draws = building->data.ndraws;
 							frame_stats_verts = building->data.nvertices;
 							built_vertices += building->data.vertices_built;
@@ -970,15 +950,14 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u curves %u fbs %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us, %u with mipmaps) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
 					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
 					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other,
-					(unsigned)frame_stats_curves, (unsigned)frame_stats_fbs,
 					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
 					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[2], (unsigned)built_us[3],
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
-					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us, (unsigned)ts.mip_uploads,
+					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
 				built_vertices = built_states = built_frames = 0;
 				memset(built_us, 0, sizeof(built_us));

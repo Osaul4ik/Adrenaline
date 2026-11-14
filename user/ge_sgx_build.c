@@ -112,13 +112,6 @@
 #define GE_CMD_STENCILOP        0xDDu
 #define GE_CMD_MASKRGB          0xE8u
 #define GE_CMD_MASKALPHA        0xE9u
-#define GE_CMD_CULLFACEENABLE   0x1Du
-#define GE_CMD_CULL             0x9Bu
-#define GE_CMD_LIGHTMODE        0x5Eu
-#define GE_CMD_TEXLEVEL         0xC8u
-#define GE_CMD_PATCHDIVISION    0x36u
-#define GE_CMD_PATCHPRIMITIVE   0x37u
-#define GE_CMD_PATCHFACING      0x38u
 
 #define GE_VTYPE_THROUGH (1u << 23)
 
@@ -194,30 +187,6 @@ static int32_t drawTexture(GeSgxWalker *w) {
 	d.h = (uint16_t)(1u << ((size >> 8) & 0xF));
 	d.format = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
 	d.swizzle = (uint8_t)(reg(w, GE_CMD_TEXMODE) & 1);
-	d.levels = 1;
-
-	/*
-		Mipmaps: with a mipmap minification filter and automatic level
-		selection, the levels the game gave (TEXMODE), as long as each is
-		half the size of the one before (what GXM can sample) and at least
-		8x8 texels.
-	*/
-	uint32_t maxlevel = (reg(w, GE_CMD_TEXMODE) >> 16) & 7;
-	if (maxlevel && (reg(w, GE_CMD_TEXFILTER) & 4) && (reg(w, GE_CMD_TEXLEVEL) & 3) != 1) {
-		uint32_t lv;
-		for (lv = 1; lv <= maxlevel && lv < GE_SGX_MAX_LEVELS; lv++) {
-			uint32_t lsize = reg(w, GE_CMD_TEXSIZE0 + lv), lbufw = reg(w, GE_CMD_TEXBUFWIDTH0 + lv);
-			uint32_t lw = 1u << (lsize & 0xF), lh = 1u << ((lsize >> 8) & 0xF);
-			if (lw != (uint32_t)(d.w >> lv) || lh != (uint32_t)(d.h >> lv) || lw < 8 || lh < 8)
-				break;
-			d.level_addr[lv] = (reg(w, GE_CMD_TEXADDR0 + lv) & 0x00FFFFF0u) | ((lbufw << 8) & 0x0F000000u);
-			d.level_bufw[lv] = (uint16_t)(lbufw & 0x7FF);
-			if (!d.level_bufw[lv])
-				break;
-			d.levels = (uint8_t)(lv + 1);
-		}
-	}
-
 	if (d.format >= 4 && d.format <= 7) {
 		readClut(w);
 		d.clut_format = reg(w, GE_CMD_CLUTFORMAT);
@@ -261,7 +230,6 @@ typedef struct {
 
 	// Lighting
 	int lighting;
-	int separate; // LIGHTMODE: the specular light is added after texturing
 	int matupdate;
 	int reverse_normal;
 	float mat_emissive[3], mat_ambient[4], mat_diffuse[3], mat_specular[3];
@@ -403,7 +371,6 @@ static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
 		return;
 
 	x->matupdate = l->color_fmt ? (int)(reg(w, GE_CMD_MATERIALUPDATE) & 7) : 0;
-	x->separate = reg(w, GE_CMD_LIGHTMODE) & 1;
 	x->reverse_normal = reg(w, GE_CMD_REVERSENORMAL) & 1;
 	rgb(reg(w, GE_CMD_MATERIALEMISSIVE), x->mat_emissive);
 	rgb(reg(w, GE_CMD_MATERIALAMBIENT), x->mat_ambient);
@@ -478,7 +445,7 @@ static inline float fastPow(float x, float e) {
 }
 
 // Colour of a lit vertex (PPSSPP Lighter::Light); specular is added to the primary colour
-static void light(const Xform *x, const float *in, const float *pos, const float *nrm, float *out, float *sspec) {
+static void light(const Xform *x, const float *in, const float *pos, const float *nrm, float *out) {
 	const float *amb = (x->matupdate & 1) ? in : x->mat_ambient;
 	const float *dif = (x->matupdate & 2) ? in : x->mat_diffuse;
 	const float *spc = (x->matupdate & 4) ? in : x->mat_specular;
@@ -544,15 +511,8 @@ static void light(const Xform *x, const float *in, const float *pos, const float
 		}
 	}
 
-	for (k = 0; k < 3; k++) {
-		if (x->separate) {
-			out[k] = clamp01(sum[k]);
-			sspec[k] = clamp01(spec[k]);
-		} else {
-			out[k] = clamp01(sum[k] + spec[k]);
-			sspec[k] = 0.0f;
-		}
-	}
+	for (k = 0; k < 3; k++)
+		out[k] = clamp01(sum[k] + spec[k]);
 	out[3] = clamp01(sum[3]);
 }
 
@@ -623,15 +583,6 @@ static const uint8_t *vertexData(GeSgxWalker *w, const GeSgxVertexLayout *l, uin
 	return tmp;
 }
 
-// A vertex in model space, before skinning (morph targets blended)
-typedef struct {
-	float pos[3], nrm[3], tc[2], col[4], wts[8];
-	int has_color; // col is the vertex colour even if the layout has none (curves)
-} ModelVertex;
-
-static void modelVertex(const GeSgxVertexLayout *l, const Xform *x, const uint8_t *buf, ModelVertex *mv);
-static void vertexXform(const Xform *x, const ModelVertex *in, GeSgxVertex *out);
-
 // One vertex of the current primitive, ready for the GPU
 static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex *out) {
 	const GeSgxVertexLayout *l = x->l;
@@ -688,20 +639,13 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 		} else {
 			out->color = x->material_color;
 		}
-		out->spec_fog = GE_SGX_NO_FOG;
+		out->fog = 1.0f;
 		return 1;
 	}
 
-	ModelVertex mv;
-	modelVertex(l, x, buf, &mv);
-	vertexXform(x, &mv, out);
-	return 1;
-}
-
-// Morph targets blended by the morph weights
-static void modelVertex(const GeSgxVertexLayout *l, const Xform *x, const uint8_t *buf, ModelVertex *mv) {
-	float *pos = mv->pos, *nrm = mv->nrm, *tc = mv->tc, *col = mv->col, *wts = mv->wts;
-	memset(mv, 0, sizeof(*mv));
+	// Morph targets blended by the morph weights
+	float pos[3] = { 0, 0, 0 }, nrm[3] = { 0, 0, 0 }, tc[2] = { 0, 0 }, col[4] = { 0, 0, 0, 0 };
+	float wts[8] = { 0 };
 	uint32_t k, j;
 	for (k = 0; k < l->morphs; k++) {
 		const uint8_t *p = buf + k * l->stride;
@@ -732,18 +676,6 @@ static void modelVertex(const GeSgxVertexLayout *l, const Xform *x, const uint8_
 	if (!l->nrm_fmt) {
 		nrm[2] = 1.0f;
 	}
-}
-
-// Skinning, transform, lighting, texture coordinates, fog of a model space vertex
-static void vertexXform(const Xform *x, const ModelVertex *in, GeSgxVertex *out) {
-	const GeSgxVertexLayout *l = x->l;
-	float pos[3], nrm[3], tc[2], col[4], wts[8];
-	uint32_t j;
-	memcpy(pos, in->pos, sizeof(pos));
-	memcpy(nrm, in->nrm, sizeof(nrm));
-	memcpy(tc, in->tc, sizeof(tc));
-	memcpy(col, in->col, sizeof(col));
-	memcpy(wts, in->wts, sizeof(wts));
 	if (x->lighting && x->reverse_normal) {
 		nrm[0] = -nrm[0];
 		nrm[1] = -nrm[1];
@@ -838,8 +770,7 @@ static void vertexXform(const Xform *x, const ModelVertex *in, GeSgxVertex *out)
 
 	// Colour
 	float c[4];
-	int has_color = l->color_fmt || in->has_color;
-	if (has_color) {
+	if (l->color_fmt) {
 		memcpy(c, col, sizeof(c));
 	} else {
 		c[0] = (x->material_color & 0xFF) * (1.0f / 255.0f);
@@ -847,26 +778,22 @@ static void vertexXform(const Xform *x, const ModelVertex *in, GeSgxVertex *out)
 		c[2] = ((x->material_color >> 16) & 0xFF) * (1.0f / 255.0f);
 		c[3] = (x->material_color >> 24) * (1.0f / 255.0f);
 	}
-	uint32_t spec = 0;
 	if (x->lighting) {
-		float lit[4], sp[4];
-		light(x, c, wpos, wnrm, lit, sp);
+		float lit[4];
+		light(x, c, wpos, wnrm, lit);
 		out->color = packColor(lit);
-		if (x->separate) {
-			sp[3] = 0.0f;
-			spec = packColor(sp);
-		}
 	} else {
-		out->color = has_color ? packColor(c) : x->material_color;
+		out->color = l->color_fmt ? packColor(c) : x->material_color;
 	}
 
 	// Fog from the view space depth
-	uint32_t fog = 255;
 	if (x->fog) {
 		float f = (view[2] + x->fog1) * x->fog2;
-		fog = (f == f) ? (uint32_t)(clamp01(f) * 255.0f + 0.5f) : 255;
+		out->fog = (f == f) ? clamp01(f) : 1.0f;
+	} else {
+		out->fog = 1.0f;
 	}
-	out->spec_fog = (spec & 0x00FFFFFFu) | (fog << 24);
+	return 1;
 }
 
 static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
@@ -905,14 +832,7 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 			d->smask = (uint8_t)((st >> 16) & 0xFF);
 			d->sops = (uint16_t)((op & 7) | (((op >> 8) & 7) << 4) | (((op >> 16) & 7) << 8));
 			d->swmask = (uint8_t)(~reg(w, GE_CMD_MASKALPHA) & 0xFF);
-		} else if ((reg(w, GE_CMD_MASKALPHA) & 0xFF) != 0xFF) {
-			// No stencil test: the PSP writes the fragment alpha into the framebuffer
-			// (read back by DSTALPHA blending and framebuffer textures)
-			d->flags |= GE_SGX_DRAW_WRITE_ALPHA;
 		}
-		// Culling (triangles only: geSgxBuildPrim): CULL 1 culls the clockwise ones on screen
-		if (reg(w, GE_CMD_CULLFACEENABLE) & 1)
-			d->cull = (reg(w, GE_CMD_CULL) & 1) ? GE_SGX_CULL_CW : GE_SGX_CULL_CCW;
 		if (reg(w, GE_CMD_TEXTUREMAPENABLE) & 1)
 			d->flags |= GE_SGX_DRAW_TEXTURED;
 		if (reg(w, GE_CMD_ALPHABLENDENABLE) & 1)
@@ -944,8 +864,6 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 				d->tex_mode |= GE_SGX_TEX_LINEAR_MIN;
 			if (filter & 0x100)
 				d->tex_mode |= GE_SGX_TEX_LINEAR_MAG;
-			if ((filter & 6) == 6)
-				d->tex_mode |= GE_SGX_TEX_MIP_LINEAR;
 		}
 		// Depth: tested and written only with the test on (PPSSPP)
 		if (reg(w, GE_CMD_ZTESTENABLE) & 1) {
@@ -976,7 +894,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
 		a->fbtex == b->fbtex && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
-		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops && a->cull == b->cull &&
+		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
 
@@ -1160,7 +1078,6 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 		rgb4(c[GE_SGX_UC_MATSPC], x->mat_specular, (x->matupdate & 2) ? 1.0f : 0.0f);
 		set4(c[GE_SGX_UC_AMBIENT], x->global_ambient[0], x->global_ambient[1], x->global_ambient[2], x->global_ambient[3]);
 		c[GE_SGX_UC_MATUPD][0] = (x->matupdate & 4) ? 1.0f : 0.0f;
-		c[GE_SGX_UC_MATUPD][2] = x->separate ? 1.0f : 0.0f;
 		for (i = 0; i < x->nlights; i++) {
 			float (*L)[4] = &c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE];
 			rgb4(L[0], x->light[i].pos, (float)x->light[i].type);
@@ -1329,20 +1246,22 @@ void geSgxBuildFinish(GeSgxWalker *w) {
 	or point list of indices relative to them, which lets consecutive
 	primitives of one state share a GXM draw.
 */
-/*
-	The draw state and the transform setup of the next primitive. They only
-	change when a register, matrix or CLUT did (lists draw many primitives
-	in one state). 0: not drawable (its texture is not there).
-*/
-static GeSgxDraw cached_d;
-static Xform cached_x;
-static const GeSgxWalker *cached_w = NULL;
-static const GeSgxFrameData *cached_frame = NULL;
-
-static int primState(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t *pt0) {
+void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l) {
 	GeSgxFrameData *f = w->frame;
+
+	if (count == 0 || !l->pos_fmt)
+		return;
+
+	/*
+		The draw state and the transform setup only change when a register,
+		matrix or CLUT did (lists draw many primitives in one state).
+	*/
+	static GeSgxDraw cached_d;
+	static Xform cached_x;
+	static const GeSgxWalker *cached_w = NULL;
+	static const GeSgxFrameData *cached_frame = NULL;
 	uint32_t (* clk)(void) = w->clock_fn;
-	uint32_t t0 = *pt0, t1;
+	uint32_t t0 = clk ? clk() : 0, t1;
 	if (w->state_dirty || cached_w != w || cached_frame != f) {
 		drawState(w, &cached_d);
 		xformInit(w, l, &cached_x);
@@ -1365,8 +1284,6 @@ static int primState(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t *pt0) 
 			float kx = tw / fbreg[rt].w, ky = th / fbreg[rt].h;
 			cached_d.texture = 0;
 			cached_d.fbtex = fbreg[rt].fb + 1;
-			if ((reg(w, GE_CMD_TEXFORMAT) & 0xF) == 0)
-				cached_d.tex_mode |= GE_SGX_TEX_OPAQUE; // 565: no alpha
 			cached_x.tex_w = 1.0f / fbreg[rt].w;
 			cached_x.tex_h = 1.0f / fbreg[rt].h;
 			cached_x.uscale *= kx;
@@ -1399,29 +1316,13 @@ static int primState(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t *pt0) 
 		f->us_state += t1 - t0;
 		t0 = t1;
 	}
-	*pt0 = t0;
 	if ((cached_d.flags & GE_SGX_DRAW_TEXTURED) && cached_d.texture < 0) {
 		f->skipped_other++;
-		return 0;
+		return;
 	}
-	return 1;
-}
-
-void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l) {
-	GeSgxFrameData *f = w->frame;
-
-	if (count == 0 || !l->pos_fmt)
-		return;
-
-	uint32_t (* clk)(void) = w->clock_fn;
-	uint32_t t0 = clk ? clk() : 0, t1;
-	if (!primState(w, l, &t0))
-		return;
 
 	GeSgxDraw d = cached_d;
 	const Xform *xp = &cached_x;
-	if (type < GE_PRIM_TRIANGLES || type == GE_PRIM_RECTANGLES)
-		d.cull = GE_SGX_CULL_NONE;
 
 	// Output indices per input vertex, at most
 	uint32_t nidx;
@@ -1718,288 +1619,6 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 
 fail:
 	f->skipped_other++;
-}
-
-/* ---- Bezier and spline surfaces (PPSSPP GPU/Common/SplineCommon.cpp) ---- */
-
-#define MAX_CURVE_POINTS 1024
-#define MAX_CURVE_VERTICES 4096
-static ModelVertex curve_cp[MAX_CURVE_POINTS];
-static ModelVertex curve_mv[MAX_CURVE_VERTICES];
-
-// Cubic Bernstein weights at t
-static void bezierWeights(float t, float *b) {
-	float s = 1.0f - t;
-	b[0] = s * s * s;
-	b[1] = 3.0f * t * s * s;
-	b[2] = 3.0f * t * t * s;
-	b[3] = t * t * t;
-}
-
-// The PSP's spline knots: n + 1 control points, type bit 0: open start, bit 1: open end (PPSSPP spline_knot)
-static void splineKnots(int n, int type, float *knots) {
-	int i;
-	for (i = 0; i < n + 5; i++)
-		knots[i] = 0.0f;
-	for (i = 0; i < n - 1; i++)
-		knots[i + 3] = (float)i;
-	if ((type & 1) == 0) {
-		knots[0] = -3.0f;
-		knots[1] = -2.0f;
-		knots[2] = -1.0f;
-	}
-	if ((type & 2) == 0) {
-		knots[n + 2] = (float)(n - 1);
-		knots[n + 3] = (float)n;
-		knots[n + 4] = (float)(n + 1);
-	} else {
-		knots[n + 2] = (float)(n - 2);
-		knots[n + 3] = (float)(n - 2);
-		knots[n + 4] = (float)(n - 2);
-	}
-}
-
-// The 4 cubic B-spline basis functions not 0 in the knot span j (control points j - 3 .. j) at t
-static void splineWeights(const float *k, int j, float t, float *N) {
-	float left[4], right[4];
-	int r, q;
-	N[0] = 1.0f;
-	for (r = 1; r <= 3; r++) {
-		left[r] = t - k[j + 1 - r];
-		right[r] = k[j + r] - t;
-		float saved = 0.0f;
-		for (q = 0; q < r; q++) {
-			float den = right[q + 1] + left[r - q];
-			float temp = den != 0.0f ? N[q] / den : 0.0f;
-			N[q] = saved + right[q + 1] * temp;
-			saved = left[r - q] * temp;
-		}
-		N[r] = saved;
-	}
-}
-
-static void mvAccumulate(ModelVertex *out, const ModelVertex *in, float wt) {
-	int i;
-	for (i = 0; i < 3; i++) {
-		out->pos[i] += in->pos[i] * wt;
-		out->nrm[i] += in->nrm[i] * wt;
-	}
-	out->tc[0] += in->tc[0] * wt;
-	out->tc[1] += in->tc[1] * wt;
-	for (i = 0; i < 4; i++)
-		out->col[i] += in->col[i] * wt;
-	for (i = 0; i < 8; i++)
-		out->wts[i] += in->wts[i] * wt;
-}
-
-/*
-	BEZIER / SPLINE: the surface over a grid of ucount x vcount control
-	points (the vertices at VADDR, or the ones the indices pick), divided
-	by PATCHDIVISION per patch, as triangles (lines, points:
-	PATCHPRIMITIVE), transformed on the CPU like every other vertex. With
-	lighting the normals come from the surface (PATCHFACING turns them).
-*/
-void geSgxBuildCurve(GeSgxWalker *w, int spline, uint32_t data, const GeSgxVertexLayout *l) {
-	GeSgxFrameData *f = w->frame;
-	int nu = data & 0xFF, nv = (data >> 8) & 0xFF;
-	int utype = (data >> 16) & 3, vtype = (data >> 18) & 3;
-	int pu_n = spline ? nu - 3 : (nu - 1) / 3, pv_n = spline ? nv - 3 : (nv - 1) / 3;
-	int i;
-
-	if (!f)
-		return;
-	f->curves++;
-	if (!l->pos_fmt || pu_n < 1 || pv_n < 1 || nu * nv > MAX_CURVE_POINTS || (reg(w, GE_CMD_VERTEXTYPE) & GE_VTYPE_THROUGH)) {
-		f->skipped_other++;
-		return;
-	}
-
-	uint32_t t0 = w->clock_fn ? w->clock_fn() : 0;
-	if (!primState(w, l, &t0))
-		return;
-	GeSgxDraw d = cached_d;
-	const Xform *xp = &cached_x;
-
-	// The control points, in model space
-	bulk_count = 0;
-	if (!l->index_size)
-		bulkLoad(w, l, 0, (uint32_t)(nu * nv));
-	static uint8_t raw[MAX_CURVE_POINTS * 4];
-	if (l->index_size && !geSgxRead(w, w->iaddr, raw, nu * nv * l->index_size)) {
-		f->skipped_other++;
-		return;
-	}
-	for (i = 0; i < nu * nv; i++) {
-		uint32_t index = i;
-		if (l->index_size == 1) {
-			index = raw[i];
-		} else if (l->index_size == 2) {
-			uint16_t v;
-			memcpy(&v, raw + i * 2, 2);
-			index = v;
-		} else if (l->index_size == 4) {
-			memcpy(&index, raw + i * 4, 4);
-		}
-		uint8_t tmp[MAX_VERTEX_BYTES];
-		const uint8_t *buf = vertexData(w, l, index, tmp);
-		if (!buf) {
-			f->skipped_other++;
-			return;
-		}
-		modelVertex(l, xp, buf, &curve_cp[i]);
-	}
-
-	// Divisions per patch, fewer if the surface would not fit
-	uint32_t div = reg(w, GE_CMD_PATCHDIVISION);
-	int tu = div & 0x7F, tv = (div >> 8) & 0x7F;
-	if (tu < 1) tu = 1;
-	if (tv < 1) tv = 1;
-	while ((pu_n * tu + 1) * (pv_n * tv + 1) > MAX_CURVE_VERTICES && (tu > 1 || tv > 1)) {
-		if (tu >= tv && tu > 1)
-			tu--;
-		else
-			tv--;
-	}
-	int gu = pu_n * tu + 1, gv = pv_n * tv + 1; // one grid over the whole surface
-	if (gu * gv > MAX_CURVE_VERTICES) {
-		f->skipped_other++;
-		return;
-	}
-
-	float ku[256 + 5], kv[256 + 5];
-	if (spline) {
-		splineKnots(nu - 1, utype, ku);
-		splineKnots(nv - 1, vtype, kv);
-	}
-
-	// Surface points
-	int y, x;
-	for (y = 0; y < gv; y++) {
-		int pv = y / tv, sv = y % tv;
-		if (pv >= pv_n) {
-			pv = pv_n - 1;
-			sv = tv;
-		}
-		float t = (float)sv / (float)tv, wv[4];
-		int v0;
-		if (spline) {
-			float a = kv[pv + 3], b = kv[pv + 4];
-			splineWeights(kv, pv + 3, a + (b - a) * t, wv);
-			v0 = pv;
-		} else {
-			bezierWeights(t, wv);
-			v0 = pv * 3;
-		}
-		for (x = 0; x < gu; x++) {
-			int pu = x / tu, su = x % tu;
-			if (pu >= pu_n) {
-				pu = pu_n - 1;
-				su = tu;
-			}
-			float s = (float)su / (float)tu, wu[4];
-			int u0;
-			if (spline) {
-				float a = ku[pu + 3], b = ku[pu + 4];
-				splineWeights(ku, pu + 3, a + (b - a) * s, wu);
-				u0 = pu;
-			} else {
-				bezierWeights(s, wu);
-				u0 = pu * 3;
-			}
-			ModelVertex *mv = &curve_mv[y * gu + x];
-			memset(mv, 0, sizeof(*mv));
-			int a, b;
-			for (b = 0; b < 4; b++)
-				for (a = 0; a < 4; a++)
-					mvAccumulate(mv, &curve_cp[(v0 + b) * nu + u0 + a], wu[a] * wv[b]);
-			// Without texture coordinates: the position on the patch grid
-			if (!l->tc_fmt) {
-				mv->tc[0] = (float)pu + s;
-				mv->tc[1] = (float)pv + t;
-			}
-			if (!l->nrm_fmt)
-				mv->nrm[2] = 1.0f;
-		}
-	}
-
-	// Normals of a lit surface from its points (central differences)
-	if (xp->lighting) {
-		float sign = (reg(w, GE_CMD_PATCHFACING) & 1) ? -1.0f : 1.0f;
-		for (y = 0; y < gv; y++) {
-			for (x = 0; x < gu; x++) {
-				const ModelVertex *l0 = &curve_mv[y * gu + (x > 0 ? x - 1 : x)];
-				const ModelVertex *l1 = &curve_mv[y * gu + (x + 1 < gu ? x + 1 : x)];
-				const ModelVertex *d0 = &curve_mv[(y > 0 ? y - 1 : y) * gu + x];
-				const ModelVertex *d1 = &curve_mv[(y + 1 < gv ? y + 1 : y) * gu + x];
-				float du[3], dv[3], n[3];
-				for (i = 0; i < 3; i++) {
-					du[i] = l1->pos[i] - l0->pos[i];
-					dv[i] = d1->pos[i] - d0->pos[i];
-				}
-				n[0] = du[1] * dv[2] - du[2] * dv[1];
-				n[1] = du[2] * dv[0] - du[0] * dv[2];
-				n[2] = du[0] * dv[1] - du[1] * dv[0];
-				float len = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-				ModelVertex *mv = &curve_mv[y * gu + x];
-				if (len > 0.0f) {
-					float il = sign / sqrtf(len);
-					for (i = 0; i < 3; i++)
-						mv->nrm[i] = n[i] * il;
-				}
-			}
-		}
-	}
-
-	// Output
-	uint32_t prim = reg(w, GE_CMD_PATCHPRIMITIVE) & 3;
-	uint32_t nverts = (uint32_t)(gu * gv);
-	uint32_t nidx = prim == 2 ? nverts : prim == 1 ? (uint32_t)(gu * (gv - 1) + gv * (gu - 1)) * 2 : (uint32_t)((gu - 1) * (gv - 1) * 6);
-	if (f->nvertices + nverts > f->max_vertices || f->nindices + nidx > f->max_indices || f->ndraws >= f->max_draws) {
-		f->skipped_other++;
-		return;
-	}
-	uint32_t vstart = f->nvertices, istart = f->nindices;
-	GeSgxVertex *vout = &f->vertices[vstart];
-	uint16_t *iout = &f->indices[istart];
-	for (i = 0; i < (int)nverts; i++)
-		vertexXform(xp, &curve_mv[i], &vout[i]);
-	uint32_t ni = 0;
-	if (prim == 2) {
-		d.prim = GE_SGX_DRAW_POINTS;
-		d.cull = GE_SGX_CULL_NONE;
-		for (i = 0; i < (int)nverts; i++)
-			iout[ni++] = (uint16_t)i;
-	} else if (prim == 1) {
-		d.prim = GE_SGX_DRAW_LINES;
-		d.cull = GE_SGX_CULL_NONE;
-		for (y = 0; y < gv; y++)
-			for (x = 0; x + 1 < gu; x++) {
-				iout[ni++] = (uint16_t)(y * gu + x);
-				iout[ni++] = (uint16_t)(y * gu + x + 1);
-			}
-		for (x = 0; x < gu; x++)
-			for (y = 0; y + 1 < gv; y++) {
-				iout[ni++] = (uint16_t)(y * gu + x);
-				iout[ni++] = (uint16_t)((y + 1) * gu + x);
-			}
-	} else {
-		d.prim = GE_SGX_DRAW_TRIANGLES;
-		for (y = 0; y + 1 < gv; y++)
-			for (x = 0; x + 1 < gu; x++) {
-				uint16_t i0 = (uint16_t)(y * gu + x), i1 = (uint16_t)(i0 + 1);
-				uint16_t i2 = (uint16_t)(i0 + gu), i3 = (uint16_t)(i2 + 1);
-				iout[ni++] = i0; iout[ni++] = i2; iout[ni++] = i1;
-				iout[ni++] = i1; iout[ni++] = i2; iout[ni++] = i3;
-			}
-	}
-	f->nvertices = vstart + nverts;
-	f->vertices_built += nverts;
-	f->nindices = istart + ni;
-	f->draws_3d++;
-	d.base = vstart;
-	d.first = istart;
-	d.count = ni;
-	f->draws[f->ndraws++] = d;
 }
 
 void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data) {

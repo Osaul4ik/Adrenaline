@@ -28,17 +28,10 @@
 typedef struct {
 	uint32_t draws;    // drawn
 	uint32_t vertices;
-	uint32_t waiting;  // draws whose shader is still being compiled (or is missing)
-	uint32_t other_fb; // draws into other framebuffers than the shown one
+	uint32_t waiting;  // draws whose shader is still being compiled
+	uint32_t other_fb; // draws into other framebuffers (not shown)
 	uint32_t gpu_draws; // with the GPU transform
 	uint32_t render_us;
-	// Draws not drawn: texture missing, GPU vertex program refused, scissored away, no rendering for the framebuffer
-	uint32_t no_texture, no_program, scissored, no_target;
-	// Of the drawn ones: culled, with stencil test, writing alpha, fixed blend colour, framebuffer textures
-	uint32_t culled_draws, stencil_draws, alpha_draws, fix_draws, fb_textured;
-	uint32_t scissor_masks; // exact scissor rectangles set
-	uint32_t scenes, targets, target_kb;
-	uint32_t reentries; // a framebuffer drawn again after another one in the same frame
 } GeSgxRenderStats;
 
 // Set when a GPU transform vertex program cannot be had: the walker then transforms on the CPU

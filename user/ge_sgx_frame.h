@@ -48,12 +48,8 @@ typedef struct {
 	float x, y, z, w;
 	float u, v;     // normalized
 	uint32_t color; // 0xAABBGGRR
-	// Secondary colour (separate specular, added after texturing) 0x00BBGGRR
-	// and the fog factor in the top byte (255: no fog, 0: fog colour)
-	uint32_t spec_fog;
-} GeSgxVertex;
-
-#define GE_SGX_NO_FOG 0xFF000000u // 32 bytes, the vertex stream of the GXM program
+	float fog;      // 1: no fog, 0: fog colour
+} GeSgxVertex; // 32 bytes, the vertex stream of the GXM program
 
 // Why a 3D primitive used the CPU transform
 enum {
@@ -76,7 +72,7 @@ enum GeSgxDrawFlags {
 	GE_SGX_DRAW_DOUBLE       = 1 << 4, // colour doubling
 	GE_SGX_DRAW_CLEAR        = 1 << 5, // clear mode
 	GE_SGX_DRAW_WRITE_COLOR  = 1 << 6, // clear mode: colour is written
-	GE_SGX_DRAW_WRITE_ALPHA  = 1 << 7, // alpha (the PSP's stencil) is written: clears, draws without stencil test
+	GE_SGX_DRAW_WRITE_ALPHA  = 1 << 7, // clear mode: alpha (stencil) is written
 	GE_SGX_DRAW_WRITE_DEPTH  = 1 << 8, // depth is written
 	GE_SGX_DRAW_FOG          = 1 << 9, // fog (the vertices carry the factor)
 };
@@ -86,15 +82,6 @@ enum GeSgxTexModes {
 	GE_SGX_TEX_CLAMP_V    = 1 << 1,
 	GE_SGX_TEX_LINEAR_MIN = 1 << 2,
 	GE_SGX_TEX_LINEAR_MAG = 1 << 3,
-	GE_SGX_TEX_OPAQUE     = 1 << 4, // framebuffer texture without alpha (565): sampled with alpha 1
-	GE_SGX_TEX_MIP_LINEAR = 1 << 5, // mipmaps (if the texture has them) blended between levels
-};
-
-// Culling (GeSgxDraw.cull): of the triangles that are clockwise / counter-clockwise on screen
-enum {
-	GE_SGX_CULL_NONE,
-	GE_SGX_CULL_CW,
-	GE_SGX_CULL_CCW,
 };
 
 typedef struct {
@@ -125,7 +112,6 @@ typedef struct {
 	// operations (fail, depth fail, pass: 4 bits each)
 	uint8_t sfunc, sref, smask, swmask;
 	uint16_t sops;
-	uint8_t cull;       // GE_SGX_CULL_*
 
 	// GPU transform: the vertices are the PSP's, the vertex program transforms them
 	uint8_t gpu;
@@ -174,7 +160,6 @@ typedef struct {
 	uint32_t prims_gpu;     // of them with the GPU transform
 	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
-	uint32_t curves;        // bezier / spline surfaces built
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew
 	// Build profile (with a clock): state setup, texture lookups, vertices

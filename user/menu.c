@@ -599,11 +599,6 @@ int AdrenalineDraw(SceSize args, void *argp) {
     // e.g. while a video plays, or the game exited): give the screen back to the PSP framebuffer
     if ((last_draw_native || last_sgx_active) && !draw_native && !sgx_active && config.graphics_filtering == 0 && !menu_open)
       SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
-    if (draw_native != last_draw_native && sgx_active) {
-      static int native_logs = 0;
-      if (native_logs++ < 8)
-        GeSgxLog("GeSgx: native resolution copy %s (Native Resolution option and the SGX renderer are both on)\n", draw_native ? "on" : "off");
-    }
     last_draw_native = draw_native;
     last_sgx_active = sgx_active;
 
@@ -695,16 +690,6 @@ int AdrenalineDraw(SceSize args, void *argp) {
       sgx_skipped_3d = sgx_ref.data->draws_3d;
       GeSgxFrameRendered(&sgx_ref);
 
-      // The shown framebuffer changes (menus, videos, loading screens)
-      static uint32_t last_shown_fb = 0xFFFFFFFFu;
-      static int fb_logs = 0;
-      if (sgx_ref.fb != last_shown_fb && fb_logs < 32) {
-        fb_logs++;
-        last_shown_fb = sgx_ref.fb;
-        GeSgxLog("GeSgx: shown fb %X (%d aliases), %u draws in %u scenes, %u framebuffers drawn\n", (unsigned)sgx_ref.fb, sgx_ref.naliases,
-          (unsigned)sgx_render.draws, (unsigned)sgx_render.scenes, (unsigned)sgx_ref.data->nfbs);
-      }
-
       if (sgx_scenes < 3) {
         sgx_scenes++;
         GeSgxLog("GeSgx: draw scene %d: %u draws, %u vertices, %u waiting, %u other fb, %u 3d, fb %X\n", sgx_scenes,
@@ -752,10 +737,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
       vita2d_texture_set_filters(pops_tex, SCE_GXM_TEXTURE_FILTER_POINT, SCE_GXM_TEXTURE_FILTER_POINT);
     }
 
-    // The SGX picture takes precedence over the native resolution copy (both on: that one
-    // switches on and off with the game's buffers, the screen showed one, then the other)
-    int show_sgx = sgx_full && sgx_tex && !adrenaline->pops_mode;
-    if (show_sgx || (!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops) {
+    if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops) {
       // Copy PSP framebuffer
       if (sgx_active) {
         prof_t = sceKernelGetProcessTimeWide();
@@ -874,7 +856,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
     }
 
     // Sync
-    if (show_sgx || (!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
+    if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
       waitPspLcdc();
     else
       sceDisplayWaitVblankStart();
@@ -889,18 +871,6 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
-        // The last rendered frame: what was drawn and what was not, and why
-        const GeSgxRenderStats *r = &sgx_render;
-        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB, phycont %u KB\n",
-          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW),
-          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW));
-        GeSgxLog("GeSgx render: %u draws (gpu %u, %u vertices) in %u scenes, %u us | targets %u (%u KB), other fb %u, re-entered %u | "
-          "not drawn: texture %u, program %u, compiling %u, scissor %u, no target %u | culled %u stencil %u alpha %u fixed blend %u fb textures %u, scissor masks %u\n",
-          (unsigned)r->draws, (unsigned)r->gpu_draws, (unsigned)r->vertices, (unsigned)r->scenes, (unsigned)r->render_us,
-          (unsigned)r->targets, (unsigned)r->target_kb, (unsigned)r->other_fb, (unsigned)r->reentries,
-          (unsigned)r->no_texture, (unsigned)r->no_program, (unsigned)r->waiting, (unsigned)r->scissored, (unsigned)r->no_target,
-          (unsigned)r->culled_draws, (unsigned)r->stencil_draws, (unsigned)r->alpha_draws, (unsigned)r->fix_draws,
-          (unsigned)r->fb_textured, (unsigned)r->scissor_masks);
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }

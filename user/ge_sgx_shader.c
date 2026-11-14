@@ -46,9 +46,8 @@
 #include "ge_sgx.h"
 #include "ge_sgx_shader.h"
 #include "ge_sgx_cg.h"
-#include "ge_sgx_blend.h"
 
-#define MAX_PROGRAMS 1024
+#define MAX_PROGRAMS 512
 #define QUEUE_SIZE 64 // power of two
 
 #define COMPILER_HEAP_SIZE (6 * 1024 * 1024)
@@ -103,12 +102,6 @@ uint32_t geSgxShaderKey(const GeSgxDraw *d) {
 		key |= (1 << 6) | ((uint32_t)(d->atest_func & 7) << 7);
 	if (d->flags & GE_SGX_DRAW_FOG)
 		key |= 1 << 11;
-	if (d->flags & GE_SGX_DRAW_BLEND) {
-		GeSgxBlend b;
-		geSgxBlendSetup(d, &b);
-		if (b.fix)
-			key |= GE_SGX_FS_FIX;
-	}
 
 	return key;
 }
@@ -303,26 +296,6 @@ const SceGxmProgram *geSgxShaderGet(uint32_t key) {
 	// The queue is full or the thread is not there: try again next time
 	if (queue_write - queue_read >= QUEUE_SIZE || !startCompiler())
 		return NULL;
-
-	// Not in the cache: logged, and listed for the app to compile (with every key there is)
-	static int missing_logs = 0;
-	if (missing_logs < 16) {
-		missing_logs++;
-		char path[96];
-		geSgxCgPath(key, path, sizeof(path));
-		GeSgxLog("GeSgx shader %04X: not in the cache (%s)\n", (unsigned)key, path);
-	}
-	if (missing_logs < 256) {
-		char line[16];
-		int len = snprintf(line, sizeof(line), "%04X\n", (unsigned)key);
-		sceIoMkdir("ux0:data/adrenaline", 0777);
-		sceIoMkdir(GE_SGX_CG_DIR, 0777);
-		SceUID fd = sceIoOpen(GE_SGX_CG_MISSING, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
-		if (fd >= 0) {
-			sceIoWrite(fd, line, len);
-			sceIoClose(fd);
-		}
-	}
 
 	p->state = STATE_QUEUED;
 	__sync_synchronize();

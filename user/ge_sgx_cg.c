@@ -66,8 +66,7 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	if (w4) S("	float4 aWeight0,\n");
 	if (w8) S("	float4 aWeight1,\n");
 	S("	uniform float4 uC[%d] : BUFFER[0],\n	uniform float4 uO[%d] : BUFFER[1],\n", GE_SGX_UC_COUNT, GE_SGX_UO_COUNT);
-	// vFog: the secondary (separate specular) colour and the fog factor
-	S("	out float4 vPosition : POSITION,\n	out float2 vTexcoord : TEXCOORD0,\n	out float4 vFog : TEXCOORD1,\n	out float4 vColor : COLOR)\n{\n");
+	S("	out float4 vPosition : POSITION,\n	out float2 vTexcoord : TEXCOORD0,\n	out float vFog : TEXCOORD1,\n	out float4 vColor : COLOR)\n{\n");
 
 	// Model space, with the bones
 	S("	float3 p = aPosition * uO[%d].x;\n", GE_SGX_UO_SCALE);
@@ -150,17 +149,13 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 			S("				if (sd > 0.0)\n					spec += uC[%d].rgb * spcC * (pow(sd, sexp) * sc);\n			}\n", o + 6);
 			S("		}\n	}\n");
 		}
-		// Separate specular (LIGHTMODE): added after texturing, by the fragment program
-		S("	float sep = uC[%d].z;\n", GE_SGX_UC_MATUPD);
-		S("	vColor = float4(saturate(sum + spec * (1.0 - sep)), saturate(uC[%d].a * ambA));\n", GE_SGX_UC_AMBIENT);
-		S("	float3 sspec = saturate(spec * sep);\n");
+		S("	vColor = float4(saturate(sum + spec), saturate(uC[%d].a * ambA));\n", GE_SGX_UC_AMBIENT);
 	} else {
 		S("	vColor = ic;\n");
-		S("	float3 sspec = float3(0.0, 0.0, 0.0);\n");
 	}
 
 	// Fog from the view depth
-	S("	vFog = float4(sspec, fl.z > 0.5 ? saturate((vp.z + vpz.z) * vpz.w) : 1.0);\n}\n");
+	S("	vFog = fl.z > 0.5 ? saturate((vp.z + vpz.z) * vpz.w) : 1.0;\n}\n");
 #undef S
 	return n;
 }
@@ -175,10 +170,10 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 			"	float4 aPosition,\n"
 			"	float2 aTexcoord,\n"
 			"	float4 aColor,\n"
-			"	float4 aFog,\n" // secondary colour, fog factor
+			"	float aFog,\n"
 			"	out float4 vPosition : POSITION,\n"
 			"	out float2 vTexcoord : TEXCOORD0,\n"
-			"	out float4 vFog : TEXCOORD1,\n"
+			"	out float vFog : TEXCOORD1,\n"
 			"	out float4 vColor : COLOR)\n"
 			"{\n"
 			"	float w = aPosition.w;\n"
@@ -197,19 +192,16 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	int dbl = (key >> 5) & 1;
 	int atest = (key >> 6) & 1;
 	int afunc = (key >> 7) & 7;
-	int fix = (key & GE_SGX_FS_FIX) != 0;
 
 	int n = snprintf(buf, size,
-		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s%s) : COLOR\n"
+		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s) : COLOR\n"
 		"{\n"
 		"	float4 v = vColor;\n"
 		"	float4 c = v;\n",
-		clear ? "" : ", float4 vFog : TEXCOORD1",
 		textured ? ", uniform sampler2D uTexture" : "",
 		(textured && tfunc == 2) ? ", uniform float4 uEnv" : "",
 		atest ? ", uniform float uAlphaRef" : "",
-		fog ? ", uniform float4 uFogColor" : "",
-		fix ? ", uniform float4 uFixC, uniform float4 uFixA" : "");
+		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "");
 
 	if (!clear && textured) {
 		static const char *funcs[5] = {
@@ -237,16 +229,12 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		n += snprintf(buf + n, size - n, funcs[tfunc], alphas[tfunc][tcc]);
 	}
 
-	// The secondary colour (separate specular, 0 without) after texturing
-	if (!clear)
-		n += snprintf(buf + n, size - n, "	c.rgb = c.rgb + vFog.rgb;\n");
-
 	if (dbl)
 		n += snprintf(buf + n, size - n, "	c.rgb = c.rgb * 2.0;\n");
 
 	// Fog after texturing, on the colour only
 	if (fog)
-		n += snprintf(buf + n, size - n, "	c.rgb = lerp(uFogColor.rgb, saturate(c.rgb), vFog.a);\n");
+		n += snprintf(buf + n, size - n, "	c.rgb = lerp(uFogColor.rgb, saturate(c.rgb), vFog);\n");
 
 	if (atest) {
 		static const char *tests[8] = {
@@ -262,20 +250,13 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		n += snprintf(buf + n, size - n, "	if (!(%s))\n		discard;\n", tests[afunc]);
 	}
 
-	// Fixed blend colours, see ge_sgx_blend.h
-	if (fix) {
-		n += snprintf(buf + n, size - n, "	c = saturate(c);\n");
-		n += snprintf(buf + n, size - n, "	c.rgb = c.rgb * uFixC.rgb * (c.a * uFixA.x + uFixA.y);\n");
-		n += snprintf(buf + n, size - n, "	c.a = c.a * uFixA.z + uFixA.w;\n");
-	}
-
 	n += snprintf(buf + n, size - n, "	return saturate(c);\n}\n");
 	return n;
 }
 
 int geSgxCgAllKeys(uint32_t *keys, int max) {
 	int n = 0;
-	uint32_t textured, tfunc, tcc, dbl, atest, fog, fix;
+	uint32_t textured, tfunc, tcc, dbl, atest, fog;
 
 #define ADD(k) do { if (n < max) keys[n] = (k); n++; } while (0)
 	ADD(GE_SGX_SHADER_VERTEX);
@@ -292,23 +273,21 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 				}
 	}
 	ADD(1u << 10); // clear
-	// alpha test: off (8), or one of the functions but ALWAYS (= off). Plain ints: with an
-	// int8_t -1 for "off" the app's build made keys like 0xFFFFFFC0 (and missed real ones)
-	static const int atests[8] = { 8, 0, 2, 3, 4, 5, 6, 7 };
-	for (fix = 0; fix < 2; fix++)
+	// alpha test: off, or one of the functions but ALWAYS (= off)
+	static const int8_t atests[8] = { -1, 0, 2, 3, 4, 5, 6, 7 };
 	for (fog = 0; fog < 2; fog++)
 	for (textured = 0; textured < 2; textured++) {
 		for (tfunc = 0; tfunc < (textured ? 5u : 1u); tfunc++) {
 			for (tcc = 0; tcc < (textured ? 2u : 1u); tcc++) {
 				for (dbl = 0; dbl < 2; dbl++) {
 					for (atest = 0; atest < 8; atest++) {
-						uint32_t key = (fog << 11) | (fix ? GE_SGX_FS_FIX : 0);
+						uint32_t key = fog << 11;
 						if (textured)
 							key |= 1 | (tfunc << 1) | (tcc << 4);
 						if (dbl)
 							key |= 1 << 5;
-						if (atests[atest] < 8)
-							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
+						if (atests[atest] >= 0)
+							key |= (1 << 6) | ((uint32_t)atests[atest] << 7);
 						ADD(key);
 					}
 				}
@@ -412,7 +391,7 @@ static SceShaccCgSourceFile *openFile(const char *fileName, const SceShaccCgSour
 }
 
 SceGxmProgram *geSgxCgCompile(uint32_t key, uint32_t *size, void (* log)(uint32_t key, int line, const char *msg)) {
-	static char src[16384];
+	static char src[8192];
 	int len = geSgxCgSource(key, src, sizeof(src));
 	if (len <= 0 || len >= (int)sizeof(src) || !cg.CompileProgram)
 		return NULL;

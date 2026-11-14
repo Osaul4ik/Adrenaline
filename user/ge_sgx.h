@@ -77,10 +77,6 @@ void GeSgxFrameRendered(const GeSgxFrameRef *ref);
 // Draw thread: once per loop (the GPU is done with frames rendered some ticks ago)
 void GeSgxDrawTick(void);
 
-// Frames by sequence number: the one being built, the newest the GPU is done with
-uint32_t GeSgxBuildingSeq(void);
-extern volatile uint32_t ge_sgx_gpu_done_seq;
-
 // PSP memory in our address space (uncached), NULL if the range is not PSP RAM/VRAM
 const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size);
 
