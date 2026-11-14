@@ -28,6 +28,8 @@
 */
 
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "ge_sgx_walk.h"
@@ -65,6 +67,10 @@
 #define GE_CMD_BLENDFIXEDA      0xE0u
 #define GE_CMD_BLENDFIXEDB      0xE1u
 #define GE_CMD_TRANSFERSIZE     0xEEu
+#define GE_CMD_FRAMEBUFPIXFMT   0xD2u
+#define GE_CMD_TRANSFERSTART    0xEAu
+#define GE_CMD_TRANSFERSRCPOS   0xEBu
+#define GE_CMD_TRANSFERDSTPOS   0xECu
 #define GE_CMD_VERTEXTYPE       0x12u
 #define GE_CMD_LIGHTINGENABLE   0x17u
 #define GE_CMD_LIGHTENABLE0     0x18u
@@ -916,6 +922,17 @@ static int fbFind(uint32_t fb) {
 	return -1;
 }
 
+// The framebuffer at or below an address (0xFFFFFFFF: none), for the diagnostics
+static uint32_t fbNearest(uint32_t addr) {
+	uint32_t best = 0xFFFFFFFFu;
+	int i;
+	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
+		if (fbreg[i].used && fbreg[i].fb <= addr && (best == 0xFFFFFFFFu || fbreg[i].fb > best))
+			best = fbreg[i].fb;
+	}
+	return best;
+}
+
 static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
 	(void)s1;
@@ -962,6 +979,81 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	f->fbs[k].fb = d->fb;
 	f->fbs[k].w = fbreg[i].w;
 	f->fbs[k].h = fbreg[i].h;
+}
+
+
+/*
+	Diagnostics: framebuffers drawn into, textures read from VRAM and VRAM
+	transfers, each one logged the first time it is seen, and everything of
+	the traced frame (walker trace set) in order.
+*/
+#define SEEN_MAX 160
+#define TRACE_LINES 400
+static uint32_t seen[SEEN_MAX];
+static uint32_t nseen = 0;
+static uint32_t trace_fb_key = 0, trace_tex_key = 0;
+
+static int seenFirst(uint32_t a, uint32_t b, uint32_t c) {
+	uint32_t k = (a * 0x9E3779B1u) ^ ((b + 0x7F4A7C15u) * 0x85EBCA77u) ^ ((c + 0x165667B1u) * 0xC2B2AE3Du);
+	uint32_t i;
+	if (!k)
+		k = 1;
+	for (i = 0; i < nseen; i++) {
+		if (seen[i] == k)
+			return 0;
+	}
+	if (nseen >= SEEN_MAX)
+		return 0;
+	seen[nseen++] = k;
+	return 1;
+}
+
+static void diag(GeSgxWalker *w, int traced, uint32_t a, uint32_t b, uint32_t c, const char *fmt, ...) {
+	if (!w->log_fn)
+		return;
+	int first = seenFirst(a, b, c);
+	const char *kind;
+	if (w->trace && traced && w->trace_lines < TRACE_LINES) {
+		w->trace_lines++;
+		kind = "T";
+	} else if (first) {
+		kind = "seen";
+	} else {
+		return;
+	}
+	char line[200];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	w->log_fn("GeSgx %s: %s\n", kind, line);
+}
+
+// The current framebuffer and VRAM texture of a draw (state just built)
+static void diagDraw(GeSgxWalker *w, const GeSgxFrameData *f, const GeSgxDraw *d, uint32_t taddr, int rt) {
+	if (!w->log_fn)
+		return;
+	uint32_t fbw = reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x7FF, psm = reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3;
+	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
+	uint32_t fbkey = d->fb ^ (fbw << 21) ^ (psm << 30) ^ (s1 * 31u) ^ (s2 * 977u);
+	int traced = fbkey != trace_fb_key;
+	trace_fb_key = fbkey;
+	diag(w, traced, 1u | (psm << 4) | (fbw << 8), d->fb, s1 ^ (s2 << 1),
+		"fb %X fbw %u psm %u scissor %u,%u-%u,%u | draw %u",
+		(unsigned)d->fb, (unsigned)fbw, (unsigned)psm, (unsigned)(s1 & 0x3FF), (unsigned)((s1 >> 10) & 0x3FF),
+		(unsigned)(s2 & 0x3FF), (unsigned)((s2 >> 10) & 0x3FF), (unsigned)f->ndraws);
+	if (!(d->flags & GE_SGX_DRAW_TEXTURED) || taddr < 0x04000000u || taddr >= 0x04800000u)
+		return;
+	uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, size = reg(w, GE_CMD_TEXSIZE0);
+	uint32_t bw = reg(w, GE_CMD_TEXBUFWIDTH0) & 0x7FF;
+	uint32_t tkey = taddr ^ (tfmt << 28) ^ (size * 131u) ^ (d->fb * 7u);
+	traced = tkey != trace_tex_key;
+	trace_tex_key = tkey;
+	diag(w, traced, 2u | (tfmt << 4) | (size << 8), taddr, rt >= 0 ? fbreg[rt].fb | ((uint32_t)fbreg[rt].w << 21) : 0xFFFFFFFFu,
+		"vram texture %X fmt %u %ux%u bufw %u -> %s %X (%ux%u) | into fb %X, draw %u",
+		(unsigned)(taddr & 0x001FFFFFu), (unsigned)tfmt, 1u << (size & 0xF), 1u << ((size >> 8) & 0xF), (unsigned)bw,
+		rt >= 0 ? "rendering of fb" : "no rendering, nearest fb", rt >= 0 ? (unsigned)fbreg[rt].fb : (unsigned)fbNearest(taddr & 0x001FFFFFu),
+		rt >= 0 ? (unsigned)fbreg[rt].w : 0u, rt >= 0 ? (unsigned)fbreg[rt].h : 0u, (unsigned)d->fb, (unsigned)f->ndraws);
 }
 
 // Indices of the primitive (up to 65535, 4 bytes each), read once
@@ -1269,15 +1361,17 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		cached_frame = f;
 		cached_x.tex_w = cached_x.tex_h = 1.0f;
 		int rt = -1;
+		uint32_t taddr = 0;
 		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
 			// A framebuffer drawn before: its rendering, texel coordinates scaled from the texture to it
-			uint32_t taddr = ((reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((reg(w, GE_CMD_TEXBUFWIDTH0) << 8) & 0x0F000000u)) & 0x0FFFFFFFu;
+			taddr = ((reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((reg(w, GE_CMD_TEXBUFWIDTH0) << 8) & 0x0F000000u)) & 0x0FFFFFFFu;
 			uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF;
 			if (taddr >= 0x04000000u && taddr < 0x04800000u && tfmt <= 3)
 				rt = fbFind(taddr & 0x001FFFFFu);
 			if (rt >= 0 && (!fbreg[rt].w || !fbreg[rt].h))
 				rt = -1;
 		}
+		diagDraw(w, f, &cached_d, taddr, rt);
 		if (rt >= 0) {
 			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
 			float tw = (float)(1u << (size & 0xF)), th = (float)(1u << ((size >> 8) & 0xF));
@@ -1675,9 +1769,6 @@ static void readClut(GeSgxWalker *w) {
 }
 
 void geSgxBuildTransfer(GeSgxWalker *w) {
-	if (!w->frame)
-		return;
-
 	uint32_t src = ((reg(w, GE_CMD_TRANSFERSRCW) & 0x00FF0000u) << 8) | reg(w, GE_CMD_TRANSFERSRC);
 	uint32_t dst = ((reg(w, GE_CMD_TRANSFERDSTW) & 0x00FF0000u) << 8) | reg(w, GE_CMD_TRANSFERDST);
 	uint32_t size = reg(w, GE_CMD_TRANSFERSIZE);
@@ -1685,6 +1776,18 @@ void geSgxBuildTransfer(GeSgxWalker *w) {
 
 	src &= 0x0FFFFFFF;
 	dst &= 0x0FFFFFFF;
+
+	if ((src >= 0x04000000u && src < 0x04800000u) || (dst >= 0x04000000u && dst < 0x04800000u)) {
+		uint32_t sp = reg(w, GE_CMD_TRANSFERSRCPOS), dp = reg(w, GE_CMD_TRANSFERDSTPOS);
+		diag(w, 1, 3u | (size << 4), src, dst ^ (sp * 31u) ^ (dp * 977u),
+			"transfer %X bufw %u at %u,%u -> %X bufw %u at %u,%u, %ux%u, %u bytes per pixel | draw %u",
+			(unsigned)src, (unsigned)(reg(w, GE_CMD_TRANSFERSRCW) & 0x7FF), (unsigned)(sp & 0x3FF), (unsigned)((sp >> 10) & 0x3FF),
+			(unsigned)dst, (unsigned)(reg(w, GE_CMD_TRANSFERDSTW) & 0x7FF), (unsigned)(dp & 0x3FF), (unsigned)((dp >> 10) & 0x3FF),
+			(unsigned)tw, (unsigned)th, (reg(w, GE_CMD_TRANSFERSTART) & 1) ? 4u : 2u, w->frame ? (unsigned)w->frame->ndraws : 0u);
+	}
+
+	if (!w->frame)
+		return;
 
 	// A copy of (most of) a frame from one VRAM buffer into another
 	if (tw * th < 400 * 200 || src < 0x04000000 || src >= 0x04800000 || dst < 0x04000000 || dst >= 0x04800000)

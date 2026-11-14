@@ -186,6 +186,10 @@ typedef struct {
 	GeSgxBulkFn bulk_fn;
 	// Optional microsecond clock, for the build profile in the frame
 	uint32_t (* clock_fn)(void);
+	// Optional log for diagnostics; while trace is set, the frame is traced into it
+	void (* log_fn)(const char *fmt, ...);
+	int trace;
+	uint32_t trace_lines;
 	// A register, matrix or CLUT changed since the last primitive built
 	int state_dirty;
 	// 3D draws with the GPU transform where they can (frame->raw needed),

@@ -314,6 +314,24 @@ static void publishSlot(uint32_t top) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
 
+	/*
+		Diagnostics: a frame of the race (many draws) traced into the log, about
+		10 s, 40 s and 80 s into it; the trace ends with the first frame built
+	*/
+	static uint32_t big_frames = 0;
+	if (walker.trace && building && walker.frame) {
+		walker.trace = 0;
+		GeSgxLog("GeSgx T: end, %u draws, shown fb %X\n", (unsigned)building->data.ndraws, (unsigned)fb);
+	}
+	if (building && walker.frame && building->data.ndraws >= 300) {
+		big_frames++;
+		if (walker.log_fn && (big_frames == 300 || big_frames == 1200 || big_frames == 2400)) {
+			walker.trace = 1;
+			walker.trace_lines = 0;
+			GeSgxLog("GeSgx T: begin\n");
+		}
+	}
+
 	// Walked but not built (the walker was behind): nothing to show, the slot is free again
 	if (building && !walker.frame) {
 		building->state = SLOT_FREE;
@@ -748,6 +766,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
 			walker.clock_fn = clockUs;
+			walker.log_fn = GeSgxLog;
 			walker.gpu_transform = 1;
 			walker.direct_start = RAM_START + 0x00800000u;
 			walker.direct_size = direct_size;
