@@ -173,9 +173,9 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 #define FRAME_SLOTS 3
 #define FRAME_VERTICES 16384      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
-#define FRAME_UNIFORMS (256 * 1024)
+#define FRAME_UNIFORMS (512 * 1024)
 #define FRAME_RAW (512 * 1024)    // PSP vertex data for the GPU transform (most is read where it is: direct)
-#define FRAME_DRAWS 4096
+#define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
 enum {
@@ -377,8 +377,26 @@ void GeSgxFrameRendered(const GeSgxFrameRef *ref) {
 	s->state = SLOT_RENDERED;
 }
 
+/*
+	The newest frame the GPU is done with: a frame rendered GPU_DONE_TICKS
+	draw loops ago (the slots are reused by the same rule). Textures of
+	frames up to it may be freed (geSgxTexFrameDone counts flips, which
+	come much faster than frames are drawn while the walker catches up).
+*/
+volatile uint32_t ge_sgx_gpu_done_seq = 0;
+
+uint32_t GeSgxBuildingSeq(void) {
+	return frame_seq_counter + 1;
+}
+
 void GeSgxDrawTick(void) {
 	draw_tick++;
+	int i;
+	for (i = 0; i < FRAME_SLOTS; i++) {
+		FrameSlot *s = &slots[i];
+		if (s->state == SLOT_RENDERED && draw_tick - s->rendered_tick >= GPU_DONE_TICKS && (int32_t)(s->seq - ge_sgx_gpu_done_seq) > 0)
+			ge_sgx_gpu_done_seq = s->seq;
+	}
 }
 
 // Published frame (seqlock: odd while it is written)

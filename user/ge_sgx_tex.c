@@ -39,7 +39,7 @@
 #include "ge_sgx_texconv.h"
 
 #define MAX_TEXTURES 512
-#define BUDGET_BYTES (12 * 1024 * 1024)
+#define BUDGET_BYTES (10 * 1024 * 1024)
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)
@@ -57,6 +57,7 @@ typedef struct {
 	uint32_t last_used;
 	uint32_t last_checked;
 	uint32_t dead_since;
+	uint32_t dead_seq; // freed once the GPU is done with this frame (the one being built when it died)
 	SceUID mem;
 	uint32_t bytes;
 	SceGxmTexture tex;
@@ -103,6 +104,7 @@ static void kill(Entry *e) {
 	if (e->live) {
 		e->live = 0;
 		e->dead_since = cur_frame;
+		e->dead_seq = GeSgxBuildingSeq();
 	}
 }
 
@@ -180,7 +182,7 @@ static void makeRoom(uint32_t need) {
 	// Dead entries whose frames are done
 	for (i = 0; i < MAX_TEXTURES; i++) {
 		Entry *e = &entries[i];
-		if (e->used && !e->live && cur_frame - e->dead_since >= KEEP_FRAMES) {
+		if (e->used && !e->live && (int32_t)(ge_sgx_gpu_done_seq - e->dead_seq) >= 0) {
 			freeMemory(e);
 			e->used = 0;
 		}
@@ -257,6 +259,10 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	uint32_t bytes = (data_bytes + 0xFFF) & ~0xFFFu;
 	if (data_bytes > STAGING_BYTES)
 		return failed(d, "size");
+	// Mipmaps: mapped slack after the levels, in case GXM pads them differently
+	// (a GPU read outside the block is a GPU crash, a wrong level only a wrong picture)
+	if (nlevels > 1)
+		bytes += (stride * d->h + 0xFFF) & ~0xFFFu;
 
 	makeRoom(bytes);
 	if (total_bytes + bytes > budget)

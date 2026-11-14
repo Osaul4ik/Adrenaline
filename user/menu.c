@@ -599,6 +599,11 @@ int AdrenalineDraw(SceSize args, void *argp) {
     // e.g. while a video plays, or the game exited): give the screen back to the PSP framebuffer
     if ((last_draw_native || last_sgx_active) && !draw_native && !sgx_active && config.graphics_filtering == 0 && !menu_open)
       SetPspemuFrameBuffer((void *)SCE_PSPEMU_FRAMEBUFFER);
+    if (draw_native != last_draw_native && sgx_active) {
+      static int native_logs = 0;
+      if (native_logs++ < 8)
+        GeSgxLog("GeSgx: native resolution copy %s (Native Resolution option and the SGX renderer are both on)\n", draw_native ? "on" : "off");
+    }
     last_draw_native = draw_native;
     last_sgx_active = sgx_active;
 
@@ -747,7 +752,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
       vita2d_texture_set_filters(pops_tex, SCE_GXM_TEXTURE_FILTER_POINT, SCE_GXM_TEXTURE_FILTER_POINT);
     }
 
-    if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops) {
+    // The SGX picture takes precedence over the native resolution copy (both on: that one
+    // switches on and off with the game's buffers, the screen showed one, then the other)
+    int show_sgx = sgx_full && sgx_tex && !adrenaline->pops_mode;
+    if (show_sgx || (!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops) {
       // Copy PSP framebuffer
       if (sgx_active) {
         prof_t = sceKernelGetProcessTimeWide();
@@ -866,7 +874,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
     }
 
     // Sync
-    if ((!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
+    if (show_sgx || (!adrenaline->pops_mode && !draw_native) || adrenaline->draw_psp_screen_in_pops)
       waitPspLcdc();
     else
       sceDisplayWaitVblankStart();
