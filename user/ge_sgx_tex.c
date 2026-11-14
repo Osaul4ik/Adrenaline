@@ -39,7 +39,9 @@
 #include "ge_sgx_texconv.h"
 
 #define MAX_TEXTURES 512
-#define BUDGET_BYTES (11 * 1024 * 1024)
+#define BUDGET_BYTES (10 * 1024 * 1024)
+// Lowered when memory runs out first
+static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)
 
 // Frames an entry is kept after its last use: published frames in flight plus the GPU
@@ -164,7 +166,7 @@ static void makeRoom(uint32_t need) {
 	}
 
 	// Live entries not used for a while, oldest first
-	while (total_bytes + need > BUDGET_BYTES) {
+	while (total_bytes + need > budget) {
 		Entry *oldest = NULL;
 		for (i = 0; i < MAX_TEXTURES; i++) {
 			Entry *e = &entries[i];
@@ -204,11 +206,17 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	if (!src)
 		return failed(d, "address");
 
-	uint32_t stride = geSgxTexOutStride(d);
-	uint32_t bytes = (stride * d->h + 0xFFF) & ~0xFFFu;
+	// CLUT4/8: indices (P8) and a 256 entry palette after them (64 byte aligned)
+	int indexed = geSgxTexIndexed(d->format);
+	uint32_t stride = indexed ? ((d->w + 7u) & ~7u) : geSgxTexOutStride(d);
+	uint32_t pal_off = (stride * d->h + 63u) & ~63u;
+	uint32_t data_bytes = indexed ? pal_off + 1024 : stride * d->h;
+	uint32_t bytes = (data_bytes + 0xFFF) & ~0xFFFu;
+	if (data_bytes > STAGING_BYTES)
+		return failed(d, "size");
 
 	makeRoom(bytes);
-	if (total_bytes + bytes > BUDGET_BYTES)
+	if (total_bytes + bytes > budget)
 		return failed(d, "budget");
 
 	int slot = -1, i;
@@ -242,6 +250,12 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	memset(e, 0, sizeof(*e));
 	e->mem = sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL);
 	if (e->mem < 0) {
+		// Out of memory before the budget: the budget comes down to what fits, then one more try
+		budget = total_bytes > 1024 * 1024 ? total_bytes - 512 * 1024 : total_bytes;
+		makeRoom(bytes);
+		e->mem = total_bytes + bytes <= budget ? sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL) : -1;
+	}
+	if (e->mem < 0) {
 		e->mem = -1;
 		return failed(d, "memory");
 	}
@@ -257,14 +271,23 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 
 	// Converted in cached memory, then one DMA into the GPU's (uncached) memory
 	uint8_t *out = linear == staging[0] ? staging[1] : staging[0];
-	if (stride * d->h <= STAGING_BYTES && d->bufw < d->w)
-		memset(out, 0, stride * d->h);
-	if (stride * d->h > STAGING_BYTES || !geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) ||
-	    sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) < 0) {
+	int ok;
+	if (indexed) {
+		geSgxTexPalette(d, clut_rgba, (uint32_t *)(out + pal_off));
+		ok = geSgxTexConvertIndices(d, linear, rowbytes, out, stride) &&
+			sceGxmTextureInitLinear(&e->tex, gpu, SCE_GXM_TEXTURE_FORMAT_P8_ABGR, d->w, d->h, 0) >= 0 &&
+			sceGxmTextureSetPalette(&e->tex, (uint8_t *)gpu + pal_off) >= 0;
+	} else {
+		if (d->bufw < d->w)
+			memset(out, 0, stride * d->h);
+		ok = geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) &&
+			sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) >= 0;
+	}
+	if (!ok) {
 		freeMemory(e);
 		return failed(d, "convert");
 	}
-	sceDmacMemcpy(gpu, out, stride * d->h);
+	sceDmacMemcpy(gpu, out, data_bytes);
 
 	e->key = *d;
 	e->key.clut = NULL;
@@ -281,6 +304,25 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	return slot;
 }
 
+/*
+	Lookups are many (each state change): the recently found entries are
+	tried before the whole table, and a texture that failed in this frame
+	is not tried again in it.
+*/
+#define RECENT 16
+static int recent[RECENT];
+static int recent_next = 0;
+static struct { GeSgxTexDesc key; uint32_t frame; } bad[RECENT];
+static int bad_next = 0;
+
+static int32_t lookupFailed(const GeSgxTexDesc *d) {
+	bad[bad_next].key = *d;
+	bad[bad_next].key.clut = NULL;
+	bad[bad_next].frame = cur_frame + 1; // 0: unused
+	bad_next = (bad_next + 1) % RECENT;
+	return -1;
+}
+
 int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 	(void)user;
 
@@ -288,14 +330,27 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 		return failed(d, "format");
 
 	int found = -1, i;
+	for (i = 0; i < RECENT; i++) {
+		if (bad[i].frame == cur_frame + 1 && sameKey(&bad[i].key, d)) {
+			stats.failed++;
+			return -1;
+		}
+	}
 	if (last_hit >= 0 && entries[last_hit].live && sameKey(&entries[last_hit].key, d)) {
 		found = last_hit;
 	} else {
-		for (i = 0; i < MAX_TEXTURES; i++) {
-			if (entries[i].live && sameKey(&entries[i].key, d)) {
+		for (i = 0; i < RECENT && found < 0; i++) {
+			int r = recent[i];
+			if (r >= 0 && r < MAX_TEXTURES && entries[r].live && sameKey(&entries[r].key, d))
+				found = r;
+		}
+		for (i = 0; i < MAX_TEXTURES && found < 0; i++) {
+			if (entries[i].live && sameKey(&entries[i].key, d))
 				found = i;
-				break;
-			}
+		}
+		if (found >= 0) {
+			recent[recent_next] = found;
+			recent_next = (recent_next + 1) % RECENT;
 		}
 	}
 
@@ -323,13 +378,17 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 
 	uint32_t size = sourceBytes(d);
 	const uint8_t *src = geSgxPspPtr(d->addr, size);
-	if (!src)
-		return failed(d, "address");
+	if (!src) {
+		failed(d, "address");
+		return lookupFailed(d);
+	}
 
 	int32_t handle = upload(d, sampleHash(src, size));
 	if (handle < 0)
-		return -1;
+		return lookupFailed(d);
 	last_hit = handle;
+	recent[recent_next] = handle;
+	recent_next = (recent_next + 1) % RECENT;
 	return handle;
 }
 

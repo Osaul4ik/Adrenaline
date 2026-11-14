@@ -171,10 +171,10 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 	(some draw thread loops after it was rendered).
 */
 #define FRAME_SLOTS 3
-#define FRAME_VERTICES 32768      // CPU transformed (2D and what the GPU transform cannot do)
+#define FRAME_VERTICES 16384      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
 #define FRAME_UNIFORMS (512 * 1024)
-#define FRAME_RAW (2048 * 1024)   // PSP vertex data for the GPU transform
+#define FRAME_RAW (1280 * 1024)   // PSP vertex data for the GPU transform
 #define FRAME_DRAWS 8192
 #define GPU_DONE_TICKS 3
 
@@ -698,6 +698,14 @@ static int GeSgxThread(SceSize args, void *argp) {
 		return 0;
 	}
 	GeSgxLog("GeSgx: RAM map %08X, VRAM map %08X\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
+
+	// Could the GPU read PSP memory where it is (no vertex copies)? Probe only, for the log
+	{
+		void *probe = (void *)(ram_map + 0x00800000u);
+		int map_res = sceGxmMapMemory(probe, 0x10000, SCE_GXM_MEMORY_ATTRIB_READ);
+		int unmap_res = map_res >= 0 ? sceGxmUnmapMemory(probe) : 0;
+		GeSgxLog("GeSgx: GPU map of PSP RAM: %08X (unmap %08X)\n", (unsigned)map_res, (unsigned)unmap_res);
+	}
 
 	geSgxWalkerInit(&walker, blockFn, NULL);
 

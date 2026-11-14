@@ -870,6 +870,25 @@ static uint32_t rgbaT(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
 	return r | (g << 8) | (b << 16) | (a << 24);
 }
 
+static void testIndexed(void) {
+	GeSgxTexDesc d;
+	memset(&d, 0, sizeof(d));
+	d.format = GE_TFMT_CLUT4; d.w = 4; d.h = 2; d.bufw = 4;
+	uint8_t src[4] = { 0x21, 0x43, 0x65, 0x87 }; /* row 0: 1 2 3 4, row 1: 5 6 7 8 */
+	uint8_t out[16];
+	CHECK(geSgxTexIndexed(GE_TFMT_CLUT4) && geSgxTexIndexed(GE_TFMT_CLUT8) && !geSgxTexIndexed(GE_TFMT_CLUT16), "indexed formats");
+	CHECK(geSgxTexConvertIndices(&d, src, 2, out, 8) && out[0] == 1 && out[1] == 2 && out[3] == 4 && out[8] == 5 && out[11] == 8, "clut4 indices %u %u %u %u", out[0], out[1], out[8], out[11]);
+	static uint32_t clut[512], pal[256];
+	int i;
+	for (i = 0; i < 512; i++)
+		clut[i] = 0xFF000000u | (uint32_t)i;
+	/* shift 1, mask 0x0F, start 2 (entries 32..): index i -> ((i >> 1) & 15) | 32 */
+	d.format = GE_TFMT_CLUT8;
+	d.clut_format = 3 | (1u << 2) | (0x0Fu << 8) | (2u << 16);
+	geSgxTexPalette(&d, clut, pal);
+	CHECK(pal[0] == (0xFF000000u | 32) && pal[5] == (0xFF000000u | 34) && pal[255] == (0xFF000000u | 47), "palette %08x %08x %08x", pal[0], pal[5], pal[255]);
+}
+
 static void testTexconv(void) {
 	static uint8_t lin[64 * 16 * 4], swz[64 * 16 * 4], back[64 * 16 * 4], out[64 * 16 * 4];
 	uint32_t i;
@@ -966,6 +985,7 @@ int main(void) {
 	testBuildSprites();
 	testBuildOther();
 	testBuildClearAndClut();
+	testIndexed();
 	testBuild3D();
 	testLightingSkinning();
 	testGpuTransform();

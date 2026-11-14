@@ -179,6 +179,32 @@ static inline uint32_t clutIndex(uint32_t clut_format, uint32_t raw) {
 	return (((raw >> shift) & mask) | base) & limit;
 }
 
+void geSgxTexPalette(const GeSgxTexDesc *d, const uint32_t *clut_rgba, uint32_t *palette) {
+	uint32_t i, n = d->format == GE_TFMT_CLUT4 ? 16 : 256;
+	for (i = 0; i < 256; i++)
+		palette[i] = i < n ? clut_rgba[clutIndex(d->clut_format, i)] : 0;
+}
+
+int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint8_t *dst, uint32_t dst_stride) {
+	uint32_t x, y, w = d->w, h = d->h;
+	for (y = 0; y < h; y++) {
+		const uint8_t *s = src + y * src_rowbytes;
+		uint8_t *o = dst + y * dst_stride;
+		if (d->format == GE_TFMT_CLUT8) {
+			uint32_t n = w < src_rowbytes ? w : src_rowbytes;
+			memcpy(o, s, n);
+			if (n < w)
+				memset(o + n, 0, w - n);
+		} else if (d->format == GE_TFMT_CLUT4) {
+			for (x = 0; x < w; x++)
+				o[x] = x / 2 < src_rowbytes ? (uint8_t)((s[x / 2] >> ((x & 1) * 4)) & 0xF) : 0;
+		} else {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes,
 	uint8_t *dst, uint32_t dst_stride, const uint32_t *clut) {
 	uint32_t x, y;

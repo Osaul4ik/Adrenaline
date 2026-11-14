@@ -46,6 +46,17 @@ uint32_t geSgxTexRows(const GeSgxTexDesc *d);
 // Bytes per texel of the converted texture (2 or 4)
 uint32_t geSgxTexOutBpp(uint32_t format);
 
+/*
+	CLUT4/CLUT8 textures can stay indexed (GXM P8 with a 256 entry palette):
+	a quarter of the memory of 8888. The palette applies the CLUT index
+	shift, mask and start; CLUT4 indices are widened to bytes.
+*/
+static inline int geSgxTexIndexed(uint32_t format) {
+	return format == 4 || format == 5; // GE_TFMT_CLUT4, GE_TFMT_CLUT8
+}
+void geSgxTexPalette(const GeSgxTexDesc *d, const uint32_t *clut_rgba, uint32_t *palette);
+int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint8_t *dst, uint32_t dst_stride);
+
 // Row stride of the converted texture: GXM linear textures use rows of a multiple of 8 texels
 static inline uint32_t geSgxTexOutStride(const GeSgxTexDesc *d) {
 	return ((d->w + 7u) & ~7u) * geSgxTexOutBpp(d->format);
