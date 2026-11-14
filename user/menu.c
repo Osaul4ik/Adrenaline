@@ -269,7 +269,8 @@ static void drawSgxOverlay(vita2d_texture *tex, float tex_w, float tex_h, const 
   const float x = SCREEN_WIDTH - w - 8.0f, y = 8.0f;
 
   vita2d_draw_rectangle(x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, RGBA8(255, 255, 255, 255));
-  vita2d_draw_texture_part_scale(tex, x, y, 0.0f, 0.0f, tex_w, tex_h, w / tex_w, h / tex_h);
+  if (tex)
+    vita2d_draw_texture_part_scale(tex, x, y, 0.0f, 0.0f, tex_w, tex_h, w / tex_w, h / tex_h);
 
   GeSgxShaderStats ss;
   geSgxShaderStats(&ss);
@@ -564,7 +565,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
   // SGX renderer (test stage): frame from the Vita side GE walker
   static GeSgxFrame sgx_frame;
   vita2d_texture *sgx_tex = NULL;
-  int sgx_tex_failed = 0;
+  int sgx_ready = 0, sgx_failed = 0;
   struct {
     SceUInt64 start, sgx, build, copy, swap, sync;
     uint32_t loops;
@@ -584,68 +585,14 @@ int AdrenalineDraw(SceSize args, void *argp) {
     int sgx_active = config.sgx_renderer >= GE_SGX_MODE_DRAW && !adrenaline->pops_mode && GeSgxGetFrame(&sgx_frame);
     int sgx_full = sgx_active && config.sgx_renderer == GE_SGX_MODE_FULL && !menu_open;
     GeSgxDrawTick();
-    if (sgx_active && !sgx_tex && !sgx_tex_failed) {
-      /*
-        The emulator leaves our process about 4 MB of CDRAM (the GPU's fast
-        memory). The target goes there, the depth buffer too if 1 MB stays
-        free for the emulator: with all of it taken, Carbon's loading screen
-        ended in the emulator's error dialog.
-      */
-      const uint32_t reserve_kb = 1024;
-      uint32_t cdram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-      uint32_t ram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
-      SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
-      int in_cdram = 0;
-      if (cdram_kb >= 2048 + reserve_kb) {
-        in_cdram = 1;
-        vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-        sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-      }
-      if (!sgx_tex) {
-        in_cdram = 0;
-        vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
-        sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-      }
-      vita2d_texture_set_alloc_memblock_type(type);
-      sgx_tex_failed = (sgx_tex == NULL);
-
-      // vita2d puts the depth buffer in main RAM: moved into CDRAM when it fits
-      int depth_cdram = 0;
-      if (sgx_tex) {
-        uint32_t aw = (SCREEN_WIDTH + 31) & ~31, ah = (SCREEN_HEIGHT + 31) & ~31;
-        uint32_t dsize = (4 * aw * ah + 256 * 1024 - 1) & ~(256 * 1024 - 1);
-        SceUID dm = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= dsize / 1024 + reserve_kb ?
-          sceKernelAllocMemBlock("SceGeSgxDepth", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, dsize, NULL) : -1;
-        void *dmem = NULL;
-        if (dm >= 0 && sceKernelGetMemBlockBase(dm, &dmem) >= 0 &&
-            sceGxmMapMemory(dmem, dsize, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) >= 0) {
-          void *old = NULL;
-          sceKernelGetMemBlockBase(sgx_tex->depth_UID, &old);
-          sceGxmDepthStencilSurfaceInit(&sgx_tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
-            SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, aw, dmem, NULL);
-          if (old)
-            sceGxmUnmapMemory(old);
-          sceKernelFreeMemBlock(sgx_tex->depth_UID);
-          sgx_tex->depth_UID = dm;
-          depth_cdram = 1;
-        } else if (dm >= 0) {
-          sceKernelFreeMemBlock(dm);
-        }
-      }
-      GeSgxLog("GeSgx: draw target %s (colour in %s, depth in %s) | free before: CDRAM %u KB, RAM %u KB | after: CDRAM %u KB, RAM %u KB\n",
-        sgx_tex ? "created" : "FAILED", in_cdram ? "CDRAM" : "RAM", depth_cdram ? "CDRAM" : "RAM",
-        (unsigned)cdram_kb, (unsigned)ram_kb,
+    if (sgx_active && !sgx_ready && !sgx_failed) {
+      int r = geSgxRenderInit();
+      GeSgxLog("GeSgx: renderer init %d | free: CDRAM %u KB, RAM %u KB\n", r,
         (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
-      if (sgx_tex) {
-        int r = geSgxRenderInit();
-        GeSgxLog("GeSgx: renderer init %d\n", r);
-        if (r < 0) {
-          sgx_tex_failed = 1;
-          sgx_tex = NULL;
-        }
-      }
+      sgx_ready = r >= 0;
+      sgx_failed = r < 0;
     }
-    if (!sgx_tex)
+    if (!sgx_ready)
       sgx_active = 0;
 
     // Native or SGX output stopped (systemctrl falls back to the game's own framebuffer,
@@ -735,15 +682,12 @@ int AdrenalineDraw(SceSize args, void *argp) {
     int pool_reset = 0;
     GeSgxFrameRef sgx_ref;
     if (sgx_active && GeSgxTakeFrame(&sgx_ref)) {
-      // This scene resets the vertex pool for the loop, the display scene
-      // below must not (its reset would overwrite vertices the GPU has not read)
-      vita2d_start_drawing_advanced(sgx_tex, VITA_2D_RESET_POOL);
-      pool_reset = 1;
-      vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
-      vita2d_clear_screen();
-      geSgxRender(_vita2d_context, sgx_ref.data, sgx_ref.fb, sgx_ref.aliases, sgx_ref.naliases, &sgx_render);
+      // Its first scene resets the vertex pool for the loop, the display scene
+      // below must not then (its reset would overwrite vertices the GPU has not read)
+      int scenes = 0;
+      geSgxRenderFrame(_vita2d_context, sgx_ref.data, sgx_ref.fb, sgx_ref.aliases, sgx_ref.naliases, &sgx_render, &scenes);
+      pool_reset = scenes > 0;
       sgx_skipped_3d = sgx_ref.data->draws_3d;
-      vita2d_end_drawing();
       GeSgxFrameRendered(&sgx_ref);
 
       if (sgx_scenes < 3) {
@@ -753,6 +697,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)sgx_render.other_fb, (unsigned)sgx_skipped_3d, (unsigned)sgx_ref.fb);
       }
     }
+    sgx_tex = sgx_active ? geSgxRenderShown() : NULL;
 
     if (sgx_active) {
       prof_t = sceKernelGetProcessTimeWide();
@@ -807,7 +752,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
       }
 
       // Draw psp screen (SGX full screen mode: the SGX frame, opaque)
-      if (sgx_full) {
+      if (sgx_full && sgx_tex) {
         vita2d_texture_set_program(opaque_shader->vertexProgram, opaque_shader->fragmentProgram);
         vita2d_texture_set_wvp(opaque_shader->wvpParam);
         vita2d_texture_set_vertexInput(&opaque_shader->vertexInput);
@@ -835,7 +780,7 @@ int AdrenalineDraw(SceSize args, void *argp) {
 
     // SGX renderer: its picture in the corner and the measurements
     if (sgx_active && !menu_open) {
-      if (sgx_full)
+      if (sgx_full && sgx_tex)
         drawSgxOverlay(psp_tex, 480.0f, 272.0f, &sgx_frame, &sgx_render, sgx_skipped_3d);
       else
         drawSgxOverlay(sgx_tex, 960.0f, 544.0f, &sgx_frame, &sgx_render, sgx_skipped_3d);

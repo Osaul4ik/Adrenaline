@@ -107,6 +107,11 @@
 #define GE_CMD_FOGCOLOR         0xCFu
 #define GE_CMD_ZTEST            0xDEu
 #define GE_CMD_ZWRITEDISABLE    0xE7u
+#define GE_CMD_STENCILTESTENABLE 0x24u
+#define GE_CMD_STENCILTEST      0xDCu
+#define GE_CMD_STENCILOP        0xDDu
+#define GE_CMD_MASKRGB          0xE8u
+#define GE_CMD_MASKALPHA        0xE9u
 
 #define GE_VTYPE_THROUGH (1u << 23)
 
@@ -794,17 +799,40 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 	memset(d, 0, sizeof(*d));
 	d->ztest = 1;
+	d->sfunc = 0xFF;
+
+	uint32_t mrgb = reg(w, GE_CMD_MASKRGB);
+	if ((mrgb & 0xFF) == 0xFF)
+		d->cmask |= 1;
+	if (((mrgb >> 8) & 0xFF) == 0xFF)
+		d->cmask |= 2;
+	if (((mrgb >> 16) & 0xFF) == 0xFF)
+		d->cmask |= 4;
 
 	uint32_t clear = reg(w, GE_CMD_CLEARMODE);
 	if (clear & 1) {
 		d->flags = GE_SGX_DRAW_CLEAR;
 		if (clear & 0x100)
 			d->flags |= GE_SGX_DRAW_WRITE_COLOR;
-		if (clear & 0x200)
+		if (clear & 0x200) {
+			// The PSP's stencil is the framebuffer alpha: cleared to the vertex alpha
 			d->flags |= GE_SGX_DRAW_WRITE_ALPHA;
+			d->sfunc = 1; // always
+			d->sops = 2 | (2 << 4) | (2 << 8); // replace
+			d->smask = 0xFF;
+			d->swmask = 0xFF;
+		}
 		if (clear & 0x400)
 			d->flags |= GE_SGX_DRAW_WRITE_DEPTH;
 	} else {
+		if (reg(w, GE_CMD_STENCILTESTENABLE) & 1) {
+			uint32_t st = reg(w, GE_CMD_STENCILTEST), op = reg(w, GE_CMD_STENCILOP);
+			d->sfunc = (uint8_t)(st & 7);
+			d->sref = (uint8_t)((st >> 8) & 0xFF);
+			d->smask = (uint8_t)((st >> 16) & 0xFF);
+			d->sops = (uint16_t)((op & 7) | (((op >> 8) & 7) << 4) | (((op >> 16) & 7) << 8));
+			d->swmask = (uint8_t)(~reg(w, GE_CMD_MASKALPHA) & 0xFF);
+		}
 		if (reg(w, GE_CMD_TEXTUREMAPENABLE) & 1)
 			d->flags |= GE_SGX_DRAW_TEXTURED;
 		if (reg(w, GE_CMD_ALPHABLENDENABLE) & 1)
@@ -865,7 +893,75 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->atest_func == b->atest_func && a->atest_ref == b->atest_ref && a->tex_mode == b->tex_mode &&
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
+		a->fbtex == b->fbtex && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
+		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
+}
+
+/*
+	Framebuffers: the ones drawn into are remembered with their size (the
+	biggest scissor), so a texture at one of their addresses can be taken
+	from its 960x544 rendering, and the draw thread sizes those renderings
+	by the same numbers (frame->fbs).
+*/
+static struct { uint32_t fb; uint16_t w, h; uint32_t used; } fbreg[GE_SGX_MAX_FBS];
+static uint32_t fbreg_clock = 0;
+
+static int fbFind(uint32_t fb) {
+	int i;
+	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
+		if (fbreg[i].used && fbreg[i].fb == fb)
+			return i;
+	}
+	return -1;
+}
+
+static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
+	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
+	(void)s1;
+	uint32_t sw = (s2 & 0x3FF) + 1, sh = ((s2 >> 10) & 0x3FF) + 1;
+	uint32_t fbw = reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x7FF;
+	if (sw > fbw && fbw >= 16)
+		sw = fbw;
+	if (sw > 512)
+		sw = 512;
+	if (sh > 512)
+		sh = 512;
+	int i = fbFind(d->fb);
+	if (i < 0) {
+		int j, oldest = 0;
+		for (j = 0; j < GE_SGX_MAX_FBS; j++) {
+			if (!fbreg[j].used) {
+				oldest = j;
+				break;
+			}
+			if (fbreg[j].used < fbreg[oldest].used)
+				oldest = j;
+		}
+		i = oldest;
+		fbreg[i].fb = d->fb;
+		fbreg[i].w = fbreg[i].h = 0;
+	}
+	if (sw > fbreg[i].w)
+		fbreg[i].w = (uint16_t)sw;
+	if (sh > fbreg[i].h)
+		fbreg[i].h = (uint16_t)sh;
+	fbreg[i].used = ++fbreg_clock;
+
+	// This frame's list
+	uint32_t k;
+	for (k = 0; k < f->nfbs; k++) {
+		if (f->fbs[k].fb == d->fb)
+			break;
+	}
+	if (k == f->nfbs) {
+		if (f->nfbs >= GE_SGX_MAX_FBS)
+			return;
+		f->nfbs++;
+	}
+	f->fbs[k].fb = d->fb;
+	f->fbs[k].w = fbreg[i].w;
+	f->fbs[k].h = fbreg[i].h;
 }
 
 // Indices of the primitive (up to 65535, 4 bytes each), read once
@@ -1163,13 +1259,38 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	static GeSgxDraw cached_d;
 	static Xform cached_x;
 	static const GeSgxWalker *cached_w = NULL;
+	static const GeSgxFrameData *cached_frame = NULL;
 	uint32_t (* clk)(void) = w->clock_fn;
 	uint32_t t0 = clk ? clk() : 0, t1;
-	if (w->state_dirty || cached_w != w) {
+	if (w->state_dirty || cached_w != w || cached_frame != f) {
 		drawState(w, &cached_d);
 		xformInit(w, l, &cached_x);
+		fbNote(w, f, &cached_d);
+		cached_frame = f;
 		cached_x.tex_w = cached_x.tex_h = 1.0f;
+		int rt = -1;
 		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
+			// A framebuffer drawn before: its rendering, texel coordinates scaled from the texture to it
+			uint32_t taddr = ((reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((reg(w, GE_CMD_TEXBUFWIDTH0) << 8) & 0x0F000000u)) & 0x0FFFFFFFu;
+			uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF;
+			if (taddr >= 0x04000000u && taddr < 0x04800000u && tfmt <= 3)
+				rt = fbFind(taddr & 0x001FFFFFu);
+			if (rt >= 0 && (!fbreg[rt].w || !fbreg[rt].h))
+				rt = -1;
+		}
+		if (rt >= 0) {
+			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
+			float tw = (float)(1u << (size & 0xF)), th = (float)(1u << ((size >> 8) & 0xF));
+			float kx = tw / fbreg[rt].w, ky = th / fbreg[rt].h;
+			cached_d.texture = 0;
+			cached_d.fbtex = fbreg[rt].fb + 1;
+			cached_x.tex_w = 1.0f / fbreg[rt].w;
+			cached_x.tex_h = 1.0f / fbreg[rt].h;
+			cached_x.uscale *= kx;
+			cached_x.uoff *= kx;
+			cached_x.vscale *= ky;
+			cached_x.voff *= ky;
+		} else if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
 			if (clk) {
 				t1 = clk();
 				f->us_state += t1 - t0;
@@ -1424,6 +1545,10 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 
 	if (ni == 0 || nv == 0)
 		return;
+
+	// A clear of the stencil: to the alpha of its (CPU built) vertices
+	if ((d.flags & GE_SGX_DRAW_CLEAR) && (d.flags & GE_SGX_DRAW_WRITE_ALPHA) && !gpu)
+		d.sref = (uint8_t)(vout[0].color >> 24);
 
 	if (!gpu) {
 		f->nvertices = vstart + nv;

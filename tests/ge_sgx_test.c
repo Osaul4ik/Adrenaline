@@ -869,6 +869,64 @@ static void testGpuDirect(void) {
 	w->direct_size = 0;
 }
 
+/* Framebuffers as textures, stencil, colour mask, stencil clear */
+static void testFbTexture(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0x80FFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 272, 0x80FFFFFF, 480, 272);
+
+	L l = { 0x08800000 };
+	/* draw into 0x88000 (a render target, 256 x 128) */
+	emit(&l, C(0x9C, 0x88000));
+	emit(&l, C(0x9D, 256));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (127 << 10) | 255));
+	emit(&l, C(0xD3, 0x201));              // clear: stencil (alpha) only
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0xD3, 0));
+	/* then onto the screen with that buffer as texture (512 x 256 texture: half of it) */
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xA0, 0x088000));
+	emit(&l, C(0xA8, (0x04 << 16) | 256));
+	emit(&l, C(0xB8, (8 << 8) | 9));       // 512 x 256
+	emit(&l, C(0xC3, GE_TFMT_5650));
+	emit(&l, C(0x24, 1));                  // stencil: less, ref 0x12, mask 0xFF, replace on pass
+	emit(&l, C(0xDC, (0xFF << 16) | (0x12 << 8) | 4));
+	emit(&l, C(0xDD, 2 << 16));
+	emit(&l, C(0xE9, 0x0F));               // stencil write mask 0xF0
+	emit(&l, C(0xE8, 0x0000FF));           // red not written
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	tex_calls = 0;
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 2 && frame.nfbs == 2, "draws %u fbs %u", frame.ndraws, frame.nfbs);
+	if (frame.ndraws == 2) {
+		GeSgxDraw *c = &fdraws[0], *d = &fdraws[1];
+		CHECK(c->fb == 0x88000 && (c->flags & GE_SGX_DRAW_CLEAR) && c->sfunc == 1 && c->sref == 0x80 && c->sops == 0x222, "stencil clear fb %X func %u ref %X ops %X", c->fb, c->sfunc, c->sref, c->sops);
+		CHECK(d->fbtex == 0x88000 + 1 && tex_calls == 0 && d->sfunc == 4 && d->sref == 0x12 && d->smask == 0xFF && d->sops == 0x200 && d->swmask == 0xF0 && d->cmask == 1,
+		      "fb texture %X lookups %d stencil %u %X %X ops %X wmask %X cmask %u", d->fbtex, tex_calls, d->sfunc, d->sref, d->smask, d->sops, d->swmask, d->cmask);
+		/* texels (480, 272) of a 256 x 128 buffer: past its size, u = 480 / 256 */
+		GeSgxVertex *cv = &fverts[d->base + 3];
+		CHECK(feq(cv->u, 480.0f / 256.0f) && feq(cv->v, 272.0f / 128.0f), "fb texture uv %f %f", cv->u, cv->v);
+	}
+	int k, found = 0;
+	for (k = 0; k < (int)frame.nfbs; k++) {
+		if (frame.fbs[k].fb == 0x88000 && frame.fbs[k].w == 256 && frame.fbs[k].h == 128)
+			found = 1;
+	}
+	CHECK(found, "fb 0x88000 256x128 listed");
+}
+
 static void testTransferAlias(void) {
 	resetFrame();
 	L l = { 0x08800000 };
@@ -1023,6 +1081,7 @@ int main(void) {
 	testLightingSkinning();
 	testGpuTransform();
 	testGpuDirect();
+	testFbTexture();
 	testTransferAlias();
 	testTexconv();
 
