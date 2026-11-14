@@ -29,10 +29,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <vita2d.h>
-
-extern SceGxmContext *_vita2d_context;
-
 #include "ge_sgx.h"
 #include "ge_sgx_render.h"
 #include "ge_sgx_shader.h"
@@ -219,13 +215,12 @@ static uint32_t blendKey(const GeSgxDraw *d) {
 			mask |= SCE_GXM_COLOR_MASK_A;
 		return 0x80000000u | mask;
 	}
-	uint32_t masked = (uint32_t)(d->cmask & 7) << 12; // channels not written
 	if (!(d->flags & GE_SGX_DRAW_BLEND))
-		return masked;
+		return 0;
 	uint32_t src = factor(d->blend & 0xF, d->fix_a, 1);
 	uint32_t dst = factor((d->blend >> 4) & 0xF, d->fix_b, 0);
 	uint32_t func = blendFunc((d->blend >> 8) & 7);
-	return 0x40000000u | masked | func | (src << 4) | (dst << 8);
+	return 0x40000000u | func | (src << 4) | (dst << 8);
 }
 
 static const SceGxmProgram *registeredGxp(uint32_t key, SceGxmShaderPatcherId *id) {
@@ -282,18 +277,10 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ZERO;
 	if (blend & 0x80000000u) {
 		info.colorMask = blend & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B);
-	} else {
-		if (blend & 0x40000000u) {
-			info.colorFunc = blend & 0xF;
-			info.colorSrc = (blend >> 4) & 0xF;
-			info.colorDst = (blend >> 8) & 0xF;
-		}
-		if (blend & (1u << 12))
-			info.colorMask &= ~SCE_GXM_COLOR_MASK_R;
-		if (blend & (1u << 13))
-			info.colorMask &= ~SCE_GXM_COLOR_MASK_G;
-		if (blend & (1u << 14))
-			info.colorMask &= ~SCE_GXM_COLOR_MASK_B;
+	} else if (blend & 0x40000000u) {
+		info.colorFunc = blend & 0xF;
+		info.colorSrc = (blend >> 4) & 0xF;
+		info.colorDst = (blend >> 8) & 0xF;
 	}
 	const SceGxmBlendInfo *pinfo = &info;
 
@@ -442,210 +429,26 @@ static SceGxmPrimitiveType primitive(uint8_t prim) {
 	}
 }
 
-static SceGxmStencilFunc stencilFunc(uint8_t f) {
-	static const SceGxmStencilFunc map[8] = {
-		SCE_GXM_STENCIL_FUNC_NEVER, SCE_GXM_STENCIL_FUNC_ALWAYS, SCE_GXM_STENCIL_FUNC_EQUAL, SCE_GXM_STENCIL_FUNC_NOT_EQUAL,
-		SCE_GXM_STENCIL_FUNC_LESS, SCE_GXM_STENCIL_FUNC_LESS_EQUAL, SCE_GXM_STENCIL_FUNC_GREATER, SCE_GXM_STENCIL_FUNC_GREATER_EQUAL,
-	};
-	return map[f & 7];
-}
-
-static SceGxmStencilOp stencilOp(uint32_t op) {
-	switch (op & 7) {
-		case 1: return SCE_GXM_STENCIL_OP_ZERO;
-		case 2: return SCE_GXM_STENCIL_OP_REPLACE;
-		case 3: return SCE_GXM_STENCIL_OP_INVERT;
-		case 4: return SCE_GXM_STENCIL_OP_INCR;
-		case 5: return SCE_GXM_STENCIL_OP_DECR;
-		default: return SCE_GXM_STENCIL_OP_KEEP;
-	}
-}
-
-static void stencilOff(SceGxmContext *ctx) {
-	sceGxmSetFrontStencilFunc(ctx, SCE_GXM_STENCIL_FUNC_ALWAYS, SCE_GXM_STENCIL_OP_KEEP, SCE_GXM_STENCIL_OP_KEEP,
-		SCE_GXM_STENCIL_OP_KEEP, 0xFF, 0xFF);
-}
-
-/* ---- Framebuffer renderings ---- */
-
-/*
-	Every PSP framebuffer drawn into has its own rendering (at twice its
-	size): the shown one, and those games draw to use as textures
-	(reflections, blur, the menus' backgrounds). They share one depth and
-	stencil buffer (in CDRAM, the GPU's fast memory, when it fits): each
-	scene starts from it cleared.
-*/
-#define MAX_TARGET_BYTES (10 * 1024 * 1024)
-// CDRAM always left to the emulator (with none left, Carbon's loading screen ended in an error)
-#define RESERVE_CDRAM_KB 1024
-#define SHARED_DEPTH_W 960
-#define SHARED_DEPTH_H 544
-
-typedef struct {
-	uint32_t fb;
-	uint16_t w, h;
-	vita2d_texture *tex;
-	int fresh;      // never drawn: cleared first
-	int own_depth;  // its depth buffer is vita2d's (bigger than the shared one)
-	uint32_t used;  // frame it was last drawn or shown
-	uint32_t bytes;
-} Target;
-
-static Target targets[GE_SGX_MAX_FBS];
-static uint32_t target_bytes = 0;
-static uint32_t target_clock = 0;
-static void *shared_depth = NULL;
-static int shared_depth_tried = 0;
-static int target_failures = 0;
-static uint32_t shown_fb = 0;
-
-static void *sharedDepth(void) {
-	if (shared_depth_tried)
-		return shared_depth;
-	shared_depth_tried = 1;
-	uint32_t size = (4 * SHARED_DEPTH_W * SHARED_DEPTH_H + 256 * 1024 - 1) & ~(256 * 1024 - 1);
-	int cdram = 0;
-	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= size / 1024 + RESERVE_CDRAM_KB) {
-		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-		cdram = shared_depth != NULL;
-	}
-	if (!shared_depth)
-		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-	GeSgxLog("GeSgx render: shared depth %s (%s)\n", shared_depth ? "ok" : "FAILED", cdram ? "CDRAM" : "RAM");
-	return shared_depth;
-}
-
-static Target *findTarget(uint32_t fb) {
+static int shown(uint32_t draw_fb, uint32_t fb, const GeSgxAlias *aliases, int naliases) {
+	if (draw_fb == fb)
+		return 1;
 	int i;
-	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
-		if (targets[i].tex && targets[i].fb == fb)
-			return &targets[i];
+	for (i = 0; i < naliases; i++) {
+		if (aliases[i].dst == fb && aliases[i].src == draw_fb)
+			return 1;
 	}
-	return NULL;
+	return 0;
 }
 
-static void freeTarget(Target *t) {
-	if (!t->tex)
+void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
+	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats) {
+	SceUInt64 t0 = sceKernelGetProcessTimeWide();
+	memset(stats, 0, sizeof(*stats));
+
+	if (!patcher || !vertexProgram())
 		return;
-	// The GPU may still read or write it
-	sceGxmFinish(_vita2d_context);
-	if (t->tex->gxm_rtgt)
-		sceGxmDestroyRenderTarget(t->tex->gxm_rtgt);
-	if (t->own_depth && t->tex->depth_UID >= 0) {
-		void *base = NULL;
-		if (sceKernelGetMemBlockBase(t->tex->depth_UID, &base) >= 0 && base)
-			sceGxmUnmapMemory(base);
-		sceKernelFreeMemBlock(t->tex->depth_UID);
-	}
-	vita2d_free_texture(t->tex);
-	target_bytes -= t->bytes;
-	memset(t, 0, sizeof(*t));
-}
 
-static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
-	uint32_t bytes = (uint32_t)w * h * 4;
-	if (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H)
-		sharedDepth(); // before the colour: the depth buffer is the busier one, CDRAM goes to it first
-	SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
-
-	// CDRAM if it fits with the emulator's reserve (the depth buffer usually took it), main RAM else
-	vita2d_texture *tex = NULL;
-	int in_cdram = 0;
-	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= bytes / 1024 + 256 + RESERVE_CDRAM_KB) {
-		in_cdram = 1;
-		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-	}
-	if (!tex) {
-		in_cdram = 0;
-		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-	}
-	vita2d_texture_set_alloc_memblock_type(type);
-	if (!tex || !tex->gxm_rtgt || tex->depth_UID < 0) {
-		if (tex) {
-			if (tex->gxm_rtgt)
-				sceGxmDestroyRenderTarget(tex->gxm_rtgt);
-			if (tex->depth_UID >= 0)
-				sceKernelFreeMemBlock(tex->depth_UID);
-			vita2d_free_texture(tex);
-		}
-		if (target_failures++ < 8)
-			GeSgxLog("GeSgx render: target %X %dx%d FAILED (targets %u KB)\n", (unsigned)fb, w, h, (unsigned)(target_bytes / 1024));
-		return NULL;
-	}
-
-	// vita2d made a depth buffer for it: the shared one instead, when it is big enough
-	int own_depth = 1;
-	void *depth = (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H) ? sharedDepth() : NULL;
-	if (depth) {
-		void *old = NULL;
-		sceKernelGetMemBlockBase(tex->depth_UID, &old);
-		sceGxmDepthStencilSurfaceInit(&tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
-			SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, (w + 31) & ~31, depth, NULL);
-		if (old)
-			sceGxmUnmapMemory(old);
-		sceKernelFreeMemBlock(tex->depth_UID);
-		tex->depth_UID = -1;
-		own_depth = 0;
-	} else {
-		bytes += (uint32_t)((w + 31) & ~31) * ((h + 31) & ~31) * 4;
-	}
-
-	t->fb = fb;
-	t->w = (uint16_t)w;
-	t->h = (uint16_t)h;
-	t->tex = tex;
-	t->fresh = 1;
-	t->own_depth = own_depth;
-	t->used = target_clock;
-	t->bytes = bytes;
-	target_bytes += bytes;
-	GeSgxLog("GeSgx render: target %X %dx%d in %s, depth %s | targets %u KB, free CDRAM %u KB, RAM %u KB\n",
-		(unsigned)fb, w, h, in_cdram ? "CDRAM" : "RAM", own_depth ? "own" : "shared", (unsigned)(target_bytes / 1024),
-		(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
-	return t;
-}
-
-// The rendering of framebuffer fb, w x h, made (or remade, other size) if needed
-static Target *getTarget(uint32_t fb, int w, int h) {
-	Target *t = findTarget(fb);
-	if (t && t->w == w && t->h == h) {
-		t->used = target_clock;
-		return t;
-	}
-	if (t)
-		freeTarget(t);
-
-	uint32_t need = (uint32_t)w * h * 4;
-	for (;;) {
-		// A free slot within the budget, or the least recently used one (not of this frame) given up
-		int i, slot = -1, oldest = -1;
-		for (i = 0; i < GE_SGX_MAX_FBS; i++) {
-			if (!targets[i].tex) {
-				if (slot < 0)
-					slot = i;
-			} else if (targets[i].used != target_clock && (oldest < 0 || targets[i].used < targets[oldest].used)) {
-				oldest = i;
-			}
-		}
-		if (slot >= 0 && target_bytes + need <= MAX_TARGET_BYTES) {
-			t = createTarget(&targets[slot], fb, w, h);
-			if (t || oldest < 0)
-				return t;
-		} else if (oldest < 0) {
-			return NULL;
-		}
-		freeTarget(&targets[oldest]);
-	}
-}
-
-/*
-	Draws [first, last) of the frame (one framebuffer) into the scene being
-	drawn, a target of w x h pixels.
-*/
-static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t first, uint32_t last,
-	int tw, int th, uint32_t target_fb, GeSgxRenderStats *stats) {
+	// No culling (yet): the depth test hides the back faces
 	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
 	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
 	int last_zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS, last_zwrite = 0;
@@ -653,41 +456,23 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	sceGxmSetFrontPointLineWidth(ctx, GE_SGX_SCALE);
 	sceGxmSetVertexProgram(ctx, vertex_program);
 	const SceGxmVertexProgram *last_vp = vertex_program;
-	stencilOff(ctx);
-	uint32_t last_stencil = 0xFFFFFFFFu;
 
 	int16_t last_scissor[4] = { -1, -1, -1, -1 };
 	int scissor_empty = 0;
 	const SceGxmFragmentProgram *last_fp = NULL;
 	uint32_t i;
 
-	for (i = first; i < last; i++) {
+	for (i = 0; i < frame->ndraws; i++) {
 		const GeSgxDraw *d = &frame->draws[i];
 
-		// A clear writing nothing
-		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_WRITE_ALPHA)))
+		if (!shown(d->fb, fb, aliases, naliases)) {
+			stats->other_fb++;
 			continue;
-
-		// The texture first: a framebuffer texture needs that framebuffer's rendering (not this one)
-		SceGxmTexture tex;
-		if (d->flags & GE_SGX_DRAW_TEXTURED) {
-			const SceGxmTexture *t = NULL;
-			if (d->fbtex) {
-				uint32_t sfb = d->fbtex - 1;
-				Target *src = sfb == target_fb ? NULL : findTarget(sfb);
-				if (src)
-					t = &src->tex->gxm_tex;
-			} else {
-				t = geSgxTexGet(d->texture);
-			}
-			if (!t)
-				continue;
-			tex = *t;
-			sceGxmTextureSetUAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_U) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
-			sceGxmTextureSetVAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_V) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
-			sceGxmTextureSetMinFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MIN) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
-			sceGxmTextureSetMagFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MAG) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 		}
+
+		// Clear of the stencil only: nothing to draw (no stencil yet)
+		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH)))
+			continue;
 
 		// The vertex program: the CPU transformed vertices', or the GPU transform's for this vertex shape
 		const SceGxmVertexProgram *vp = vertex_program;
@@ -725,8 +510,8 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			int x0 = d->scissor[0], y0 = d->scissor[1], x1 = d->scissor[2], y1 = d->scissor[3];
 			if (x0 < 0) x0 = 0;
 			if (y0 < 0) y0 = 0;
-			if (x1 > tw) x1 = tw;
-			if (y1 > th) y1 = th;
+			if (x1 > 960) x1 = 960;
+			if (y1 > 544) y1 = 544;
 			scissor_empty = x1 <= x0 || y1 <= y0;
 			// Tile granularity (32x32): exact for the full screen, the usual case
 			if (!scissor_empty)
@@ -746,20 +531,6 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			last_zwrite = zwrite;
 		}
 
-		// Stencil (the PSP's is the framebuffer alpha; here the depth buffer's 8 bits)
-		uint32_t skey = d->sfunc == 0xFF ? 0xFFFFFFFEu :
-			((uint32_t)d->sfunc | ((uint32_t)d->sops << 4) | ((uint32_t)d->smask << 16) | ((uint32_t)d->swmask << 24)) ^ ((uint32_t)d->sref << 8);
-		if (skey != last_stencil) {
-			if (d->sfunc == 0xFF) {
-				stencilOff(ctx);
-			} else {
-				sceGxmSetFrontStencilFunc(ctx, stencilFunc(d->sfunc), stencilOp(d->sops), stencilOp(d->sops >> 4),
-					stencilOp(d->sops >> 8), d->smask, d->swmask);
-				sceGxmSetFrontStencilRef(ctx, d->sref);
-			}
-			last_stencil = skey;
-		}
-
 		if (fp->alpha_ref || fp->env || fp->fog_color) {
 			void *uniforms = NULL;
 			sceGxmReserveFragmentDefaultUniformBuffer(ctx, &uniforms);
@@ -773,8 +544,17 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				setColorUniform(uniforms, fp->fog_color, d->fog_color);
 		}
 
-		if (d->flags & GE_SGX_DRAW_TEXTURED)
+		if (d->flags & GE_SGX_DRAW_TEXTURED) {
+			const SceGxmTexture *t = geSgxTexGet(d->texture);
+			if (!t)
+				continue;
+			SceGxmTexture tex = *t;
+			sceGxmTextureSetUAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_U) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
+			sceGxmTextureSetVAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_V) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
+			sceGxmTextureSetMinFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MIN) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
+			sceGxmTextureSetMagFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MAG) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 			sceGxmSetFragmentTexture(ctx, 0, &tex);
+		}
 
 		if (d->gpu) {
 			sceGxmSetVertexUniformBuffer(ctx, 0, frame->uniforms_gpu + d->ucommon);
@@ -793,72 +573,8 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	// Back to the state vita2d expects
 	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
 	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
-	stencilOff(ctx);
 	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 	sceGxmSetFrontPointLineWidth(ctx, 1);
-}
-
-vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
-	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats, int *scenes) {
-	SceUInt64 t0 = sceKernelGetProcessTimeWide();
-	memset(stats, 0, sizeof(*stats));
-	*scenes = 0;
-
-	if (!patcher || !vertexProgram())
-		return NULL;
-	target_clock++;
-
-	// One scene per run of draws into one framebuffer, each into that framebuffer's rendering
-	uint32_t i = 0;
-	while (i < frame->ndraws) {
-		uint32_t dfb = frame->draws[i].fb, j = i + 1;
-		while (j < frame->ndraws && frame->draws[j].fb == dfb)
-			j++;
-
-		uint32_t w = 480, h = 272, k;
-		for (k = 0; k < frame->nfbs; k++) {
-			if (frame->fbs[k].fb == dfb && frame->fbs[k].w && frame->fbs[k].h) {
-				w = frame->fbs[k].w;
-				h = frame->fbs[k].h;
-			}
-		}
-		Target *t = getTarget(dfb, w * GE_SGX_SCALE, h * GE_SGX_SCALE);
-		if (!t) {
-			stats->other_fb += j - i;
-			i = j;
-			continue;
-		}
-		vita2d_start_drawing_advanced(t->tex, *scenes == 0 ? VITA_2D_RESET_POOL : 0);
-		if (t->fresh) {
-			vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
-			vita2d_clear_screen();
-			t->fresh = 0;
-		}
-		renderDraws(ctx, frame, i, j, t->w, t->h, dfb, stats);
-		vita2d_end_drawing();
-		(*scenes)++;
-		if (dfb != fb)
-			stats->other_fb += j - i;
-		i = j;
-	}
 
 	stats->render_us = (uint32_t)(sceKernelGetProcessTimeWide() - t0);
-
-	// What is shown: the flipped framebuffer's rendering, or the one copied into it
-	Target *show = findTarget(fb);
-	int a;
-	for (a = 0; !show && a < naliases; a++) {
-		if (aliases[a].dst == fb)
-			show = findTarget(aliases[a].src);
-	}
-	if (show) {
-		show->used = target_clock;
-		shown_fb = show->fb;
-	}
-	return show ? show->tex : NULL;
-}
-
-vita2d_texture *geSgxRenderShown(void) {
-	Target *t = shown_fb ? findTarget(shown_fb) : NULL;
-	return t ? t->tex : NULL;
 }

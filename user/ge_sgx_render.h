@@ -21,7 +21,6 @@
 
 #include <stdint.h>
 #include <psp2/gxm.h>
-#include <vita2d.h>
 #include "ge_sgx_frame.h"
 #include "ge_sgx_walk.h"
 
@@ -44,17 +43,10 @@ extern volatile int ge_sgx_gpu_nbad;
 int geSgxRenderInit(void);
 
 /*
-	Draws the frame: each framebuffer's draws into that framebuffer's own
-	rendering (twice its size), as scenes of their own (none may be open).
-	Framebuffers used as textures are read from their renderings. scenes:
-	how many were drawn (the first one reset vita2d's vertex pool).
-	Returns the rendering of fb (or of the framebuffer copied into it,
-	aliases), NULL if there is none.
+	Draws the frame's draws into the framebuffer fb (or copied into it,
+	aliases) into the scene that is being drawn (960x544).
 */
-vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
-	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats, int *scenes);
-
-// The rendering last shown (NULL if none): renderings may be remade, so ask every time
-vita2d_texture *geSgxRenderShown(void);
+void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
+	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats);
 
 #endif
