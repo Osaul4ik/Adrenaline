@@ -375,8 +375,28 @@ void GeSgxFrameRendered(const GeSgxFrameRef *ref) {
 	s->state = SLOT_RENDERED;
 }
 
+/*
+	The newest frame the GPU is done with: one rendered GPU_DONE_TICKS draw
+	loops ago (the rule the slots are reused by). A texture may be freed
+	once the GPU is done with the frame that was being built when it died:
+	counting flips instead (KEEP_FRAMES) freed textures the GPU still read
+	while the walker caught up, flips then come much faster than frames are
+	drawn.
+*/
+volatile uint32_t ge_sgx_gpu_done_seq = 0;
+
+uint32_t GeSgxBuildingSeq(void) {
+	return frame_seq_counter + 1;
+}
+
 void GeSgxDrawTick(void) {
 	draw_tick++;
+	int i;
+	for (i = 0; i < FRAME_SLOTS; i++) {
+		FrameSlot *s = &slots[i];
+		if (s->state == SLOT_RENDERED && draw_tick - s->rendered_tick >= GPU_DONE_TICKS && (int32_t)(s->seq - ge_sgx_gpu_done_seq) > 0)
+			ge_sgx_gpu_done_seq = s->seq;
+	}
 }
 
 // Published frame (seqlock: odd while it is written)

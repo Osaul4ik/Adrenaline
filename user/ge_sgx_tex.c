@@ -43,6 +43,8 @@
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)
+// RAM always left to the emulator
+#define RESERVE_RAM_KB (2 * 1024)
 
 // Frames an entry is kept after its last use: published frames in flight plus the GPU
 #define KEEP_FRAMES 6
@@ -55,6 +57,7 @@ typedef struct {
 	uint32_t last_used;
 	uint32_t last_checked;
 	uint32_t dead_since;
+	uint32_t dead_seq; // freed once the GPU is done with this frame (the one being built when it died)
 	SceUID mem;
 	uint32_t bytes;
 	SceGxmTexture tex;
@@ -101,6 +104,7 @@ static void kill(Entry *e) {
 	if (e->live) {
 		e->live = 0;
 		e->dead_since = cur_frame;
+		e->dead_seq = GeSgxBuildingSeq();
 	}
 }
 
@@ -152,32 +156,42 @@ static SceGxmTextureFormat gxmFormat(uint32_t format) {
 	}
 }
 
-// Frees entries that are no longer used, oldest first, until need bytes fit
-static void makeRoom(uint32_t need) {
+// The least recently used live entry not used for KEEP_FRAMES, NULL if none
+static Entry *oldestLive(void) {
+	Entry *oldest = NULL;
 	int i;
-
-	// Dead entries whose frames are done
 	for (i = 0; i < MAX_TEXTURES; i++) {
 		Entry *e = &entries[i];
-		if (e->used && !e->live && cur_frame - e->dead_since >= KEEP_FRAMES) {
-			freeMemory(e);
-			e->used = 0;
+		if (e->live && cur_frame - e->last_used >= KEEP_FRAMES && (!oldest || e->last_used < oldest->last_used))
+			oldest = e;
+	}
+	return oldest;
+}
+
+// Frees the dead entries the GPU is done with; gives up live ones, oldest first, until need bytes fit
+static void makeRoom(uint32_t need) {
+	int i;
+	uint32_t dying = 0;
+
+	for (i = 0; i < MAX_TEXTURES; i++) {
+		Entry *e = &entries[i];
+		if (e->used && !e->live) {
+			if ((int32_t)(ge_sgx_gpu_done_seq - e->dead_seq) >= 0) {
+				freeMemory(e);
+				e->used = 0;
+			} else {
+				dying += e->bytes;
+			}
 		}
 	}
 
-	// Live entries not used for a while, oldest first
-	while (total_bytes + need > budget) {
-		Entry *oldest = NULL;
-		for (i = 0; i < MAX_TEXTURES; i++) {
-			Entry *e = &entries[i];
-			if (e->live && cur_frame - e->last_used >= KEEP_FRAMES && (!oldest || e->last_used < oldest->last_used))
-				oldest = e;
-		}
+	// Their memory is freed once the GPU is done with them; enough are given up for need now
+	while (total_bytes - dying + need > budget) {
+		Entry *oldest = oldestLive();
 		if (!oldest)
 			break;
 		kill(oldest);
-		// Its memory is freed KEEP_FRAMES later; nothing more can be done now
-		break;
+		dying += oldest->bytes;
 	}
 }
 
@@ -219,6 +233,15 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	if (total_bytes + bytes > budget)
 		return failed(d, "budget");
 
+	// The emulator keeps a reserve of RAM: older textures are given up for this one, which waits
+	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
+		uint32_t saved = budget;
+		budget = total_bytes > bytes ? total_bytes - bytes : 0;
+		makeRoom(bytes);
+		budget = saved;
+		return failed(d, "memory reserve");
+	}
+
 	int slot = -1, i;
 	for (i = 0; i < MAX_TEXTURES; i++) {
 		if (!entries[i].used) {
@@ -226,8 +249,13 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 			break;
 		}
 	}
-	if (slot < 0)
+	if (slot < 0) {
+		// All entries taken: the oldest one is given up, its slot is free once the GPU is done with it
+		Entry *oldest = oldestLive();
+		if (oldest)
+			kill(oldest);
 		return failed(d, "entries");
+	}
 
 	SceUInt64 t0 = sceKernelGetProcessTimeWide();
 
@@ -394,6 +422,13 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 
 void geSgxTexFrameDone(void) {
 	cur_frame++;
+	// A budget lowered when memory ran out comes back up while there is memory again
+	if ((cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
+	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
+		budget += 512 * 1024;
+		if (budget > BUDGET_BYTES)
+			budget = BUDGET_BYTES;
+	}
 }
 
 void geSgxTexStats(GeSgxTexStats *out) {
