@@ -497,7 +497,7 @@ static uint32_t target_clock = 0;
 static void *shared_depth = NULL;
 static int shared_depth_tried = 0;
 static int target_failures = 0;
-static uint32_t shown_fb = 0;
+static uint32_t shown_fb = 0; // VRAM offset + 1 of the shown framebuffer (0: none; 0 is a framebuffer too)
 
 static void *sharedDepth(void) {
 	if (shared_depth_tried)
@@ -853,12 +853,12 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	}
 	if (show) {
 		show->used = target_clock;
-		shown_fb = show->fb;
+		shown_fb = show->fb + 1;
 	}
 	return show ? show->tex : NULL;
 }
 
 vita2d_texture *geSgxRenderShown(void) {
-	Target *t = shown_fb ? findTarget(shown_fb) : NULL;
+	Target *t = shown_fb ? findTarget(shown_fb - 1) : NULL;
 	return t ? t->tex : NULL;
 }
