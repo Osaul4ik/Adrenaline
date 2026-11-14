@@ -871,6 +871,8 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
+        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB\n",
+          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }

@@ -476,6 +476,8 @@ static void stencilOff(SceGxmContext *ctx) {
 	scene starts from it cleared.
 */
 #define MAX_TARGET_BYTES (10 * 1024 * 1024)
+// CDRAM always left to the emulator (with none left, Carbon's loading screen ended in an error)
+#define RESERVE_CDRAM_KB 1024
 #define SHARED_DEPTH_W 960
 #define SHARED_DEPTH_H 544
 
@@ -502,12 +504,13 @@ static void *sharedDepth(void) {
 		return shared_depth;
 	shared_depth_tried = 1;
 	uint32_t size = (4 * SHARED_DEPTH_W * SHARED_DEPTH_H + 256 * 1024 - 1) & ~(256 * 1024 - 1);
-	int cdram = 1;
-	shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-	if (!shared_depth) {
-		cdram = 0;
-		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
+	int cdram = 0;
+	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= size / 1024 + RESERVE_CDRAM_KB) {
+		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
+		cdram = shared_depth != NULL;
 	}
+	if (!shared_depth)
+		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
 	GeSgxLog("GeSgx render: shared depth %s (%s)\n", shared_depth ? "ok" : "FAILED", cdram ? "CDRAM" : "RAM");
 	return shared_depth;
 }
@@ -545,11 +548,14 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		sharedDepth(); // before the colour: the depth buffer is the busier one, CDRAM goes to it first
 	SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
 
-	// CDRAM first (the shown rendering, usually the first one made), main RAM if it is not there
+	// CDRAM if it fits with the emulator's reserve (the depth buffer usually took it), main RAM else
 	vita2d_texture *tex = NULL;
-	int in_cdram = 1;
-	vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-	tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+	int in_cdram = 0;
+	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= bytes / 1024 + 256 + RESERVE_CDRAM_KB) {
+		in_cdram = 1;
+		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
+		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+	}
 	if (!tex) {
 		in_cdram = 0;
 		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
