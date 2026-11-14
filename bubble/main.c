@@ -204,6 +204,19 @@ static void compileSgxShaders(void) {
 			missing++;
 	}
 
+	{
+		char line[160];
+		int len = snprintf(line, sizeof(line), "--- shaders version %d: %d programs, %d not compiled yet%s\n", GE_SGX_CG_VERSION, n, missing,
+			requested ? " (requested by adrenaline_user)" : "");
+		sceIoMkdir("ux0:data/adrenaline", 0777);
+		sceIoMkdir(GE_SGX_CG_DIR, 0777);
+		SceUID fd = sceIoOpen(GE_SGX_CG_DIR "/compile_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+		if (fd >= 0) {
+			sceIoWrite(fd, line, len);
+			sceIoClose(fd);
+		}
+	}
+
 	if (missing > 0) {
 		printf("SGX renderer: compiling %d shaders (once)...\n", missing);
 		int res = geSgxCgInit(loadModule, cgAlloc, cgFree);
@@ -234,6 +247,15 @@ static void compileSgxShaders(void) {
 		}
 		geSgxCgTerm();
 		printf("\n");
+		{
+			char line[96];
+			int len = snprintf(line, sizeof(line), "--- compiled %d, failed %d\n", done - failed, failed);
+			SceUID fd = sceIoOpen(GE_SGX_CG_DIR "/compile_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+			if (fd >= 0) {
+				sceIoWrite(fd, line, len);
+				sceIoClose(fd);
+			}
+		}
 		if (failed) {
 			printf("%d shaders did not compile.\n", failed);
 			sceKernelDelayThread(3 * 1000 * 1000);

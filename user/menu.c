@@ -871,6 +871,10 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
+        GeSgxLog("GeSgx render (last frame): %u drawn (%u gpu), not drawn: clear %u, fb texture %u, texture %u, vertex program %u, fragment program %u, scissor %u, other fb %u | %u us\n",
+          (unsigned)sgx_render.draws, (unsigned)sgx_render.gpu_draws, (unsigned)sgx_render.skipped[0], (unsigned)sgx_render.skipped[1],
+          (unsigned)sgx_render.skipped[2], (unsigned)sgx_render.skipped[3], (unsigned)sgx_render.skipped[4], (unsigned)sgx_render.skipped[5],
+          (unsigned)sgx_render.other_fb, (unsigned)sgx_render.render_us);
         GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB\n",
           (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
         memset(&prof, 0, sizeof(prof));

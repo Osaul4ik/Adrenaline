@@ -32,7 +32,18 @@ typedef struct {
 	uint32_t other_fb; // draws into other framebuffers (not shown)
 	uint32_t gpu_draws; // with the GPU transform
 	uint32_t render_us;
+	// Draws not drawn, by reason (GE_SGX_SKIP_*)
+	uint32_t skipped[6];
 } GeSgxRenderStats;
+
+enum {
+	GE_SGX_SKIP_CLEAR,   // a clear writing nothing
+	GE_SGX_SKIP_FBTEX,   // its framebuffer texture has no rendering (or is the target itself)
+	GE_SGX_SKIP_TEX,     // its texture is not in the cache
+	GE_SGX_SKIP_VP,      // no GPU transform vertex program
+	GE_SGX_SKIP_FP,      // no fragment program
+	GE_SGX_SKIP_SCISSOR, // the scissor is empty
+};
 
 // Set when a GPU transform vertex program cannot be had: the walker then transforms on the CPU
 extern volatile int ge_sgx_gpu_failed;

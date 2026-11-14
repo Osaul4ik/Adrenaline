@@ -310,8 +310,6 @@ static void acquireSlot(void) {
 }
 
 // Walker thread, at a display flip of fb
-static void logRaw(const char *text, uint32_t len);
-
 static void publishSlot(uint32_t top) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
@@ -327,7 +325,7 @@ static void publishSlot(uint32_t top) {
 			uint32_t len;
 			const char *text = geSgxBuildTraceText(&len);
 			GeSgxLog("GeSgx T: begin (%u lines)\n", (unsigned)walker.trace_lines);
-			logRaw(text, len);
+			GeSgxLogText(text, len);
 			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)building->data.ndraws, (unsigned)fb,
 				(unsigned)walker.naliases);
 			walker.trace = 0;
@@ -518,8 +516,7 @@ static void writeAck(uint32_t session, uint32_t read) {
 	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
 }
 
-// Text written to the log as it is (the trace)
-static void logRaw(const char *text, uint32_t len) {
+void GeSgxLogText(const char *text, uint32_t len) {
 	if (!len)
 		return;
 	SceUID fd = sceIoOpen(LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);

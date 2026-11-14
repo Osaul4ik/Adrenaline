@@ -55,6 +55,8 @@ typedef struct {
 
 // Appends a line to ux0:data/adrenaline_sgx_log.txt
 void GeSgxLog(const char *fmt, ...);
+// Text written to the log as it is (traces kept in memory first)
+void GeSgxLogText(const char *text, uint32_t len);
 
 // Free memory of that type our process can still allocate (in 1 MB blocks), in KB
 uint32_t GeSgxFreeKB(SceKernelMemBlockType type);

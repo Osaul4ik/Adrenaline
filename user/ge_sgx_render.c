@@ -26,6 +26,8 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -640,6 +642,95 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 	}
 }
 
+/* ---- Diagnostics ---- */
+
+/*
+	Draws not drawn: each reason with its keys logged the first time, and
+	every draw of a traced frame summed up in runs (consecutive draws with
+	the same outcome, programs and texture), kept in memory and written at
+	the end of the frame.
+*/
+#define RTRACE_BYTES (64 * 1024)
+#define RTRACE_LINES 700
+static char rtrace_text[RTRACE_BYTES];
+static uint32_t rtrace_len = 0, rtrace_lines = 0;
+static int rtrace = 0;
+
+static const char *const outcome_names[7] = { "clear writing nothing", "fb texture without rendering", "texture not in cache",
+	"no vertex program", "no fragment program", "empty scissor", "drawn" };
+#define OUTCOME_DRAWN 6
+
+static void rtraceAdd(const char *fmt, ...) {
+	if (!rtrace || rtrace_lines >= RTRACE_LINES || rtrace_len >= RTRACE_BYTES - 1)
+		return;
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(rtrace_text + rtrace_len, RTRACE_BYTES - rtrace_len, fmt, ap);
+	va_end(ap);
+	if (n > 0 && rtrace_len + (uint32_t)n < RTRACE_BYTES) {
+		rtrace_len += (uint32_t)n;
+		rtrace_lines++;
+	} else {
+		rtrace_text[rtrace_len] = '\0';
+	}
+}
+
+// The run of draws being summed up
+static struct {
+	uint32_t first, last, outcome, fkey, blend, vkey, tex, n3d, verts;
+	int active;
+} run;
+
+static void runFlush(void) {
+	if (!run.active)
+		return;
+	run.active = 0;
+	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X\n",
+		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
+		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
+		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu));
+}
+
+static uint32_t skip_seen[96];
+static uint32_t nskip_seen = 0;
+
+// One draw's outcome: counted, its kind logged once if it was not drawn, and traced
+static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDraw *d, uint32_t index, uint32_t target_fb) {
+	uint32_t fkey = geSgxShaderKey(d), blend = blendKey(d), vkey = d->gpu ? d->vkey : 0;
+	uint32_t tex = !(d->flags & GE_SGX_DRAW_TEXTURED) ? 0 : d->fbtex ? (0x80000000u | (d->fbtex - 1)) : (uint32_t)d->texture;
+	if (outcome != OUTCOME_DRAWN) {
+		stats->skipped[outcome]++;
+		uint32_t k = (outcome << 28) ^ (fkey * 0x9E3779B1u) ^ (vkey * 0x85EBCA77u) ^ ((outcome == GE_SGX_SKIP_FBTEX) ? (tex * 31u) : 0);
+		uint32_t i;
+		for (i = 0; i < nskip_seen && skip_seen[i] != k; i++)
+			;
+		if (i == nskip_seen && nskip_seen < sizeof(skip_seen) / sizeof(skip_seen[0])) {
+			skip_seen[nskip_seen++] = k;
+			GeSgxLog("GeSgx render: not drawn (%s): draw %u into fb %X, fragment %04X blend %08X, vertex %s%04X vtype %06X, texture %s%X, flags %X, %u vertices%s\n",
+				outcome_names[outcome], (unsigned)index, (unsigned)target_fb, (unsigned)fkey, (unsigned)blend,
+				d->gpu ? "gpu " : "cpu", (unsigned)vkey, (unsigned)d->vtype, (tex & 0x80000000u) ? "fb " : "id ", (unsigned)(tex & 0x7FFFFFFFu),
+				(unsigned)d->flags, (unsigned)d->count, outcome == GE_SGX_SKIP_VP && geSgxShaderFailed(vkey) ? " (program failed)" : "");
+		}
+	}
+	if (!rtrace)
+		return;
+	if (run.active && run.outcome == outcome && run.fkey == fkey && run.blend == blend && run.vkey == vkey && run.tex == tex && run.last + 1 == index) {
+		run.last = index;
+	} else {
+		runFlush();
+		run.active = 1;
+		run.first = run.last = index;
+		run.outcome = outcome;
+		run.fkey = fkey;
+		run.blend = blend;
+		run.vkey = vkey;
+		run.tex = tex;
+		run.n3d = run.verts = 0;
+	}
+	run.n3d += d->gpu ? 1 : 0;
+	run.verts += d->count;
+}
+
 /*
 	Draws [first, last) of the frame (one framebuffer) into the scene being
 	drawn, a target of w x h pixels.
@@ -665,8 +756,10 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		const GeSgxDraw *d = &frame->draws[i];
 
 		// A clear writing nothing
-		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_WRITE_ALPHA)))
+		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_WRITE_ALPHA))) {
+			drawOutcome(stats, GE_SGX_SKIP_CLEAR, d, i, target_fb);
 			continue;
+		}
 
 		// The texture first: a framebuffer texture needs that framebuffer's rendering (not this one)
 		SceGxmTexture tex;
@@ -680,8 +773,10 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			} else {
 				t = geSgxTexGet(d->texture);
 			}
-			if (!t)
+			if (!t) {
+				drawOutcome(stats, d->fbtex ? GE_SGX_SKIP_FBTEX : GE_SGX_SKIP_TEX, d, i, target_fb);
 				continue;
+			}
 			tex = *t;
 			sceGxmTextureSetUAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_U) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
 			sceGxmTextureSetVAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_V) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
@@ -698,6 +793,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			if (!g) {
 				if (waiting)
 					stats->waiting++;
+				drawOutcome(stats, GE_SGX_SKIP_VP, d, i, target_fb);
 				continue;
 			}
 			vp = g->program;
@@ -707,6 +803,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		FragmentProgram *fp = fragmentProgram(d, vgxp);
 		if (!fp) {
 			stats->waiting++;
+			drawOutcome(stats, GE_SGX_SKIP_FP, d, i, target_fb);
 			continue;
 		}
 
@@ -732,8 +829,10 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			if (!scissor_empty)
 				sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, x0, y0, x1 - 1, y1 - 1);
 		}
-		if (scissor_empty)
+		if (scissor_empty) {
+			drawOutcome(stats, GE_SGX_SKIP_SCISSOR, d, i, target_fb);
 			continue;
+		}
 
 		int zfunc = (d->flags & GE_SGX_DRAW_CLEAR) ? SCE_GXM_DEPTH_FUNC_ALWAYS : depthFunc(d->ztest);
 		int zwrite = (d->flags & GE_SGX_DRAW_WRITE_DEPTH) != 0;
@@ -788,7 +887,9 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 
 		stats->draws++;
 		stats->vertices += d->count;
+		drawOutcome(stats, OUTCOME_DRAWN, d, i, target_fb);
 	}
+	runFlush();
 
 	// Back to the state vita2d expects
 	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
@@ -808,6 +909,24 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		return NULL;
 	target_clock++;
 
+	// Diagnostics: a frame traced now and then (three of the race, two others)
+	static uint32_t rframes = 0, last_trace = 0, big_traces = 0;
+	rframes++;
+	rtrace = 0;
+	if ((frame->ndraws >= 1000 && big_traces < 3 && rframes - last_trace >= 300) || rframes == 600 || rframes == 1800) {
+		rtrace = 1;
+		rtrace_len = rtrace_lines = 0;
+		last_trace = rframes;
+		if (frame->ndraws >= 1000)
+			big_traces++;
+		rtraceAdd("GeSgx R: frame %u: %u draws, %u vertices, %u indices, flipped fb %X, %d aliases, framebuffers:", (unsigned)rframes,
+			(unsigned)frame->ndraws, (unsigned)frame->nvertices, (unsigned)frame->nindices, (unsigned)fb, naliases);
+		uint32_t k;
+		for (k = 0; k < frame->nfbs; k++)
+			rtraceAdd(" %X %ux%u", (unsigned)frame->fbs[k].fb, (unsigned)frame->fbs[k].w, (unsigned)frame->fbs[k].h);
+		rtraceAdd("\n");
+	}
+
 	// One scene per run of draws into one framebuffer, each into that framebuffer's rendering
 	uint32_t i = 0;
 	while (i < frame->ndraws) {
@@ -824,10 +943,13 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		}
 		Target *t = getTarget(dfb, w * GE_SGX_SCALE, h * GE_SGX_SCALE);
 		if (!t) {
+			rtraceAdd("GeSgx R: scene: draws %u-%u into fb %X: no rendering (%ux%u)\n", (unsigned)i, (unsigned)(j - 1), (unsigned)dfb, (unsigned)w, (unsigned)h);
 			stats->other_fb += j - i;
 			i = j;
 			continue;
 		}
+		rtraceAdd("GeSgx R: scene %d: draws %u-%u into fb %X, rendering %dx%d%s\n", *scenes, (unsigned)i, (unsigned)(j - 1), (unsigned)dfb,
+			t->w, t->h, t->fresh ? " (new, cleared)" : "");
 		vita2d_start_drawing_advanced(t->tex, *scenes == 0 ? VITA_2D_RESET_POOL : 0);
 		if (t->fresh) {
 			vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
@@ -854,6 +976,25 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	if (show) {
 		show->used = target_clock;
 		shown_fb = show->fb + 1;
+	}
+
+	// Diagnostics: what is shown, when that changes
+	static uint32_t last_shown = 0xFFFFFFFEu, shown_logs = 0;
+	uint32_t now_shown = show ? show->fb : 0xFFFFFFFFu;
+	if (now_shown != last_shown && shown_logs < 80) {
+		shown_logs++;
+		GeSgxLog("GeSgx render: frame %u flips fb %X: shown %s %X (%u draws, %u not drawn)\n", (unsigned)rframes, (unsigned)fb,
+			show ? "rendering of fb" : "nothing (the PSP picture), was", show ? (unsigned)now_shown : (unsigned)last_shown,
+			(unsigned)stats->draws, (unsigned)(frame->ndraws - stats->draws));
+	}
+	last_shown = now_shown;
+
+	if (rtrace) {
+		rtraceAdd("GeSgx R: end: %u drawn, not drawn: clear %u, fb texture %u, texture %u, vertex program %u, fragment program %u, scissor %u, other fb %u; shown %X\n",
+			(unsigned)stats->draws, (unsigned)stats->skipped[0], (unsigned)stats->skipped[1], (unsigned)stats->skipped[2],
+			(unsigned)stats->skipped[3], (unsigned)stats->skipped[4], (unsigned)stats->skipped[5], (unsigned)stats->other_fb, (unsigned)now_shown);
+		GeSgxLogText(rtrace_text, rtrace_len);
+		rtrace = 0;
 	}
 	return show ? show->tex : NULL;
 }

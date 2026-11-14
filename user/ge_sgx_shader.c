@@ -285,6 +285,12 @@ const SceGxmProgram *geSgxShaderGet(uint32_t key) {
 	p = &programs[nprograms];
 	p->key = key;
 	p->program = geSgxCgLoadCached(key);
+	{
+		char path[96];
+		geSgxCgPath(key, path, sizeof(path));
+		GeSgxLog("GeSgx shader %04X: %s %s (%u bytes)\n", (unsigned)key, p->program ? "loaded" : "NOT CACHED", path,
+			p->program ? (unsigned)sceGxmProgramGetSize(p->program) : 0u);
+	}
 	if (p->program) {
 		p->state = STATE_READY;
 		nprograms++;
