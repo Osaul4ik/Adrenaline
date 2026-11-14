@@ -587,15 +587,20 @@ int AdrenalineDraw(SceSize args, void *argp) {
     if (sgx_active && !sgx_tex && !sgx_tex_failed) {
       /*
         The emulator leaves our process about 4 MB of CDRAM (the GPU's fast
-        memory): exactly the target and its depth buffer, which the GPU
-        writes and reads every frame. Main RAM if it is not there.
+        memory). The target goes there, the depth buffer too if 1 MB stays
+        free for the emulator: with all of it taken, Carbon's loading screen
+        ended in the emulator's error dialog.
       */
+      const uint32_t reserve_kb = 1024;
       uint32_t cdram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
       uint32_t ram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
       SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
-      int in_cdram = 1;
-      vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-      sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+      int in_cdram = 0;
+      if (cdram_kb >= 2048 + reserve_kb) {
+        in_cdram = 1;
+        vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
+        sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+      }
       if (!sgx_tex) {
         in_cdram = 0;
         vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
@@ -609,7 +614,8 @@ int AdrenalineDraw(SceSize args, void *argp) {
       if (sgx_tex) {
         uint32_t aw = (SCREEN_WIDTH + 31) & ~31, ah = (SCREEN_HEIGHT + 31) & ~31;
         uint32_t dsize = (4 * aw * ah + 256 * 1024 - 1) & ~(256 * 1024 - 1);
-        SceUID dm = sceKernelAllocMemBlock("SceGeSgxDepth", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, dsize, NULL);
+        SceUID dm = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= dsize / 1024 + reserve_kb ?
+          sceKernelAllocMemBlock("SceGeSgxDepth", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, dsize, NULL) : -1;
         void *dmem = NULL;
         if (dm >= 0 && sceKernelGetMemBlockBase(dm, &dmem) >= 0 &&
             sceGxmMapMemory(dmem, dsize, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) >= 0) {
@@ -920,6 +926,8 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
+        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB\n",
+          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }

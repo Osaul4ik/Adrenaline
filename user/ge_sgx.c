@@ -486,25 +486,19 @@ void GeSgxLog(const char *fmt, ...) {
 
 // How much memory the renderer could still get, in 1 MB blocks (64 MB at most:
 // the blocks are taken from the emulator for a moment)
-static uint32_t probeMemory(SceKernelMemBlockType type, int max_blocks) {
-	SceUID blocks[256];
-	int n = 0;
-	if (max_blocks > 256)
-		max_blocks = 256;
-	while (n < max_blocks) {
-		SceUID id = sceKernelAllocMemBlock("SceGeSgxProbe", type, 1024 * 1024, NULL);
-		if (id < 0)
-			break;
-		blocks[n++] = id;
-	}
-	int i;
-	for (i = 0; i < n; i++)
-		sceKernelFreeMemBlock(blocks[i]);
-	return (uint32_t)n * 1024;
-}
-
+/*
+	Free memory of the process, without allocating it (probing took all of
+	it for a moment: an allocation of the emulator at that moment failed).
+*/
 uint32_t GeSgxFreeKB(SceKernelMemBlockType type) {
-	return probeMemory(type, 64);
+	SceKernelFreeMemorySizeInfo info;
+	memset(&info, 0, sizeof(info));
+	info.size = sizeof(info);
+	if (sceKernelGetFreeMemorySize(&info) < 0)
+		return 0;
+	if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW)
+		return (uint32_t)info.size_cdram / 1024;
+	return (uint32_t)info.size_user / 1024;
 }
 
 static void publish(const GeSgxRect *rects, int nrects, const GeSgxStats *stats, const GeSgxFrame *rates) {
@@ -691,8 +685,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	GeSgxStats frame_stats;
 	GeSgxRect rects[GE_SGX_FRAME_RECTS];
 
-	cdram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, 64);
-	ram_kb = probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64);
+	cdram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
+	ram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
 	GeSgxLog("GeSgx: free CDRAM %u KB, free RAM %u KB\n", (unsigned)cdram_kb, (unsigned)ram_kb);
 
 	benchmarkMemory();
@@ -729,7 +723,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		int slots_ok = initSlots();
 		int tex_ok = geSgxTexInit();
 		GeSgxLog("GeSgx: frames %d, texture cache %d, free RAM now %u KB\n", slots_ok, tex_ok,
-			(unsigned)probeMemory(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, 64));
+			(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
