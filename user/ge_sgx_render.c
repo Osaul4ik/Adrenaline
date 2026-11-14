@@ -967,6 +967,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	stats->render_us = (uint32_t)(sceKernelGetProcessTimeWide() - t0);
 
 	// What is shown: the flipped framebuffer's rendering, or the one copied into it
+	uint32_t k;
 	Target *show = findTarget(fb);
 	int a;
 	for (a = 0; !show && a < naliases; a++) {
@@ -978,16 +979,26 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		shown_fb = show->fb + 1;
 	}
 
-	// Diagnostics: what is shown, when that changes
-	static uint32_t last_shown = 0xFFFFFFFEu, shown_logs = 0;
+	/*
+		Diagnostics: frames that do not show their own fresh rendering (nothing:
+		the PSP picture; another framebuffer's; or one not drawn this frame,
+		which still holds an older picture) - candidates for flicker
+	*/
+	static uint32_t odd_logs = 0;
 	uint32_t now_shown = show ? show->fb : 0xFFFFFFFFu;
-	if (now_shown != last_shown && shown_logs < 80) {
-		shown_logs++;
-		GeSgxLog("GeSgx render: frame %u flips fb %X: shown %s %X (%u draws, %u not drawn)\n", (unsigned)rframes, (unsigned)fb,
-			show ? "rendering of fb" : "nothing (the PSP picture), was", show ? (unsigned)now_shown : (unsigned)last_shown,
-			(unsigned)stats->draws, (unsigned)(frame->ndraws - stats->draws));
+	int drawn_now = 0;
+	for (k = 0; show && k < frame->ndraws; k++) {
+		if (frame->draws[k].fb == show->fb) {
+			drawn_now = 1;
+			break;
+		}
 	}
-	last_shown = now_shown;
+	if ((!show || now_shown != fb || !drawn_now) && odd_logs < 100) {
+		odd_logs++;
+		GeSgxLog("GeSgx render: frame %u flips fb %X (%u draws): shown %s %X%s\n", (unsigned)rframes, (unsigned)fb, (unsigned)frame->ndraws,
+			show ? "rendering of fb" : "nothing (the PSP picture)", show ? (unsigned)now_shown : 0u,
+			show && !drawn_now ? ", not drawn this frame (an older picture)" : "");
+	}
 
 	if (rtrace) {
 		rtraceAdd("GeSgx R: end: %u drawn, not drawn: clear %u, fb texture %u, texture %u, vertex program %u, fragment program %u, scissor %u, other fb %u; shown %X\n",

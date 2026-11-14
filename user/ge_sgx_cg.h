@@ -32,7 +32,7 @@
 
 // Bump when the generated sources change: older cached programs are not used.
 // Never reuse a number (2 was taken by reverted sources whose programs may still be cached)
-#define GE_SGX_CG_VERSION 3
+#define GE_SGX_CG_VERSION 1 // TEST: the old cached programs (3 is the current sources)
 
 #define GE_SGX_CG_DIR "ux0:data/adrenaline/sgx_shaders"
 // Written by adrenaline_user when it could not compile: the app compiles all programs at its next start
