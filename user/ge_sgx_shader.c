@@ -304,13 +304,24 @@ const SceGxmProgram *geSgxShaderGet(uint32_t key) {
 	if (queue_write - queue_read >= QUEUE_SIZE || !startCompiler())
 		return NULL;
 
-	// Not in the cache: which ones (the app compiles every key there is)
+	// Not in the cache: logged, and listed for the app to compile (with every key there is)
 	static int missing_logs = 0;
 	if (missing_logs < 16) {
 		missing_logs++;
 		char path[96];
 		geSgxCgPath(key, path, sizeof(path));
 		GeSgxLog("GeSgx shader %04X: not in the cache (%s)\n", (unsigned)key, path);
+	}
+	if (missing_logs < 256) {
+		char line[16];
+		int len = snprintf(line, sizeof(line), "%04X\n", (unsigned)key);
+		sceIoMkdir("ux0:data/adrenaline", 0777);
+		sceIoMkdir(GE_SGX_CG_DIR, 0777);
+		SceUID fd = sceIoOpen(GE_SGX_CG_MISSING, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+		if (fd >= 0) {
+			sceIoWrite(fd, line, len);
+			sceIoClose(fd);
+		}
 	}
 
 	p->state = STATE_QUEUED;

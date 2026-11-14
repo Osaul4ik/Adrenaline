@@ -44,7 +44,7 @@
 static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)
 // RAM always left to the emulator
-#define RESERVE_RAM_KB (6 * 1024)
+#define RESERVE_RAM_KB (2 * 1024)
 
 // Frames an entry is kept after its last use: published frames in flight plus the GPU
 #define KEEP_FRAMES 6
@@ -262,10 +262,12 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	if (total_bytes + bytes > budget)
 		return failed(d, "budget");
 
-	// The emulator keeps a reserve of RAM: the budget comes down to what leaves it
+	// The emulator keeps a reserve of RAM: older textures make room, or this one waits
 	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
-		budget = total_bytes > 1024 * 1024 ? total_bytes - 512 * 1024 : total_bytes;
+		uint32_t saved = budget;
+		budget = total_bytes > bytes ? total_bytes - bytes : 0;
 		makeRoom(bytes);
+		budget = saved;
 		return failed(d, "memory reserve");
 	}
 
@@ -498,6 +500,13 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 
 void geSgxTexFrameDone(void) {
 	cur_frame++;
+	// A budget lowered when memory ran out comes back up while there is memory again
+	if ((cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
+	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
+		budget += 512 * 1024;
+		if (budget > BUDGET_BYTES)
+			budget = BUDGET_BYTES;
+	}
 }
 
 void geSgxTexStats(GeSgxTexStats *out) {

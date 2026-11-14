@@ -173,9 +173,9 @@ static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 #define FRAME_SLOTS 3
 #define FRAME_VERTICES 16384      // CPU transformed (2D and what the GPU transform cannot do)
 #define FRAME_INDICES (3 * 65536)
-#define FRAME_UNIFORMS (512 * 1024)
-#define FRAME_RAW (1280 * 1024)   // PSP vertex data for the GPU transform
-#define FRAME_DRAWS 8192
+#define FRAME_UNIFORMS (256 * 1024)
+#define FRAME_RAW (512 * 1024)    // PSP vertex data for the GPU transform (most is read where it is: direct)
+#define FRAME_DRAWS 4096
 #define GPU_DONE_TICKS 3
 
 enum {

@@ -292,8 +292,9 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 				}
 	}
 	ADD(1u << 10); // clear
-	// alpha test: off, or one of the functions but ALWAYS (= off)
-	static const int8_t atests[8] = { -1, 0, 2, 3, 4, 5, 6, 7 };
+	// alpha test: off (8), or one of the functions but ALWAYS (= off). Plain ints: with an
+	// int8_t -1 for "off" the app's build made keys like 0xFFFFFFC0 (and missed real ones)
+	static const int atests[8] = { 8, 0, 2, 3, 4, 5, 6, 7 };
 	for (fix = 0; fix < 2; fix++)
 	for (fog = 0; fog < 2; fog++)
 	for (textured = 0; textured < 2; textured++) {
@@ -306,8 +307,8 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 							key |= 1 | (tfunc << 1) | (tcc << 4);
 						if (dbl)
 							key |= 1 << 5;
-						if (atests[atest] >= 0)
-							key |= (1 << 6) | ((uint32_t)atests[atest] << 7);
+						if (atests[atest] < 8)
+							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
 						ADD(key);
 					}
 				}

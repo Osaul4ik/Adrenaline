@@ -158,7 +158,7 @@ static void cgFree(void *ptr) {
 
 static void compileLog(uint32_t key, int line, const char *msg) {
 	char buf[256];
-	int n = snprintf(buf, sizeof(buf), "%04X line %d: %s\n", (unsigned)key, line, msg);
+	int n = snprintf(buf, sizeof(buf), "%08X line %d: %s\n", (unsigned)key, line, msg);
 	printf("  %s", buf);
 	SceUID fd = sceIoOpen(GE_SGX_CG_DIR "/compile_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
 	if (fd >= 0) {
@@ -216,13 +216,41 @@ static void removeOldSgxShaders(void) {
 
 static void compileSgxShaders(void) {
 	SceIoStat stat;
-	int requested = sceIoGetstat(GE_SGX_CG_REQUEST, &stat) >= 0;
+	int requested = sceIoGetstat(GE_SGX_CG_REQUEST, &stat) >= 0 || sceIoGetstat(GE_SGX_CG_MISSING, &stat) >= 0;
 	if (!requested && sgxRendererOption() < 2)
 		return;
 	removeOldSgxShaders();
 
-	static uint32_t keys[2048];
+	static uint32_t keys[2048 + 256];
 	int n = geSgxCgAllKeys(keys, 2048);
+	if (n > 2048)
+		n = 2048;
+
+	// The keys adrenaline_user did not find (in case the list above misses some)
+	SceUID mfd = sceIoOpen(GE_SGX_CG_MISSING, SCE_O_RDONLY, 0);
+	if (mfd >= 0) {
+		static char text[4096];
+		int len = sceIoRead(mfd, text, sizeof(text) - 1);
+		sceIoClose(mfd);
+		if (len > 0) {
+			text[len] = 0;
+			char *p = text;
+			while (*p && n < 2048 + 256) {
+				char *end = NULL;
+				unsigned long k = strtoul(p, &end, 16);
+				if (end == p)
+					break;
+				int j, dup = 0;
+				for (j = 0; j < n; j++)
+					dup |= keys[j] == (uint32_t)k;
+				if (!dup && k > 0 && k <= 0xFFFF)
+					keys[n++] = (uint32_t)k;
+				p = end;
+				while (*p == '\n' || *p == '\r' || *p == ' ')
+					p++;
+			}
+		}
+	}
 	int i, missing = 0;
 	char path[96];
 	for (i = 0; i < n; i++) {
@@ -233,6 +261,7 @@ static void compileSgxShaders(void) {
 
 	if (missing > 0) {
 		printf("SGX renderer: compiling %d shaders (once)...\n", missing);
+		sceIoRemove(GE_SGX_CG_DIR "/compile_log.txt"); // this run's messages only
 		int res = geSgxCgInit(loadModule, cgAlloc, cgFree);
 		if (res != 1) {
 			printf("libshacccg.suprx could not be loaded (0x%08X).\n", res);
@@ -253,6 +282,21 @@ static void compileSgxShaders(void) {
 				geSgxCgSave(keys[i], program, size);
 				free(program);
 			} else {
+				// The source of the first ones, to see what the compiler did not take
+				if (failed < 3) {
+					static char src[16384];
+					int len = geSgxCgSource(keys[i], src, sizeof(src));
+					SceUID fd = sceIoOpen(GE_SGX_CG_DIR "/compile_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+					if (fd >= 0 && len > 0 && len < (int)sizeof(src)) {
+						char head[48];
+						int hn = snprintf(head, sizeof(head), "---- source of %08X:\n", (unsigned)keys[i]);
+						sceIoWrite(fd, head, hn);
+						sceIoWrite(fd, src, len);
+						sceIoWrite(fd, "----\n", 5);
+					}
+					if (fd >= 0)
+						sceIoClose(fd);
+				}
 				failed++;
 			}
 			done++;
@@ -268,6 +312,7 @@ static void compileSgxShaders(void) {
 	}
 
 	sceIoRemove(GE_SGX_CG_REQUEST);
+	sceIoRemove(GE_SGX_CG_MISSING);
 }
 
 static void initNet() {

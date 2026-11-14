@@ -497,16 +497,17 @@ static void stencilOff(SceGxmContext *ctx) {
 #define MAX_TARGET_BYTES (10 * 1024 * 1024)
 // Left to the emulator (its video decoder, dialogs, ...): never used here
 #define RESERVE_CDRAM_KB 1024
-#define RESERVE_RAM_KB (6 * 1024)
+#define RESERVE_RAM_KB (2 * 1024)
 #define SHARED_DEPTH_W 960
 #define SHARED_DEPTH_H 544
 
 typedef struct {
 	uint32_t fb;
 	uint16_t w, h;
-	vita2d_texture *tex;
+	vita2d_texture *tex;   // &surface, NULL: slot free
+	vita2d_texture surface; // made here (no vita2d depth buffer, render target for several scenes)
+	SceUID data_uid, depth_uid;
 	int fresh;      // never drawn: cleared first
-	int own_depth;  // its depth buffer is vita2d's (bigger than the shared one)
 	uint32_t used;  // frame it was last drawn or shown
 	uint32_t bytes;
 	vita2d_texture view;   // the same, sampled without alpha (shown opaque)
@@ -519,6 +520,32 @@ static void *shared_depth = NULL;
 static int shared_depth_tried = 0;
 static int target_failures = 0;
 static uint32_t shown_fb = 0;
+static uint32_t target_retags = 0;
+
+// GPU memory block: uid and base, NULL if it cannot be had
+static void *gpuBlock(SceKernelMemBlockType type, uint32_t size, SceUID *uid) {
+	size = type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW ? (size + 256 * 1024 - 1) & ~(256 * 1024 - 1) : (size + 0xFFF) & ~0xFFFu;
+	*uid = sceKernelAllocMemBlock("SceGeSgxTarget", type, size, NULL);
+	if (*uid < 0)
+		return NULL;
+	void *mem = NULL;
+	sceKernelGetMemBlockBase(*uid, &mem);
+	if (sceGxmMapMemory(mem, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) < 0) {
+		sceKernelFreeMemBlock(*uid);
+		*uid = -1;
+		return NULL;
+	}
+	return mem;
+}
+
+static void gpuBlockFree(SceUID uid) {
+	if (uid < 0)
+		return;
+	void *mem = NULL;
+	if (sceKernelGetMemBlockBase(uid, &mem) >= 0 && mem)
+		sceGxmUnmapMemory(mem);
+	sceKernelFreeMemBlock(uid);
+}
 
 static void *sharedDepth(void) {
 	if (shared_depth_tried)
@@ -550,109 +577,104 @@ static void freeTarget(Target *t) {
 		return;
 	// The GPU may still read or write it
 	sceGxmFinish(_vita2d_context);
-	if (t->tex->gxm_rtgt)
-		sceGxmDestroyRenderTarget(t->tex->gxm_rtgt);
-	if (t->own_depth && t->tex->depth_UID >= 0) {
-		void *base = NULL;
-		if (sceKernelGetMemBlockBase(t->tex->depth_UID, &base) >= 0 && base)
-			sceGxmUnmapMemory(base);
-		sceKernelFreeMemBlock(t->tex->depth_UID);
-	}
-	vita2d_free_texture(t->tex);
+	if (t->surface.gxm_rtgt)
+		sceGxmDestroyRenderTarget(t->surface.gxm_rtgt);
+	gpuBlockFree(t->data_uid);
+	gpuBlockFree(t->depth_uid);
 	target_bytes -= t->bytes;
 	memset(t, 0, sizeof(*t));
 }
 
+/*
+	A rendering: colour in CDRAM if it fits (the first one, usually the
+	shown one), else main RAM, always leaving the emulator its reserve;
+	the shared depth buffer, or an own one when it is bigger.
+*/
 static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	uint32_t bytes = (uint32_t)w * h * 4;
-	if (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H)
+	int shared = w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H;
+	if (shared)
 		sharedDepth(); // before the colour: the depth buffer is the busier one, CDRAM goes to it first
-	SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
 
-	/*
-		CDRAM first (the shown rendering, usually the first one made), main
-		RAM if it is not there, always leaving the emulator its reserve.
-		vita2d makes a depth buffer of the same size in RAM for a moment.
-	*/
-	vita2d_texture *tex = NULL;
-	int in_cdram = 0;
+	memset(t, 0, sizeof(*t));
+	t->data_uid = t->depth_uid = -1;
 	uint32_t kb = bytes / 1024 + 1;
-	uint32_t free_ram = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
-	if (free_ram >= kb + RESERVE_RAM_KB && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= kb + 256 + RESERVE_CDRAM_KB) {
-		in_cdram = 1;
-		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+	int in_cdram = 0;
+	void *data = NULL;
+	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= kb + 256 + RESERVE_CDRAM_KB) {
+		data = gpuBlock(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, bytes, &t->data_uid);
+		in_cdram = data != NULL;
 	}
-	if (!tex && free_ram >= 2 * kb + RESERVE_RAM_KB) {
-		in_cdram = 0;
-		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+	if (!data && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= kb + RESERVE_RAM_KB)
+		data = gpuBlock(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, &t->data_uid);
+
+	void *depth = shared ? shared_depth : NULL;
+	uint32_t dw = (w + 31) & ~31, dh = (h + 31) & ~31;
+	if (data && !depth) {
+		uint32_t dbytes = dw * dh * 4;
+		if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= dbytes / 1024 + 1 + RESERVE_RAM_KB)
+			depth = gpuBlock(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, dbytes, &t->depth_uid);
+		bytes += dbytes;
 	}
-	vita2d_texture_set_alloc_memblock_type(type);
-	if (!tex || !tex->gxm_rtgt || tex->depth_UID < 0) {
-		if (tex) {
-			if (tex->gxm_rtgt)
-				sceGxmDestroyRenderTarget(tex->gxm_rtgt);
-			if (tex->depth_UID >= 0)
-				sceKernelFreeMemBlock(tex->depth_UID);
-			vita2d_free_texture(tex);
-		}
+
+	vita2d_texture *tex = &t->surface;
+	SceGxmRenderTarget *rt = NULL;
+	int ok = data && depth;
+	if (ok) {
+		memset(data, 0, (uint32_t)w * h * 4);
+		SceGxmRenderTargetParams rp;
+		memset(&rp, 0, sizeof(rp));
+		rp.width = w;
+		rp.height = h;
+		// A framebuffer can be drawn in several scenes a frame (another one is drawn in between)
+		rp.scenesPerFrame = 4;
+		rp.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+		rp.driverMemBlock = -1;
+		ok = sceGxmColorSurfaceInit(&tex->gxm_sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+				SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, w, data) >= 0 &&
+			sceGxmDepthStencilSurfaceInit(&tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24, SCE_GXM_DEPTH_STENCIL_SURFACE_TILED,
+				dw, depth, NULL) >= 0 &&
+			sceGxmTextureInitLinear(&tex->gxm_tex, data, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0) >= 0 &&
+			sceGxmCreateRenderTarget(&rp, &rt) >= 0 && rt;
+	}
+	if (!ok) {
+		if (rt)
+			sceGxmDestroyRenderTarget(rt);
+		gpuBlockFree(t->data_uid);
+		gpuBlockFree(t->depth_uid);
+		memset(t, 0, sizeof(*t));
 		if (target_failures++ < 8)
 			GeSgxLog("GeSgx render: target %X %dx%d FAILED (targets %u KB, free CDRAM %u KB, RAM %u KB)\n", (unsigned)fb, w, h,
 				(unsigned)(target_bytes / 1024), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
 		return NULL;
 	}
-
-	// vita2d's render target is for one scene a frame; a framebuffer can be drawn in several
-	// (the game draws another one in between, to use it as a texture)
-	SceGxmRenderTargetParams rp;
-	memset(&rp, 0, sizeof(rp));
-	rp.width = w;
-	rp.height = h;
-	rp.scenesPerFrame = 4;
-	rp.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
-	rp.driverMemBlock = -1;
-	SceGxmRenderTarget *rt = NULL;
-	if (sceGxmCreateRenderTarget(&rp, &rt) >= 0 && rt) {
-		sceGxmDestroyRenderTarget(tex->gxm_rtgt);
-		tex->gxm_rtgt = rt;
-	}
-
-	// vita2d made a depth buffer for it: the shared one instead, when it is big enough
-	int own_depth = 1;
-	void *depth = (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H) ? sharedDepth() : NULL;
-	if (depth) {
-		void *old = NULL;
-		sceKernelGetMemBlockBase(tex->depth_UID, &old);
-		sceGxmDepthStencilSurfaceInit(&tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
-			SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, (w + 31) & ~31, depth, NULL);
-		if (old)
-			sceGxmUnmapMemory(old);
-		sceKernelFreeMemBlock(tex->depth_UID);
-		tex->depth_UID = -1;
-		own_depth = 0;
-	} else {
-		bytes += (uint32_t)((w + 31) & ~31) * ((h + 31) & ~31) * 4;
-	}
+	tex->gxm_rtgt = rt;
+	tex->data_UID = -1;
+	tex->depth_UID = -1;
+	tex->palette_UID = 0;
 
 	t->fb = fb;
 	t->w = (uint16_t)w;
 	t->h = (uint16_t)h;
 	t->tex = tex;
 	t->fresh = 1;
-	t->own_depth = own_depth;
 	t->used = target_clock;
 	t->bytes = bytes;
 	t->view = *tex;
 	sceGxmTextureSetFormat(&t->view.gxm_tex, SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR);
 	target_bytes += bytes;
 	GeSgxLog("GeSgx render: target %X %dx%d in %s, depth %s | targets %u KB, free CDRAM %u KB, RAM %u KB\n",
-		(unsigned)fb, w, h, in_cdram ? "CDRAM" : "RAM", own_depth ? "own" : "shared", (unsigned)(target_bytes / 1024),
+		(unsigned)fb, w, h, in_cdram ? "CDRAM" : "RAM", t->depth_uid >= 0 ? "own" : "shared", (unsigned)(target_bytes / 1024),
 		(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
 	return t;
 }
 
-// The rendering of framebuffer fb, w x h, made (or remade, other size) if needed
+/*
+	The rendering of framebuffer fb, w x h. When no new one can be made
+	(memory), one of the same size not drawn in this frame is taken over
+	as it is: the double buffers of a game then share one rendering, which
+	each frame draws anew, instead of being made and freed every frame.
+*/
 static Target *getTarget(uint32_t fb, int w, int h) {
 	Target *t = findTarget(fb);
 	if (t && t->w == w && t->h == h) {
@@ -663,26 +685,38 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 		freeTarget(t);
 
 	uint32_t need = (uint32_t)w * h * 4;
-	for (;;) {
-		// A free slot within the budget, or the least recently used one (not of this frame) given up
-		int i, slot = -1, oldest = -1;
-		for (i = 0; i < GE_SGX_MAX_FBS; i++) {
-			if (!targets[i].tex) {
-				if (slot < 0)
-					slot = i;
-			} else if (targets[i].used != target_clock && (oldest < 0 || targets[i].used < targets[oldest].used)) {
+	int i, slot = -1, same = -1, oldest = -1;
+	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
+		Target *c = &targets[i];
+		if (!c->tex) {
+			if (slot < 0)
+				slot = i;
+		} else if (c->used != target_clock) {
+			if (c->w == w && c->h == h && (same < 0 || c->used < targets[same].used))
+				same = i;
+			if (oldest < 0 || c->used < targets[oldest].used)
 				oldest = i;
-			}
 		}
-		if (slot >= 0 && target_bytes + need <= MAX_TARGET_BYTES) {
-			t = createTarget(&targets[slot], fb, w, h);
-			if (t || oldest < 0)
-				return t;
-		} else if (oldest < 0) {
-			return NULL;
-		}
-		freeTarget(&targets[oldest]);
 	}
+	if (slot >= 0 && target_bytes + need <= MAX_TARGET_BYTES) {
+		t = createTarget(&targets[slot], fb, w, h);
+		if (t)
+			return t;
+	}
+	if (same >= 0) {
+		t = &targets[same];
+		if (target_retags++ < 8)
+			GeSgxLog("GeSgx render: rendering of %X (%dx%d) taken over by %X (memory)\n", (unsigned)t->fb, w, h, (unsigned)fb);
+		t->fb = fb;
+		t->used = target_clock;
+		return t;
+	}
+	// Another size: the oldest one given up for it
+	if (oldest >= 0) {
+		freeTarget(&targets[oldest]);
+		return createTarget(&targets[oldest], fb, w, h);
+	}
+	return NULL;
 }
 
 /* ---- Exact scissor, culling ---- */
