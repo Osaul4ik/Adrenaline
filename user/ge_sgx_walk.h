@@ -193,6 +193,8 @@ typedef struct {
 	int gpu_transform;
 	uint32_t gpu_bad[GE_SGX_GPU_BAD_MAX];
 	int ngpu_bad;
+	// PSP RAM the GPU can read directly (frame->direct): vertices there are not copied
+	uint32_t direct_start, direct_size;
 	GeSgxAlias aliases[GE_SGX_MAX_ALIASES];
 	int naliases;
 

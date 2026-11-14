@@ -39,7 +39,7 @@
 #include "ge_sgx_texconv.h"
 
 #define MAX_TEXTURES 512
-#define BUDGET_BYTES (10 * 1024 * 1024)
+#define BUDGET_BYTES (12 * 1024 * 1024)
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
 #define STAGING_BYTES (1024 * 1024)

@@ -102,7 +102,7 @@ typedef struct {
 
 	// GPU transform: the vertices are the PSP's, the vertex program transforms them
 	uint8_t gpu;
-	uint8_t reserved2;
+	uint8_t direct;     // base is an offset in PSP RAM, which the GPU reads where it is
 	uint16_t vkey;      // vertex program key (GE_SGX_VS_*)
 	uint32_t vtype;     // GE vertex type: the attribute formats and offsets
 	uint32_t ucommon;   // byte offsets of its uniform buffers in the uniform arena
@@ -130,6 +130,7 @@ typedef struct {
 	uint8_t *raw;
 	uint32_t max_raw;
 	uint32_t nraw;       // bytes
+	const uint8_t *direct; // PSP RAM as the GPU sees it (NULL: not mapped), see GeSgxWalker.direct_*
 	const GeSgxVertex *vertices_gpu;
 	const uint16_t *indices_gpu;
 	const uint8_t *uniforms_gpu;

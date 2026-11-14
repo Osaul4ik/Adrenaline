@@ -559,7 +559,7 @@ void geSgxRender(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 		if (d->gpu) {
 			sceGxmSetVertexUniformBuffer(ctx, 0, frame->uniforms_gpu + d->ucommon);
 			sceGxmSetVertexUniformBuffer(ctx, 1, frame->uniforms_gpu + d->uobject);
-			sceGxmSetVertexStream(ctx, 0, frame->raw + d->base);
+			sceGxmSetVertexStream(ctx, 0, (d->direct ? frame->direct : frame->raw) + d->base);
 			stats->gpu_draws++;
 		} else {
 			sceGxmSetVertexStream(ctx, 0, &frame->vertices_gpu[d->base]);

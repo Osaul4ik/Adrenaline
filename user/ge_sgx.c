@@ -217,6 +217,7 @@ static uint32_t frames_dropped = 0, frames_published = 0, frames_skipped = 0;
 #define STAGING_SIZE OFF_RAW
 
 static uint8_t *staging = NULL;
+static uint32_t direct_size = 0; // PSP RAM mapped for the GPU, from 0x08800000
 
 static int initSlots(void) {
 	if (slots_ready)
@@ -250,6 +251,7 @@ static int initSlots(void) {
 		f->max_uniforms = FRAME_UNIFORMS;
 		f->raw = vb + OFF_RAW;
 		f->max_raw = FRAME_RAW;
+		f->direct = direct_size ? ram_map + 0x00800000u : NULL;
 		f->vertices_gpu = (const GeSgxVertex *)(vb + OFF_VERTICES);
 		f->indices_gpu = (const uint16_t *)(vb + OFF_INDICES);
 		f->uniforms_gpu = vb + OFF_UNIFORMS;
@@ -699,12 +701,22 @@ static int GeSgxThread(SceSize args, void *argp) {
 	}
 	GeSgxLog("GeSgx: RAM map %08X, VRAM map %08X\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
 
-	// Could the GPU read PSP memory where it is (no vertex copies)? Probe only, for the log
-	{
-		void *probe = (void *)(ram_map + 0x00800000u);
-		int map_res = sceGxmMapMemory(probe, 0x10000, SCE_GXM_MEMORY_ATTRIB_READ);
-		int unmap_res = map_res >= 0 ? sceGxmUnmapMemory(probe) : 0;
-		GeSgxLog("GeSgx: GPU map of PSP RAM: %08X (unmap %08X)\n", (unsigned)map_res, (unsigned)unmap_res);
+	/*
+		The GPU reads PSP RAM where it is: vertex data is not copied. The
+		user part (from 0x08800000), as much as maps: 56, 24 or 8 MB.
+	*/
+	if (!direct_size) {
+		static const uint32_t sizes[] = { 56u << 20, 24u << 20, 8u << 20 };
+		int res = -1;
+		unsigned k;
+		for (k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+			res = sceGxmMapMemory((void *)(ram_map + 0x00800000u), sizes[k], SCE_GXM_MEMORY_ATTRIB_READ);
+			if (res >= 0) {
+				direct_size = sizes[k];
+				break;
+			}
+		}
+		GeSgxLog("GeSgx: GPU map of PSP RAM: %u MB (%08X)\n", (unsigned)(direct_size >> 20), (unsigned)res);
 	}
 
 	geSgxWalkerInit(&walker, blockFn, NULL);
@@ -719,6 +731,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 			walker.bulk_fn = bulkFn;
 			walker.clock_fn = clockUs;
 			walker.gpu_transform = 1;
+			walker.direct_start = RAM_START + 0x00800000u;
+			walker.direct_size = direct_size;
 			acquireSlot();
 		}
 	}
@@ -932,7 +946,7 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
 					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
 					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other,

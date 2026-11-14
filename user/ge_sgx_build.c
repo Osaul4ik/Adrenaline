@@ -1088,6 +1088,17 @@ static int rawCopy(GeSgxWalker *w, GeSgxFrameData *f, uint32_t src, uint32_t byt
 	return 1;
 }
 
+// Vertex data in PSP RAM the GPU has mapped: its offset there (4 byte aligned for the GPU)
+static int directVertices(const GeSgxWalker *w, const GeSgxFrameData *f, uint32_t addr, uint32_t bytes, uint32_t *off) {
+	if (!f->direct || !w->direct_size)
+		return 0;
+	addr &= 0x0FFFFFFFu; // uncached and kernel mirrors
+	if ((addr & 3) || addr < w->direct_start || addr - w->direct_start + bytes > w->direct_size)
+		return 0;
+	*off = addr - w->direct_start;
+	return 1;
+}
+
 /*
 	Scattered indices: each vertex they use once, appended to the raw
 	arena; prim_index becomes local. The stamp tells this primitive's
@@ -1271,7 +1282,13 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			why = GE_SGX_CPU_LAYOUT;
 		else if (!gpuUniforms(w, f, l, xp))
 			why = GE_SGX_CPU_FULL;
-		else if (range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES &&
+		else if (range <= GE_SGX_MAX_DRAW_VERTICES && directVertices(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
+			// The GPU reads the PSP's memory: nothing to copy
+			gpu = 2;
+			for (i = 0; i < count; i++)
+				prim_index[i] -= imin;
+			nv = range;
+		} else if (range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES &&
 		         (!l->index_size || range <= 2 * count + 16)) {
 			if (rawCopy(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
 				gpu = 1;
@@ -1426,6 +1443,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 
 	if (gpu) {
 		f->prims_gpu++;
+		d.direct = gpu == 2;
 		d.gpu = 1;
 		d.vkey = (uint16_t)gpu_vkey;
 		d.vtype = reg(w, GE_CMD_VERTEXTYPE);
@@ -1435,7 +1453,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		// The same vertex buffer as the previous draw: its indices continue from that base
 		if (f->ndraws > 0) {
 			GeSgxDraw *p = &f->draws[f->ndraws - 1];
-			if (p->gpu && p->first + p->count == istart && sameState(p, &d) && p->vtype == d.vtype &&
+			if (p->gpu && p->direct == d.direct && p->first + p->count == istart && sameState(p, &d) && p->vtype == d.vtype &&
 			    p->ucommon == d.ucommon && p->uobject == d.uobject && raw_off >= p->base &&
 			    (raw_off - p->base) % l->size == 0 && (raw_off - p->base) / l->size + nv <= GE_SGX_MAX_DRAW_VERTICES) {
 				uint16_t delta = (uint16_t)((raw_off - p->base) / l->size);
@@ -1488,10 +1506,32 @@ void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data) {
 }
 
 // The CLUT of the last LOADCLUT, read the first time a draw uses it
+/*
+	Games load the same few CLUTs again and again (each object): within a
+	frame one read and hash per CLUT address is enough.
+*/
+#define CLUT_CACHE 8
+static struct {
+	const GeSgxWalker *w;
+	uint32_t addr, bytes, flips, hash;
+	uint8_t data[GE_SGX_CLUT_BYTES];
+} clut_cache[CLUT_CACHE];
+static int clut_next = 0;
+
 static void readClut(GeSgxWalker *w) {
 	if (w->clut_read)
 		return;
 	w->clut_read = 1;
+	int i;
+	for (i = 0; i < CLUT_CACHE; i++) {
+		if (clut_cache[i].w == w && clut_cache[i].flips == w->flips && clut_cache[i].addr == w->clut_addr &&
+		    clut_cache[i].bytes == w->clut_load_bytes && w->clut_load_bytes) {
+			memcpy(w->clut, clut_cache[i].data, w->clut_load_bytes);
+			w->clut_bytes = w->clut_load_bytes;
+			w->clut_hash = clut_cache[i].hash;
+			return;
+		}
+	}
 	if (w->clut_load_bytes == 0 || !geSgxRead(w, w->clut_addr, w->clut, w->clut_load_bytes)) {
 		w->clut_bytes = 0;
 		w->clut_hash = 0;
@@ -1499,6 +1539,14 @@ static void readClut(GeSgxWalker *w) {
 	}
 	w->clut_bytes = w->clut_load_bytes;
 	w->clut_hash = geSgxHash(w->clut, w->clut_bytes);
+	i = clut_next;
+	clut_next = (clut_next + 1) % CLUT_CACHE;
+	clut_cache[i].w = w;
+	clut_cache[i].addr = w->clut_addr;
+	clut_cache[i].bytes = w->clut_bytes;
+	clut_cache[i].flips = w->flips;
+	clut_cache[i].hash = w->clut_hash;
+	memcpy(clut_cache[i].data, w->clut, w->clut_bytes);
 }
 
 void geSgxBuildTransfer(GeSgxWalker *w) {

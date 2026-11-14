@@ -836,6 +836,39 @@ static void testGpuTransform(void) {
 	w->gpu_transform = 0;
 }
 
+/* With PSP RAM mapped for the GPU, vertices are used where they are */
+static void testGpuDirect(void) {
+	resetFrame();
+	frame.raw = fraw;
+	frame.max_raw = sizeof(fraw);
+	frame.uniforms = funi;
+	frame.max_uniforms = sizeof(funi);
+	frame.direct = ram;
+	w->gpu_transform = 1;
+	w->direct_start = RAM_BASE;
+	w->direct_size = RAM_SIZE;
+
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (4u << 16) | 4));    // strip 0..3 at 0x08900000
+	emit(&l, C(0x04, (3u << 16) | 3));    // 4..6 right after: same draw
+	emit(&l, C(0x01, 0x900002));           // not 4 byte aligned: copied
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	geSgxBuildFinish(w);
+
+	CHECK(frame.ndraws == 2 && fdraws[0].direct && fdraws[0].base == 0x900000 - (RAM_BASE & 0xFFFFFF) + (0x08000000 - RAM_BASE) && fdraws[0].count == 9 && fidx[6] == 4,
+	      "direct draws %u direct %u base %X count %u idx %u", frame.ndraws, fdraws[0].direct, fdraws[0].base, fdraws[0].count, fidx[6]);
+	CHECK(frame.ndraws == 2 && !fdraws[1].direct && fdraws[1].gpu && frame.nraw > 0, "unaligned copied: direct %u raw %u", fdraws[1].direct, frame.nraw);
+	w->gpu_transform = 0;
+	w->direct_size = 0;
+}
+
 static void testTransferAlias(void) {
 	resetFrame();
 	L l = { 0x08800000 };
@@ -989,6 +1022,7 @@ int main(void) {
 	testBuild3D();
 	testLightingSkinning();
 	testGpuTransform();
+	testGpuDirect();
 	testTransferAlias();
 	testTexconv();
 
