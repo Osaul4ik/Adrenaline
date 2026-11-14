@@ -219,6 +219,9 @@ int geSgxRead(GeSgxWalker *w, uint32_t addr, void *dst, uint32_t size);
 void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l);
 void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data);
 void geSgxBuildTransfer(GeSgxWalker *w);
+// The traced frame's lines so far, and starting them again
+const char *geSgxBuildTraceText(uint32_t *len);
+void geSgxBuildTraceClear(GeSgxWalker *w);
 // Before the frame is published: copies the vertex data still pending
 void geSgxBuildFinish(GeSgxWalker *w);
 

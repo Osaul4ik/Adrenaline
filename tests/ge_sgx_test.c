@@ -927,6 +927,62 @@ static void testFbTexture(void) {
 	CHECK(found, "fb 0x88000 256x128 listed");
 }
 
+/* A framebuffer as texture with generated coordinates (texture matrix, environment map): scaled to the texture's part too */
+static void testFbTextureGenerated(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0x80FFFFFF, 0, 0);
+	spriteVertex(v + 16, 256, 128, 0x80FFFFFF, 0, 0);
+	/* float uv, float xyz: 20 bytes */
+	static const float pos[3][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 } };
+	int i;
+	for (i = 0; i < 3; i++) {
+		wf(0x08901000 + i * 20, 0.25f);
+		wf(0x08901000 + i * 20 + 4, 0.75f);
+		wf(0x08901000 + i * 20 + 8, pos[i][0]);
+		wf(0x08901000 + i * 20 + 12, pos[i][1]);
+		wf(0x08901000 + i * 20 + 16, pos[i][2]);
+	}
+	static const float ident[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+
+	L l = { 0x08800000 };
+	/* draw into 0x88000 (256 x 128) */
+	emit(&l, C(0x9C, 0x88000));
+	emit(&l, C(0x9D, 256));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (127 << 10) | 255));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	/* then a 3D triangle on the screen, that buffer as a 512 x 256 texture, uv from the texture matrix */
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	setup3D(&l);
+	matrix(&l, 0x40, ident, 12);
+	emit(&l, C(0xC0, (1u << 8) | 1));      // texture matrix of the uv
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xA0, 0x088000));
+	emit(&l, C(0xA8, (0x04 << 16) | 256));
+	emit(&l, C(0xB8, (8 << 8) | 9));       // 512 x 256
+	emit(&l, C(0xC3, GE_TFMT_5650));
+	emit(&l, C(0x12, (3u << 0) | VT_POSF));
+	emit(&l, C(0x01, 0x901000));
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 2, "draws %u", frame.ndraws);
+	if (frame.ndraws == 2) {
+		GeSgxDraw *d = &fdraws[1];
+		GeSgxVertex *cv = &fverts[d->base];
+		/* (0.25, 0.75) of a 512 x 256 texture: texels (128, 192) of a 256 x 128 buffer */
+		CHECK(d->fbtex == 0x88000 + 1 && feq(cv->u, 0.5f) && feq(cv->v, 1.5f), "fb texture %X generated uv %f %f", d->fbtex, cv->u, cv->v);
+	}
+}
+
 static void testTransferAlias(void) {
 	resetFrame();
 	L l = { 0x08800000 };
@@ -1082,6 +1138,7 @@ int main(void) {
 	testGpuTransform();
 	testGpuDirect();
 	testFbTexture();
+	testFbTextureGenerated();
 	testTransferAlias();
 	testTexconv();
 

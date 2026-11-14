@@ -310,25 +310,39 @@ static void acquireSlot(void) {
 }
 
 // Walker thread, at a display flip of fb
+static void logRaw(const char *text, uint32_t len);
+
 static void publishSlot(uint32_t top) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
 
 	/*
-		Diagnostics: a frame of the race (many draws) traced into the log, about
-		10 s, 40 s and 80 s into it; the trace ends with the first frame built
+		Diagnostics: a frame of the race traced into the log, about 10 s, 40 s and
+		80 s into it. The lines wait in memory until the frame is done: written
+		if it has many draws (the race), started again with the next one if not.
 	*/
-	static uint32_t big_frames = 0;
+	static uint32_t big_frames = 0, trace_tries = 0;
 	if (walker.trace && building && walker.frame) {
-		walker.trace = 0;
-		GeSgxLog("GeSgx T: end, %u draws, shown fb %X\n", (unsigned)building->data.ndraws, (unsigned)fb);
+		if (building->data.ndraws >= 1000) {
+			uint32_t len;
+			const char *text = geSgxBuildTraceText(&len);
+			GeSgxLog("GeSgx T: begin (%u lines)\n", (unsigned)walker.trace_lines);
+			logRaw(text, len);
+			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)building->data.ndraws, (unsigned)fb,
+				(unsigned)walker.naliases);
+			walker.trace = 0;
+		} else if (++trace_tries >= 600) {
+			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
+			walker.trace = 0;
+		}
+		geSgxBuildTraceClear(&walker);
 	}
 	if (building && walker.frame && building->data.ndraws >= 300) {
 		big_frames++;
-		if (walker.log_fn && (big_frames == 300 || big_frames == 1200 || big_frames == 2400)) {
+		if (walker.log_fn && !walker.trace && (big_frames == 300 || big_frames == 1200 || big_frames == 2400)) {
 			walker.trace = 1;
-			walker.trace_lines = 0;
-			GeSgxLog("GeSgx T: begin\n");
+			trace_tries = 0;
+			geSgxBuildTraceClear(&walker);
 		}
 	}
 
@@ -502,6 +516,17 @@ static void writeAck(uint32_t session, uint32_t read) {
 	ack->session = session;
 	ack->read = read;
 	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
+}
+
+// Text written to the log as it is (the trace)
+static void logRaw(const char *text, uint32_t len) {
+	if (!len)
+		return;
+	SceUID fd = sceIoOpen(LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, text, len);
+		sceIoClose(fd);
+	}
 }
 
 void GeSgxLog(const char *fmt, ...) {

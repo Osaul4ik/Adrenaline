@@ -110,9 +110,9 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("		float3 s = fl.y < 0.5 ? p : (fl.y < 1.5 ? float3(t, 0.0) : (fl.y < 2.5 ? normalize(n) : n));\n");
 	S("		float3 q = uC[%d].xyz * s.x + uC[%d].xyz * s.y + uC[%d].xyz * s.z + uC[%d].xyz;\n",
 		GE_SGX_UC_TGEN, GE_SGX_UC_TGEN + 1, GE_SGX_UC_TGEN + 2, GE_SGX_UC_TGEN + 3);
-	S("		vTexcoord = q.xy / (abs(q.z) > 0.000001 ? q.z : 1.0);\n");
-	S("	} else {\n		vTexcoord = (float2(dot(uC[%d].xyz, wn), dot(uC[%d].xyz, wn)) + 1.0) * 0.5;\n	}\n",
-		GE_SGX_UC_ENVLS, GE_SGX_UC_ENVLS + 1);
+	S("		vTexcoord = q.xy / (abs(q.z) > 0.000001 ? q.z : 1.0) * uO[%d].xy;\n", GE_SGX_UO_UV);
+	S("	} else {\n		vTexcoord = (float2(dot(uC[%d].xyz, wn), dot(uC[%d].xyz, wn)) + 1.0) * 0.5 * uO[%d].xy;\n	}\n",
+		GE_SGX_UC_ENVLS, GE_SGX_UC_ENVLS + 1, GE_SGX_UO_UV);
 
 	// Colour; 16 bit ones are decoded here (exact in float: integers below 65536)
 	if (col16) {

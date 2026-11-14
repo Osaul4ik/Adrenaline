@@ -229,6 +229,8 @@ typedef struct {
 	const GeSgxMatrices *m;
 	float vp_x[2], vp_y[2], vp_z[2]; // pixel = c[0] * clip + c[1] * w
 	float uscale, vscale, uoff, voff;
+	// A framebuffer's rendering as the texture: the texture's part of it (generated coordinates times these)
+	float fbk_u, fbk_v;
 	int uvgen, uvproj;
 	float envls[2][3];
 	int fog;
@@ -760,13 +762,13 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 			float uvw[3];
 			xf43(uvw, x->m->tgen, src[0], src[1], src[2]);
 			float q = (uvw[2] > 1e-6f || uvw[2] < -1e-6f) ? 1.0f / uvw[2] : 1.0f;
-			out->u = uvw[0] * q;
-			out->v = uvw[1] * q;
+			out->u = uvw[0] * q * x->fbk_u;
+			out->v = uvw[1] * q * x->fbk_v;
 			break;
 		}
 		case 2: // environment map
-			out->u = (1.0f + x->envls[0][0] * wnrm[0] + x->envls[0][1] * wnrm[1] + x->envls[0][2] * wnrm[2]) * 0.5f;
-			out->v = (1.0f + x->envls[1][0] * wnrm[0] + x->envls[1][1] * wnrm[1] + x->envls[1][2] * wnrm[2]) * 0.5f;
+			out->u = (1.0f + x->envls[0][0] * wnrm[0] + x->envls[0][1] * wnrm[1] + x->envls[0][2] * wnrm[2]) * 0.5f * x->fbk_u;
+			out->v = (1.0f + x->envls[1][0] * wnrm[0] + x->envls[1][1] * wnrm[1] + x->envls[1][2] * wnrm[2]) * 0.5f * x->fbk_v;
 			break;
 		default:
 			out->u = tc[0] * x->uscale + x->uoff;
@@ -988,10 +990,26 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	the traced frame (walker trace set) in order.
 */
 #define SEEN_MAX 160
-#define TRACE_LINES 400
+#define TRACE_LINES 600
 static uint32_t seen[SEEN_MAX];
 static uint32_t nseen = 0;
 static uint32_t trace_fb_key = 0, trace_tex_key = 0;
+
+// The traced frame's lines, written to the log only if it is a frame of the race
+#define TRACE_BYTES (48 * 1024)
+static char trace_text[TRACE_BYTES];
+static uint32_t trace_len = 0;
+
+const char *geSgxBuildTraceText(uint32_t *len) {
+	*len = trace_len;
+	return trace_text;
+}
+
+void geSgxBuildTraceClear(GeSgxWalker *w) {
+	trace_len = 0;
+	w->trace_lines = 0;
+	trace_fb_key = trace_tex_key = 0;
+}
 
 static int seenFirst(uint32_t a, uint32_t b, uint32_t c) {
 	uint32_t k = (a * 0x9E3779B1u) ^ ((b + 0x7F4A7C15u) * 0x85EBCA77u) ^ ((c + 0x165667B1u) * 0xC2B2AE3Du);
@@ -1012,21 +1030,24 @@ static void diag(GeSgxWalker *w, int traced, uint32_t a, uint32_t b, uint32_t c,
 	if (!w->log_fn)
 		return;
 	int first = seenFirst(a, b, c);
-	const char *kind;
-	if (w->trace && traced && w->trace_lines < TRACE_LINES) {
-		w->trace_lines++;
-		kind = "T";
-	} else if (first) {
-		kind = "seen";
-	} else {
+	int trace = w->trace && traced && w->trace_lines < TRACE_LINES;
+	if (!trace && !first)
 		return;
-	}
 	char line[200];
 	va_list ap;
 	va_start(ap, fmt);
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
-	w->log_fn("GeSgx %s: %s\n", kind, line);
+	if (trace) {
+		w->trace_lines++;
+		int n = snprintf(trace_text + trace_len, TRACE_BYTES - trace_len, "GeSgx T: %s\n", line);
+		if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES)
+			trace_len += (uint32_t)n;
+		else
+			trace_text[trace_len] = '\0';
+	}
+	if (first)
+		w->log_fn("GeSgx seen: %s\n", line);
 }
 
 // The current framebuffer and VRAM texture of a draw (state just built)
@@ -1045,6 +1066,9 @@ static void diagDraw(GeSgxWalker *w, const GeSgxFrameData *f, const GeSgxDraw *d
 	if (!(d->flags & GE_SGX_DRAW_TEXTURED) || taddr < 0x04000000u || taddr >= 0x04800000u)
 		return;
 	uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, size = reg(w, GE_CMD_TEXSIZE0);
+	// Only the formats a framebuffer has (CLUT and compressed ones are plain textures kept in VRAM)
+	if (tfmt > 3)
+		return;
 	uint32_t bw = reg(w, GE_CMD_TEXBUFWIDTH0) & 0x7FF;
 	uint32_t tkey = taddr ^ (tfmt << 28) ^ (size * 131u) ^ (d->fb * 7u);
 	traced = tkey != trace_tex_key;
@@ -1183,7 +1207,11 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 	}
 
 	set4(o[GE_SGX_UO_SCALE], compScale(l->pos_fmt), compScale(l->nrm_fmt), compScale(l->tc_fmt), compScale(l->wt_fmt));
-	set4(o[GE_SGX_UO_UV], x->uscale, x->vscale, x->uoff, x->voff);
+	// Scale and offset of the coordinates as they are; the generated ones only scaled (to a framebuffer's part)
+	if (x->uvgen == 0)
+		set4(o[GE_SGX_UO_UV], x->uscale, x->vscale, x->uoff, x->voff);
+	else
+		set4(o[GE_SGX_UO_UV], x->fbk_u, x->fbk_v, 0.0f, 0.0f);
 	if (l->wt_fmt) {
 		for (i = 0; i < 8; i++)
 			o[GE_SGX_UO_WMASK + i / 4][i & 3] = (uint32_t)i < l->weights ? 1.0f : 0.0f;
@@ -1360,6 +1388,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		fbNote(w, f, &cached_d);
 		cached_frame = f;
 		cached_x.tex_w = cached_x.tex_h = 1.0f;
+		cached_x.fbk_u = cached_x.fbk_v = 1.0f;
 		int rt = -1;
 		uint32_t taddr = 0;
 		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
@@ -1380,6 +1409,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			cached_d.fbtex = fbreg[rt].fb + 1;
 			cached_x.tex_w = 1.0f / fbreg[rt].w;
 			cached_x.tex_h = 1.0f / fbreg[rt].h;
+			cached_x.fbk_u = kx;
+			cached_x.fbk_v = ky;
 			cached_x.uscale *= kx;
 			cached_x.uoff *= kx;
 			cached_x.vscale *= ky;

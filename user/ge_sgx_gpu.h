@@ -69,7 +69,7 @@ enum {
 enum {
 	GE_SGX_UO_WORLD = 0,     // 4 columns
 	GE_SGX_UO_SCALE = 4,     // position, normal, texture coordinate, weight scale
-	GE_SGX_UO_UV = 5,        // u scale, v scale, u offset, v offset
+	GE_SGX_UO_UV = 5,        // u scale, v scale, u offset, v offset (generated coordinates: u, v scale only)
 	GE_SGX_UO_WMASK = 6,     // 2: 1 for the weights the vertex has
 	GE_SGX_UO_BONES = 8,     // 8 x 4 columns
 	GE_SGX_UO_COUNT = 40,
