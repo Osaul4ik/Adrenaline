@@ -585,13 +585,51 @@ int AdrenalineDraw(SceSize args, void *argp) {
     int sgx_full = sgx_active && config.sgx_renderer == GE_SGX_MODE_FULL && !menu_open;
     GeSgxDrawTick();
     if (sgx_active && !sgx_tex && !sgx_tex_failed) {
-      // In main RAM: the emulator has only a few MB of CDRAM left
+      /*
+        The emulator leaves our process about 4 MB of CDRAM (the GPU's fast
+        memory): exactly the target and its depth buffer, which the GPU
+        writes and reads every frame. Main RAM if it is not there.
+      */
+      uint32_t cdram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
+      uint32_t ram_kb = GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW);
       SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
-      vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
+      int in_cdram = 1;
+      vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
       sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+      if (!sgx_tex) {
+        in_cdram = 0;
+        vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
+        sgx_tex = vita2d_create_empty_texture_format(SCREEN_WIDTH, SCREEN_HEIGHT, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+      }
       vita2d_texture_set_alloc_memblock_type(type);
       sgx_tex_failed = (sgx_tex == NULL);
-      GeSgxLog("GeSgx: draw target %s\n", sgx_tex ? "created" : "FAILED");
+
+      // vita2d puts the depth buffer in main RAM: moved into CDRAM when it fits
+      int depth_cdram = 0;
+      if (sgx_tex) {
+        uint32_t aw = (SCREEN_WIDTH + 31) & ~31, ah = (SCREEN_HEIGHT + 31) & ~31;
+        uint32_t dsize = (4 * aw * ah + 256 * 1024 - 1) & ~(256 * 1024 - 1);
+        SceUID dm = sceKernelAllocMemBlock("SceGeSgxDepth", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, dsize, NULL);
+        void *dmem = NULL;
+        if (dm >= 0 && sceKernelGetMemBlockBase(dm, &dmem) >= 0 &&
+            sceGxmMapMemory(dmem, dsize, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) >= 0) {
+          void *old = NULL;
+          sceKernelGetMemBlockBase(sgx_tex->depth_UID, &old);
+          sceGxmDepthStencilSurfaceInit(&sgx_tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
+            SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, aw, dmem, NULL);
+          if (old)
+            sceGxmUnmapMemory(old);
+          sceKernelFreeMemBlock(sgx_tex->depth_UID);
+          sgx_tex->depth_UID = dm;
+          depth_cdram = 1;
+        } else if (dm >= 0) {
+          sceKernelFreeMemBlock(dm);
+        }
+      }
+      GeSgxLog("GeSgx: draw target %s (colour in %s, depth in %s) | free before: CDRAM %u KB, RAM %u KB | after: CDRAM %u KB, RAM %u KB\n",
+        sgx_tex ? "created" : "FAILED", in_cdram ? "CDRAM" : "RAM", depth_cdram ? "CDRAM" : "RAM",
+        (unsigned)cdram_kb, (unsigned)ram_kb,
+        (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
       if (sgx_tex) {
         int r = geSgxRenderInit();
         GeSgxLog("GeSgx: renderer init %d\n", r);

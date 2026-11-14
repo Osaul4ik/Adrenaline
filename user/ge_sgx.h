@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 #include <psp2/types.h>
+#include <psp2/kernel/sysmem.h>
 #include "ge_sgx_walk.h"
 #include "ge_sgx_frame.h"
 
@@ -54,6 +55,9 @@ typedef struct {
 
 // Appends a line to ux0:data/adrenaline_sgx_log.txt
 void GeSgxLog(const char *fmt, ...);
+
+// Free memory of that type our process can still allocate (in 1 MB blocks), in KB
+uint32_t GeSgxFreeKB(SceKernelMemBlockType type);
 
 // Thread to report in the log (CPU use, core), no-op when the option is off
 void GeSgxTrackThread(SceUID uid, const char *name);

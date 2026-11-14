@@ -503,6 +503,10 @@ static uint32_t probeMemory(SceKernelMemBlockType type, int max_blocks) {
 	return (uint32_t)n * 1024;
 }
 
+uint32_t GeSgxFreeKB(SceKernelMemBlockType type) {
+	return probeMemory(type, 64);
+}
+
 static void publish(const GeSgxRect *rects, int nrects, const GeSgxStats *stats, const GeSgxFrame *rates) {
 	frame_seq++;
 	__sync_synchronize();
