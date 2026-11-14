@@ -31,13 +31,13 @@
 #include "ge_sgx_gpu.h"
 
 // Bump when the generated sources change: older cached programs are not used
-#define GE_SGX_CG_VERSION 1
+#define GE_SGX_CG_VERSION 2
 
 #define GE_SGX_CG_DIR "ux0:data/adrenaline/sgx_shaders"
 // Written by adrenaline_user when it could not compile: the app compiles all programs at its next start
 #define GE_SGX_CG_REQUEST GE_SGX_CG_DIR "/compile_request"
 
-// Key of the vertex program (fragment program keys are below 0x1000; 0xFFFF
+// Key of the vertex program (fragment program keys are below 0x2000; 0xFFFF
 // was the vertex program of the 2D only renderer)
 #define GE_SGX_SHADER_VERTEX 0xFFFEu
 

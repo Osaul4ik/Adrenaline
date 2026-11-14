@@ -690,6 +690,16 @@ int AdrenalineDraw(SceSize args, void *argp) {
       sgx_skipped_3d = sgx_ref.data->draws_3d;
       GeSgxFrameRendered(&sgx_ref);
 
+      // The shown framebuffer changes (menus, videos, loading screens)
+      static uint32_t last_shown_fb = 0xFFFFFFFFu;
+      static int fb_logs = 0;
+      if (sgx_ref.fb != last_shown_fb && fb_logs < 32) {
+        fb_logs++;
+        last_shown_fb = sgx_ref.fb;
+        GeSgxLog("GeSgx: shown fb %X (%d aliases), %u draws in %u scenes, %u framebuffers drawn\n", (unsigned)sgx_ref.fb, sgx_ref.naliases,
+          (unsigned)sgx_render.draws, (unsigned)sgx_render.scenes, (unsigned)sgx_ref.data->nfbs);
+      }
+
       if (sgx_scenes < 3) {
         sgx_scenes++;
         GeSgxLog("GeSgx: draw scene %d: %u draws, %u vertices, %u waiting, %u other fb, %u 3d, fb %X\n", sgx_scenes,
@@ -871,6 +881,15 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.loops * 1000000ull / (prof_t - prof.start)),
           (unsigned)(prof.sgx / n), (unsigned)(prof.build / n), (unsigned)(prof.copy / n),
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
+        // The last rendered frame: what was drawn and what was not, and why
+        const GeSgxRenderStats *r = &sgx_render;
+        GeSgxLog("GeSgx render: %u draws (gpu %u, %u vertices) in %u scenes, %u us | targets %u (%u KB), other fb %u, re-entered %u | "
+          "not drawn: texture %u, program %u, compiling %u, scissor %u, no target %u | culled %u stencil %u alpha %u fixed blend %u fb textures %u, scissor masks %u\n",
+          (unsigned)r->draws, (unsigned)r->gpu_draws, (unsigned)r->vertices, (unsigned)r->scenes, (unsigned)r->render_us,
+          (unsigned)r->targets, (unsigned)r->target_kb, (unsigned)r->other_fb, (unsigned)r->reentries,
+          (unsigned)r->no_texture, (unsigned)r->no_program, (unsigned)r->waiting, (unsigned)r->scissored, (unsigned)r->no_target,
+          (unsigned)r->culled_draws, (unsigned)r->stencil_draws, (unsigned)r->alpha_draws, (unsigned)r->fix_draws,
+          (unsigned)r->fb_textured, (unsigned)r->scissor_masks);
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }

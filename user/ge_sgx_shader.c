@@ -46,8 +46,9 @@
 #include "ge_sgx.h"
 #include "ge_sgx_shader.h"
 #include "ge_sgx_cg.h"
+#include "ge_sgx_blend.h"
 
-#define MAX_PROGRAMS 512
+#define MAX_PROGRAMS 1024
 #define QUEUE_SIZE 64 // power of two
 
 #define COMPILER_HEAP_SIZE (6 * 1024 * 1024)
@@ -102,6 +103,12 @@ uint32_t geSgxShaderKey(const GeSgxDraw *d) {
 		key |= (1 << 6) | ((uint32_t)(d->atest_func & 7) << 7);
 	if (d->flags & GE_SGX_DRAW_FOG)
 		key |= 1 << 11;
+	if (d->flags & GE_SGX_DRAW_BLEND) {
+		GeSgxBlend b;
+		geSgxBlendSetup(d, &b);
+		if (b.fix)
+			key |= GE_SGX_FS_FIX;
+	}
 
 	return key;
 }

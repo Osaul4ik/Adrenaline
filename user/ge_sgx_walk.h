@@ -117,12 +117,17 @@ typedef struct {
 	uint16_t w, h;        // power of two sizes
 	uint8_t format;       // TEXFORMAT 0..10
 	uint8_t swizzle;
-	uint8_t reserved[2];
+	uint8_t levels;       // mipmap levels (1: level 0 only), each half the size of the one before
+	uint8_t reserved;
 	uint32_t clut_format; // CLUTFORMAT: format 0-1, shift 2-6, mask 8-15, start 16-20
 	const uint8_t *clut;  // the CLUT as LOADCLUT loaded it
 	uint32_t clut_bytes;
 	uint32_t clut_hash;
+	uint32_t level_addr[8]; // levels 1.. (0: addr, bufw)
+	uint16_t level_bufw[8];
 } GeSgxTexDesc;
+
+#define GE_SGX_MAX_LEVELS 8
 
 typedef int32_t (* GeSgxTextureFn)(void *user, const GeSgxTexDesc *desc);
 
@@ -213,6 +218,7 @@ int geSgxRead(GeSgxWalker *w, uint32_t addr, void *dst, uint32_t size);
 
 // Draw building (ge_sgx_build.c), called by the walker
 void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l);
+void geSgxBuildCurve(GeSgxWalker *w, int spline, uint32_t data, const GeSgxVertexLayout *l);
 void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data);
 void geSgxBuildTransfer(GeSgxWalker *w);
 // Before the frame is published: copies the vertex data still pending

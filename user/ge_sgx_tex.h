@@ -31,6 +31,7 @@ typedef struct {
 	uint32_t upload_us;
 	uint32_t checks;    // content checks of cached textures
 	uint32_t failed;    // could not be uploaded (format, memory)
+	uint32_t mip_uploads; // of the uploads with mipmap levels
 } GeSgxTexStats;
 
 // Walker thread

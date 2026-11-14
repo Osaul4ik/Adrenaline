@@ -188,14 +188,41 @@ static int sgxRendererOption(void) {
 	Adrenaline after a reboot (afterwards the system starts the emulator
 	directly).
 */
+// Programs of older versions of the generated sources: never used again
+static void removeOldSgxShaders(void) {
+	char prefix[16], path[160];
+	snprintf(prefix, sizeof(prefix), "v%d_", GE_SGX_CG_VERSION);
+	SceUID dfd = sceIoDopen(GE_SGX_CG_DIR);
+	if (dfd < 0)
+		return;
+	SceIoDirent entry;
+	int removed = 0;
+	while (1) {
+		memset(&entry, 0, sizeof(entry));
+		if (sceIoDread(dfd, &entry) <= 0)
+			break;
+		const char *name = entry.d_name;
+		size_t len = strlen(name);
+		if (name[0] == 'v' && len > 4 && strcmp(name + len - 4, ".gxp") == 0 && strncmp(name, prefix, strlen(prefix)) != 0) {
+			snprintf(path, sizeof(path), GE_SGX_CG_DIR "/%s", name);
+			if (sceIoRemove(path) >= 0)
+				removed++;
+		}
+	}
+	sceIoDclose(dfd);
+	if (removed)
+		printf("SGX renderer: %d old shaders removed.\n", removed);
+}
+
 static void compileSgxShaders(void) {
 	SceIoStat stat;
 	int requested = sceIoGetstat(GE_SGX_CG_REQUEST, &stat) >= 0;
 	if (!requested && sgxRendererOption() < 2)
 		return;
+	removeOldSgxShaders();
 
-	static uint32_t keys[512];
-	int n = geSgxCgAllKeys(keys, 512);
+	static uint32_t keys[2048];
+	int n = geSgxCgAllKeys(keys, 2048);
 	int i, missing = 0;
 	char path[96];
 	for (i = 0; i < n; i++) {
