@@ -883,6 +883,9 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)(prof.swap / n), (unsigned)(prof.sync / n), (unsigned)lcdc_margin, (unsigned)lcdc_misses);
         // The last rendered frame: what was drawn and what was not, and why
         const GeSgxRenderStats *r = &sgx_render;
+        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB, phycont %u KB\n",
+          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW),
+          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW));
         GeSgxLog("GeSgx render: %u draws (gpu %u, %u vertices) in %u scenes, %u us | targets %u (%u KB), other fb %u, re-entered %u | "
           "not drawn: texture %u, program %u, compiling %u, scissor %u, no target %u | culled %u stencil %u alpha %u fixed blend %u fb textures %u, scissor masks %u\n",
           (unsigned)r->draws, (unsigned)r->gpu_draws, (unsigned)r->vertices, (unsigned)r->scenes, (unsigned)r->render_us,

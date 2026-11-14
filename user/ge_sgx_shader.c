@@ -304,6 +304,15 @@ const SceGxmProgram *geSgxShaderGet(uint32_t key) {
 	if (queue_write - queue_read >= QUEUE_SIZE || !startCompiler())
 		return NULL;
 
+	// Not in the cache: which ones (the app compiles every key there is)
+	static int missing_logs = 0;
+	if (missing_logs < 16) {
+		missing_logs++;
+		char path[96];
+		geSgxCgPath(key, path, sizeof(path));
+		GeSgxLog("GeSgx shader %04X: not in the cache (%s)\n", (unsigned)key, path);
+	}
+
 	p->state = STATE_QUEUED;
 	__sync_synchronize();
 	nprograms++;
