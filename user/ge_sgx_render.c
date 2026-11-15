@@ -298,6 +298,20 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 		if (blend & (1u << 14))
 			info.colorMask &= ~SCE_GXM_COLOR_MASK_B;
 	}
+	/*
+		Nothing written (all channels masked: the minimap's mask, written into
+		the depth buffer only, its alpha test cutting the circle): a program
+		writing every channel unchanged instead (blended zero and one), so the
+		GPU runs it whole, its discard included. With no channel written its
+		fragments were not discarded or not tested: the mask wrote no depth
+		around the circle and the map showed outside it.
+	*/
+	if (!(blend & 0x80000000u) && !(info.colorMask & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B))) {
+		info.colorMask = SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
+		info.colorFunc = info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
+		info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ZERO;
+		info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ONE;
+	}
 	const SceGxmBlendInfo *pinfo = &info;
 
 	SceGxmFragmentProgram *program = NULL;
