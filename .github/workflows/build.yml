@@ -133,7 +133,7 @@ jobs:
               (0x6F25E18A, 0xC94850C9), # SceSysmemForDriver ksceKernelAllocMemBlock
               (0x6F25E18A, 0x009E1C61), # SceSysmemForDriver ksceKernelFreeMemBlock
               (0x6F25E18A, 0xA841EDDA), # SceSysmemForDriver ksceKernelGetMemBlockBase
-              (0x6F25E18A, 0x98C15666), # SceSysmemForDriver ksceKernelGetMemBlockPARange
+              (0x6F25E18A, 0x8D160E65), # SceSysmemForDriver ksceKernelVAtoPA (ksceKernelGetPaddr)
               (0x7EE45391, 0x0AB9BF5C), # SceSysclibForDriver memset
               (0xE2C40624, 0x9DCB4B7A), # SceThreadmgrForDriver ksceKernelGetProcessId
               (0x887F19D0, 0x2A43912D), # SceProcEventForDriver ksceKernelRegisterProcEventHandler

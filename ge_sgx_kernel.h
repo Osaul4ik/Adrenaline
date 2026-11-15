@@ -10,9 +10,9 @@
 typedef struct {
 	unsigned int size;
 	int how;          // 1 mapped at the physical address, 2 as a mirror, 0 failed
-	int kernel_err;   // kernel block, physically contiguous and not mapped in the kernel (0: it was)
-	int kernel_err2;  // kernel block, the last way tried (contiguous, then any pages) when all failed
-	int pa_err;       // its physical range
+	int kernel_err;   // kernel block, physically contiguous (0: it was)
+	int kernel_err2;  // kernel block, any pages (when not contiguous either)
+	int pa_err;       // its physical address (contiguous only)
 	unsigned int paddr;
 	int paddr_err;    // user block at the physical address
 	int mirror_err;   // user block mirroring the kernel block

@@ -59,7 +59,6 @@ typedef struct {
 
 static Block blocks[MAX_BLOCKS];
 
-// attr: SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_PHYCONT, _DONT_MAP (the kernel does not need the pages mapped)
 static SceUID allocKernel(SceKernelMemBlockType ktype, SceSize size, uint32_t attr) {
 	SceKernelAllocMemBlockKernelOpt opt;
 	memset(&opt, 0, sizeof(opt));
@@ -168,28 +167,33 @@ int kuGeSgxAllocMemBlock(unsigned int type, unsigned int size, void **base_out, 
 		goto out;
 	}
 
-	// Contiguous and not mapped in the kernel first (its address space is small), then contiguous, then any
-	SceUID kuid = allocKernel(ktype, size, SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_PHYCONT | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_DONT_MAP);
+	// Physically contiguous first (one physical address for all of it), then any pages
+	int phycont = 1;
+	SceUID kuid = allocKernel(ktype, size, SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_PHYCONT);
 	if (kuid < 0) {
 		info.kernel_err = kuid;
-		kuid = allocKernel(ktype, size, SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_PHYCONT);
-	}
-	if (kuid < 0)
+		phycont = 0;
 		kuid = allocKernel(ktype, size, 0);
+	}
 	if (kuid < 0) {
 		info.kernel_err2 = kuid;
 		goto out;
 	}
 
-	SceKernelPARange pa;
-	memset(&pa, 0, sizeof(pa));
-	int r = ksceKernelGetMemBlockPARange(kuid, &pa);
+	int r = -1;
+	uintptr_t paddr = 0;
+	void *kbase = NULL;
+	if (phycont) {
+		r = ksceKernelGetMemBlockBase(kuid, &kbase);
+		if (r >= 0)
+			r = ksceKernelGetPaddr(kbase, &paddr); // ksceKernelVAtoPA in newer SDKs
+	}
 	info.pa_err = r < 0 ? r : 0;
-	info.paddr = pa.addr;
+	info.paddr = paddr;
 
 	SceUID uuid = -1;
-	if (r >= 0 && pa.size >= size) {
-		uuid = allocUser(pid, type, size, pa.addr, -1);
+	if (r >= 0 && paddr) {
+		uuid = allocUser(pid, type, size, paddr, -1);
 		if (uuid >= 0)
 			info.how = 1;
 		else
