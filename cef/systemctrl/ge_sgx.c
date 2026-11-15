@@ -191,12 +191,13 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 
 // VRAM into its shadow, which the Vita side reads (see GE_SGX_VRAM_SHADOW)
 static void copyVram(void) {
-	if (!_sceDmacMemcpy)
-		return;
 	// Kernel addresses: called with k1 = 0 (the flip comes from the game's syscall)
 	int k1 = pspSdkSetK1(0);
 	u32 start = timeNow();
-	_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
+	if (_sceDmacMemcpy)
+		_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
+	else
+		memcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE); // uncached both
 	u32 took = timeNow() - start;
 	pspSdkSetK1(k1);
 	ring->vram_copies++;
@@ -270,9 +271,17 @@ int GeSgxInit(void) {
 	_sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
-	_sceDmacMemcpy = (void *)FindProc("sceDMAManager", "sceDmac", 0x617F3FE6);
-	if (!_sceDmacMemcpy)
-		log("GeSgx: sceDmacMemcpy not found, VRAM not copied\n");
+	// The DMA's memcpy: user library of the DMA manager, or the kernel one of DMACPLUS
+	u32 how = 0;
+	if ((_sceDmacMemcpy = (void *)FindProc("sceDMAManager", "sceDmac", 0x617F3FE6)))
+		how = 1;
+	else if ((_sceDmacMemcpy = (void *)FindProc("sceDMAManager", NULL, 0x617F3FE6)))
+		how = 2;
+	else if ((_sceDmacMemcpy = (void *)FindProc("sceDMACPLUS_Driver", "sceDmacplus_driver", 0xC7D33466)))
+		how = 3;
+	else
+		how = 9;
+	log("GeSgx: VRAM copied with %d\n", (int)how);
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
 	    !_sceGeDrawSync || !_sceGeListSync || !_sceDisplaySetFrameBuf) {
@@ -285,6 +294,7 @@ int GeSgxInit(void) {
 		return -1;
 	}
 
+	ring->vram_copy_how = how;
 	ring->magic = GE_SGX_MAGIC;
 	ring->version = GE_SGX_VERSION;
 	ring->session = shared->session + 1;

@@ -83,7 +83,8 @@ typedef struct {
 	volatile unsigned int vram_copies;   // VRAM copied into the shadow (see GE_SGX_VRAM_SHADOW)
 	volatile unsigned int vram_copy_us;  // total time of those copies
 	volatile unsigned int vram_copy_max_us;
-	unsigned int reserved2[9];
+	volatile unsigned int vram_copy_how;  // 0 none, 1..3 the DMA function found (see systemctrl's ge_sgx.c), 9 the CPU
+	unsigned int reserved2[8];
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
