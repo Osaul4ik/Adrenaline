@@ -25,6 +25,8 @@
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -300,13 +302,14 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	}
 	/*
 		Nothing written (all channels masked: the minimap's mask, written into
-		the depth buffer only, its alpha test cutting the circle): a program
+		the depth buffer only, its alpha test cutting the circle; a clear of
+		the depth only, before it): a program
 		writing every channel unchanged instead (blended zero and one), so the
 		GPU runs it whole, its discard included. With no channel written its
 		fragments were not discarded or not tested: the mask wrote no depth
 		around the circle and the map showed outside it.
 	*/
-	if (!(blend & 0x80000000u) && !(info.colorMask & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B))) {
+	if (!(info.colorMask & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B))) {
 		info.colorMask = SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
 		info.colorFunc = info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
 		info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ZERO;
@@ -1199,6 +1202,61 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	sceGxmSetFrontPointLineWidth(ctx, 1);
 }
 
+/*
+	Diagnostics (L + SELECT): the renderings of the traced frame written as
+	pictures (ux0:data/adrenaline/sgx_dump/<frame>_<fb>.bmp), what this
+	renderer drew, to compare with what is on the screen
+*/
+static void dumpBmp(const char *path, const uint32_t *px, int w, int h, int stride) {
+	SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	if (fd < 0)
+		return;
+	uint8_t hdr[54];
+	memset(hdr, 0, sizeof(hdr));
+	uint32_t size = 54 + (uint32_t)w * h * 4;
+	hdr[0] = 'B'; hdr[1] = 'M';
+	memcpy(hdr + 2, &size, 4);
+	uint32_t v = 54; memcpy(hdr + 10, &v, 4);
+	v = 40; memcpy(hdr + 14, &v, 4);
+	int32_t iw = w, ih = -h; // top-down
+	memcpy(hdr + 18, &iw, 4);
+	memcpy(hdr + 22, &ih, 4);
+	uint16_t s16 = 1; memcpy(hdr + 26, &s16, 2);
+	s16 = 32; memcpy(hdr + 28, &s16, 2);
+	sceIoWrite(fd, hdr, sizeof(hdr));
+	static uint32_t row[1024];
+	int x, y;
+	for (y = 0; y < h; y++) {
+		const uint32_t *src = px + (size_t)y * stride;
+		for (x = 0; x < w && x < 1024; x++) {
+			uint32_t c = src[x]; // ABGR -> BGRA in memory (ARGB word)
+			row[x] = (c & 0xFF00FF00u) | ((c & 0xFFu) << 16) | ((c >> 16) & 0xFFu);
+		}
+		sceIoWrite(fd, row, (SceSize)w * 4);
+	}
+	sceIoClose(fd);
+}
+
+static void dumpFrame(SceGxmContext *ctx, uint32_t frame_no) {
+	sceGxmFinish(ctx);
+	sceIoMkdir("ux0:data/adrenaline/sgx_dump", 0777);
+	char path[96];
+	int i;
+	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
+		Target *t = &targets[i];
+		if (!t->tex)
+			continue;
+		snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_%X.bmp", (unsigned)frame_no, (unsigned)t->fb);
+		dumpBmp(path, vita2d_texture_get_datap(t->tex), t->w, t->h, (int)vita2d_texture_get_stride(t->tex) / 4);
+		GeSgxLog("GeSgx render: dumped %s (%dx%d)\n", path, t->w, t->h);
+	}
+	if (snap_ready) {
+		snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_snapshot.bmp", (unsigned)frame_no);
+		dumpBmp(path, snap.mem, snap.w, snap.h, snap.w);
+		GeSgxLog("GeSgx render: dumped %s (%dx%d)\n", path, snap.w, snap.h);
+	}
+}
+
 vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats, int *scenes) {
 	SceUInt64 t0 = sceKernelGetProcessTimeWide();
@@ -1349,6 +1407,8 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			(unsigned)stats->skipped[3], (unsigned)stats->skipped[4], (unsigned)stats->skipped[5], (unsigned)stats->other_fb, (unsigned)now_shown);
 		GeSgxLogText(rtrace_text, rtrace_len);
 		rtrace = 0;
+		if (asked)
+			dumpFrame(ctx, rframes);
 	}
 	return show ? show->tex : NULL;
 }
