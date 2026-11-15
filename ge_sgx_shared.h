@@ -82,10 +82,11 @@ typedef struct {
 	volatile unsigned int sync_max_us;   // longest wait
 	volatile unsigned int vram_copies;      // VRAM copies into the window (see GE_SGX_VRAM_SHADOW)
 	volatile unsigned int vram_copy_us;     // their total time
+	volatile unsigned int vram_copy_pages;  // pages copied in all
 	volatile unsigned int vram_copy_max_us; // the longest
 	volatile unsigned int vram_copy_how;    // 1: the DMA, 2: the CPU
 	char vram_copy_module[16];              // the module whose sceDmacMemcpy is used
-	unsigned int reserved2[4];
+	unsigned int reserved2[3];
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
@@ -109,6 +110,22 @@ typedef struct {
 */
 #define GE_SGX_VRAM_SHADOW 0xABE00000 // uncached kernel address of PSP 0x0BE00000
 #define GE_SGX_VRAM_SIZE   0x00200000
+
+/*
+	Only the VRAM pages the Vita side reads (textures, CLUTs; not the
+	framebuffers, which it renders itself) are copied: it sets their bits in
+	this bitmap, one per 4 KB page, the first time it reads them. Written by
+	the Vita side only, in the line before GeSgxAck, for the session there;
+	bits are only ever set (all cleared when the Vita side takes a ring).
+*/
+#define GE_SGX_VRAM_PAGE 4096
+#define GE_SGX_VRAM_PAGES (GE_SGX_VRAM_SIZE / GE_SGX_VRAM_PAGE) // 512
+
+typedef struct {
+	volatile unsigned int bits[GE_SGX_VRAM_PAGES / 32]; // of the session in GeSgxAck
+} GeSgxVramWant; // one 64 byte line
+
+#define GE_SGX_VRAM_WANT_ADDRESS 0xABCDFF80
 
 // Longest time a DrawSync/ListSync waits for the Vita side to read the lists
 #define GE_SGX_SYNC_TIMEOUT_US 3000

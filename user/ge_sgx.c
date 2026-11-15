@@ -85,6 +85,22 @@ static uint32_t epoch = 1;
 static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
 static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000 (the PSP side's copy of it)
 // pspemu maps PSP VRAM uncached (a USER_RW_UNCACHE block): the CPU reads it as it is
+// The VRAM pages read so far, for the PSP side to copy only those (GeSgxVramWant)
+static uint32_t vram_want[GE_SGX_VRAM_PAGES / 32];
+static int vram_want_dirty = 0;
+
+static inline void wantVram(uint32_t off, uint32_t size) {
+	uint32_t p = off / GE_SGX_VRAM_PAGE, last = (off + (size ? size : 1) - 1) / GE_SGX_VRAM_PAGE;
+	if (last >= GE_SGX_VRAM_PAGES)
+		last = GE_SGX_VRAM_PAGES - 1;
+	for (; p <= last; p++) {
+		uint32_t bit = 1u << (p % 32);
+		if (!(vram_want[p / 32] & bit)) {
+			vram_want[p / 32] |= bit;
+			vram_want_dirty = 1;
+		}
+	}
+}
 static uint32_t *block_tag = NULL;     // block address | 1 (valid)
 static uint32_t *block_epoch = NULL;
 static uint8_t *block_data = NULL;
@@ -119,6 +135,7 @@ static const void *blockFn(void *user, uint32_t block) {
 	} else if (block >= VRAM_START && block < VRAM_START + 0x00800000u) {
 		// VRAM and its mirrors
 		src = vram_map + (block & (VRAM_SIZE - 1));
+		wantVram(block & (VRAM_SIZE - 1), GE_SGX_BLOCK_SIZE);
 	} else {
 		return NULL;
 	}
@@ -151,6 +168,7 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 		uint32_t off = addr & (VRAM_SIZE - 1);
 		if (size > VRAM_SIZE - off)
 			return NULL;
+		wantVram(off, size);
 		return vram_map + off;
 	}
 	return NULL;
@@ -564,6 +582,12 @@ static void writeAck(uint32_t session, uint32_t read) {
 	ack->session = session;
 	ack->read = read;
 	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
+	if (vram_want_dirty) {
+		vram_want_dirty = 0;
+		GeSgxVramWant *want = (GeSgxVramWant *)(block + (GE_SGX_VRAM_WANT_ADDRESS - ADRENALINE_ADDRESS));
+		memcpy((void *)want->bits, vram_want, sizeof(vram_want));
+		ScePspemuWritebackCache(want, sizeof(GeSgxVramWant));
+	}
 }
 
 void GeSgxLogText(const char *text, uint32_t len) {
@@ -1048,14 +1072,14 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u us, max %u, how %u %s)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
-					(unsigned)rates.vram_copies, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module);
+					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {
@@ -1119,7 +1143,9 @@ int GeSgxStart(uint32_t ring_addr) {
 		}
 	}
 
-	// The PSP side may wait for us from now on
+	// The PSP side may wait for us from now on (and copies no VRAM page before we read one)
+	memset(vram_want, 0, sizeof(vram_want));
+	vram_want_dirty = 1;
 	writeAck(ring->session, 0);
 
 	start_ring = ring_addr;

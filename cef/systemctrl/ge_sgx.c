@@ -189,22 +189,43 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 }
 
 /*
-	VRAM into pspemu's window for it (see GE_SGX_VRAM_SHADOW), at every flip.
+	VRAM into pspemu's window for it (see GE_SGX_VRAM_SHADOW), at every flip:
+	the pages the Vita side reads (GeSgxVramWant), each run in one copy.
 	With the DMA: sceDmacMemcpy is looked up in every loaded module (its
 	library "sceDmac" is not where the name says), else the CPU (~120 ms).
 */
 static int (* _sceDmacMemcpy)(void *dst, const void *src, SceSize size) = NULL;
 
 static void copyVram(void) {
+	volatile GeSgxVramWant *want = (volatile GeSgxVramWant *)GE_SGX_VRAM_WANT_ADDRESS; // uncached
+	if (shared->session != ring->session)
+		return;
+
 	int k1 = pspSdkSetK1(0); // kernel addresses (the flip comes from the game's syscall)
-	u32 start = timeNow();
-	if (_sceDmacMemcpy)
-		_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
-	else
-		memcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE); // uncached both
+	u32 start = timeNow(), pages = 0;
+	u32 p = 0;
+	while (p < GE_SGX_VRAM_PAGES) {
+		// A run of wanted pages, one copy
+		if (!(want->bits[p / 32] & (1u << (p % 32)))) {
+			p++;
+			continue;
+		}
+		u32 first = p;
+		while (p < GE_SGX_VRAM_PAGES && (want->bits[p / 32] & (1u << (p % 32))))
+			p++;
+		u32 off = first * GE_SGX_VRAM_PAGE, size = (p - first) * GE_SGX_VRAM_PAGE;
+		if (_sceDmacMemcpy)
+			_sceDmacMemcpy((void *)(GE_SGX_VRAM_SHADOW + off), (const void *)(0x44000000 + off), size);
+		else
+			memcpy((void *)(GE_SGX_VRAM_SHADOW + off), (const void *)(0x44000000 + off), size); // uncached both
+		pages += p - first;
+	}
 	u32 took = timeNow() - start;
 	pspSdkSetK1(k1);
+	if (!pages)
+		return;
 	ring->vram_copies++;
+	ring->vram_copy_pages += pages;
 	ring->vram_copy_us += took;
 	if (took > ring->vram_copy_max_us)
 		ring->vram_copy_max_us = took;
