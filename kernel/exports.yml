@@ -13,4 +13,3 @@ AdrenalineKernel:
         - kuCtrlPeekBufferPositive
         - kuGeSgxAllocMemBlock
         - kuGeSgxFreeMemBlock
-        - kuGeSgxCycleCounterEnable

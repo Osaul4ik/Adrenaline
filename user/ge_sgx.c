@@ -43,7 +43,6 @@
 #include "main.h"
 #include "ge_sgx.h"
 #include "ge_sgx_pool.h"
-#include "../ge_sgx_kernel.h"
 #include "ge_sgx_tex.h"
 #include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
@@ -220,39 +219,12 @@ static uint32_t clockUs(void) {
 	return sceKernelGetProcessTimeLow();
 }
 
-/*
-	The walker's core's cycle counter (adrenaline_kernel lets user code read
-	it): one instruction, the build is timed at every primitive. Only on the
-	walker's thread, which stays on core 0 (where it is enabled).
-*/
-static uint32_t clock_ticks_per_us = 1;
-
-static uint32_t clockCycles(void) {
-	uint32_t v;
-	asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(v));
-	return v;
-}
+static uint32_t clock_ticks_per_us = 1; // the walker's clock is in microseconds
 
 static void clockInit(GeSgxWalker *w) {
 	w->clock_fn = clockUs;
-	w->clock_every = 32;
+	w->clock_every = 32; // a system call (2.4 us): one primitive in 32 is timed
 	clock_ticks_per_us = 1;
-	GeSgxLog("GeSgx clock: the cycle counter...\n");
-	uint32_t c0 = kuGeSgxCycleCounterEnable();
-	SceUInt64 t0 = sceKernelGetProcessTimeWide();
-	uint32_t c1 = clockCycles();
-	sceKernelDelayThread(20 * 1000);
-	uint32_t c2 = clockCycles();
-	SceUInt64 t1 = sceKernelGetProcessTimeWide();
-	uint32_t us = (uint32_t)(t1 - t0);
-	uint32_t tpu = us ? (c2 - c1) / us : 0;
-	GeSgxLog("GeSgx clock: cycle counter %08X %08X %08X over %u us: %u per us\n", (unsigned)c0, (unsigned)c1, (unsigned)c2, (unsigned)us, (unsigned)tpu);
-	if (tpu >= 100 && tpu <= 1000) {
-		w->clock_fn = clockCycles;
-		w->clock_every = 1;
-		clock_ticks_per_us = tpu;
-	}
-	GeSgxLog("GeSgx clock: %s\n", w->clock_fn == clockCycles ? "cycles, every primitive" : "the system's, one primitive in 32");
 }
 
 // Vertices of big primitives: one DMA (about 80 us a call, then 2 ns/byte against 11 for a copy)

@@ -26,7 +26,4 @@ typedef struct {
 int kuGeSgxAllocMemBlock(unsigned int type, unsigned int size, void **base, GeSgxKernelMemInfo *info);
 int kuGeSgxFreeMemBlock(void *base);
 
-// The cycle counter for the calling core's user code (read with mrc p15, 0, r, c9, c13, 0); its value, 0 if it does not run
-unsigned int kuGeSgxCycleCounterEnable(void);
-
 #endif
