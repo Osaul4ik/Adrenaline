@@ -276,9 +276,10 @@ static void drawSgxOverlay(vita2d_texture *tex, float tex_w, float tex_h, const 
   geSgxShaderStats(&ss);
 
   const float ty = y + h + 6.0f;
-  vita2d_draw_rectangle(x - 2.0f, ty - 2.0f, w + 4.0f, 5 * 18.0f + 4.0f, RGBA8(0, 0, 0, 200));
+  vita2d_draw_rectangle(x - 2.0f, ty - 2.0f, w + 4.0f, 6 * 18.0f + 4.0f, RGBA8(0, 0, 0, 200));
 
   const float fs = 0.75f;
+  pgf_draw_textf(x, ty + 5 * 18.0f, ge_sgx_debug_mode ? RGBA8(255, 255, 0, 255) : WHITE, fs, "debug (R+SELECT): %s", ge_sgx_debug_names[ge_sgx_debug_mode]);
   pgf_draw_textf(x, ty + 0 * 18.0f, WHITE, fs, "SGX %u fps  cmds %u  bad %u", (unsigned)(f->fps), (unsigned)(f->stats.commands), (unsigned)(f->stats.bad));
   pgf_draw_textf(x, ty + 1 * 18.0f, WHITE, fs, "walk %u us/s  wait %u/%u", (unsigned)(f->walk_us), (unsigned)(f->sync_waits), (unsigned)(f->sync_timeouts));
   pgf_draw_textf(x, ty + 2 * 18.0f, WHITE, fs, "2D %u draws %u vtx %u us", (unsigned)(r->draws), (unsigned)(r->vertices), (unsigned)(r->render_us));
@@ -646,6 +647,17 @@ int AdrenalineDraw(SceSize args, void *argp) {
         if (sceAppMgrLaunchAppByName2(ADRENALINE_TITLEID, NULL, NULL) < 0)
           ScePspemuErrorExit(0);
       }
+    }
+
+    // SGX renderer debug mode: R + SELECT turns the next feature off for every draw
+    if (sgx_active) {
+      static int debug_combo = 0;
+      int combo = current_pad[PAD_RTRIGGER] && current_pad[PAD_SELECT];
+      if (combo && !debug_combo) {
+        ge_sgx_debug_mode = (ge_sgx_debug_mode + 1) % GE_SGX_DEBUG_MODES;
+        GeSgxLog("GeSgx: debug mode %d: %s\n", ge_sgx_debug_mode, ge_sgx_debug_names[ge_sgx_debug_mode]);
+      }
+      debug_combo = combo;
     }
 
     // Fast forward in pops

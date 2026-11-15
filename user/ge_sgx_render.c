@@ -644,6 +644,10 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 
 /* ---- Diagnostics ---- */
 
+int ge_sgx_debug_mode = 0;
+const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES] = { "normal", "no alpha test", "no fog", "no depth test",
+	"no textures", "no stencil" };
+
 /*
 	Draws not drawn: each reason with its keys logged the first time, and
 	every draw of a traced frame summed up in runs (consecutive draws with
@@ -755,6 +759,21 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	for (i = first; i < last; i++) {
 		const GeSgxDraw *d = &frame->draws[i];
 
+		// Debug mode (R + SELECT): one feature off for every draw, to see what hides something
+		GeSgxDraw dbg;
+		if (ge_sgx_debug_mode && !(d->flags & GE_SGX_DRAW_CLEAR)) {
+			dbg = *d;
+			if (ge_sgx_debug_mode == 1)
+				dbg.flags &= ~GE_SGX_DRAW_ALPHATEST;
+			else if (ge_sgx_debug_mode == 2)
+				dbg.flags &= ~GE_SGX_DRAW_FOG;
+			else if (ge_sgx_debug_mode == 4)
+				dbg.flags &= ~(GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_TCC);
+			else if (ge_sgx_debug_mode == 5)
+				dbg.sfunc = 0xFF;
+			d = &dbg;
+		}
+
 		// A clear writing nothing
 		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_WRITE_ALPHA))) {
 			drawOutcome(stats, GE_SGX_SKIP_CLEAR, d, i, target_fb);
@@ -835,6 +854,8 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		}
 
 		int zfunc = (d->flags & GE_SGX_DRAW_CLEAR) ? SCE_GXM_DEPTH_FUNC_ALWAYS : depthFunc(d->ztest);
+		if (ge_sgx_debug_mode == 3)
+			zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS;
 		int zwrite = (d->flags & GE_SGX_DRAW_WRITE_DEPTH) != 0;
 		if (zfunc != last_zfunc) {
 			sceGxmSetFrontDepthFunc(ctx, (SceGxmDepthFunc)zfunc);

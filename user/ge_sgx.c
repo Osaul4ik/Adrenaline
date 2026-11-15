@@ -47,7 +47,7 @@
 #include "../ge_sgx_shared.h"
 
 // Test: every 3D draw transformed on the CPU (the GPU transform's vertex programs not used)
-#define GE_SGX_TEST_CPU_TRANSFORM 1
+#define GE_SGX_TEST_CPU_TRANSFORM 0
 
 
 #define LOG_PATH "ux0:data/adrenaline_sgx_log.txt"

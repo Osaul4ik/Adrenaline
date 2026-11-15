@@ -68,4 +68,9 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 // The rendering last shown (NULL if none): renderings may be remade, so ask every time
 vita2d_texture *geSgxRenderShown(void);
 
+// Debug mode (cycled with R + SELECT): 0 normal, else one feature off for every draw
+#define GE_SGX_DEBUG_MODES 6
+extern int ge_sgx_debug_mode;
+extern const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES];
+
 #endif
