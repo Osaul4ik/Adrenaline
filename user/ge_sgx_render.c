@@ -482,6 +482,7 @@ static void stencilOff(SceGxmContext *ctx) {
 	A frame's first scene of a target starts from them cleared.
 */
 #define MAX_TARGET_BYTES (10 * 1024 * 1024)
+#define TARGET_SCENES 8 // scenes a frame a target's render target is made for (SCE_GXM_MAX_SCENES_PER_RENDERTARGET)
 // CDRAM always left to the emulator (with none left, Carbon's loading screen ended in an error)
 #define RESERVE_CDRAM_KB 1024
 
@@ -562,6 +563,30 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		if (target_failures++ < 8)
 			GeSgxLog("GeSgx render: target %X %dx%d FAILED (targets %u KB)\n", (unsigned)fb, w, h, (unsigned)(target_bytes / 1024));
 		return NULL;
+	}
+
+	/*
+		vita2d made its render target for one scene a frame; a frame draws into
+		a framebuffer in several (Carbon: the main one before and after its
+		reflection, the blur's one before and after the copy), which GXM's
+		render target must be made for: one for up to 8
+	*/
+	{
+		SceGxmRenderTargetParams params;
+		memset(&params, 0, sizeof(params));
+		params.width = w;
+		params.height = h;
+		params.scenesPerFrame = TARGET_SCENES;
+		params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+		params.driverMemBlock = -1;
+		SceGxmRenderTarget *rtgt = NULL;
+		int err = sceGxmCreateRenderTarget(&params, &rtgt);
+		if (err >= 0 && rtgt) {
+			sceGxmDestroyRenderTarget(tex->gxm_rtgt);
+			tex->gxm_rtgt = rtgt;
+		} else if (target_failures++ < 8) {
+			GeSgxLog("GeSgx render: target %X: render target for %d scenes %08X (vita2d's kept)\n", (unsigned)fb, TARGET_SCENES, (unsigned)err);
+		}
 	}
 
 	// vita2d made a depth buffer for it: one in the pool instead, when it fits
@@ -678,6 +703,7 @@ static struct {
 	uint32_t flags, zs, stencil, scissor; // draw flags; ztest, colour mask, prim, texture mode; stencil; scissor (two corners, 8 px)
 	float z0, z1; // depth range of the first draw's vertices (CPU vertices; -1: GPU)
 	uint32_t aref, color, tfmt; // alpha test reference; first CPU vertex colour; texture format
+	uint32_t tsize, topaque;    // texture: w | h << 16; texels with alpha > 0 (palette textures)
 	int active;
 } run;
 
@@ -686,7 +712,7 @@ static void runFlush(void) {
 		return;
 	run.active = 0;
 	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
-		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d | aref %u colour %08X tex format %08X\n",
+		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d | aref %u colour %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
@@ -694,7 +720,8 @@ static void runFlush(void) {
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
 		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f),
-		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.tfmt);
+		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.tfmt, (unsigned)(run.tsize & 0xFFFF), (unsigned)(run.tsize >> 16),
+		(unsigned)run.topaque);
 }
 
 static uint32_t skip_seen[96];
@@ -747,10 +774,22 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.aref = d->atest_ref;
 		run.color = 0;
 		run.tfmt = 0;
+		run.tsize = run.topaque = 0;
 		if ((d->flags & GE_SGX_DRAW_TEXTURED) && !d->fbtex) {
 			const SceGxmTexture *gt = geSgxTexGet(d->texture);
-			if (gt)
+			if (gt) {
 				run.tfmt = (uint32_t)sceGxmTextureGetFormat(gt);
+				uint32_t tw = sceGxmTextureGetWidth(gt), th = sceGxmTextureGetHeight(gt);
+				run.tsize = tw | (th << 16);
+				// Palette textures: how many texels the alpha test can let through (the minimap's mask)
+				const uint8_t *data = sceGxmTextureGetData(gt);
+				const uint32_t *pal = sceGxmTextureGetPalette(gt);
+				if ((run.tfmt & 0x9F000000u) == SCE_GXM_TEXTURE_BASE_FORMAT_P8 && data && pal && tw * th <= 512 * 512) {
+					uint32_t k;
+					for (k = 0; k < tw * th; k++)
+						run.topaque += (pal[data[k]] >> 24) != 0;
+				}
+			}
 		}
 		if (!d->gpu && frame && d->count)
 			run.color = frame->vertices[d->base + frame->indices[d->first]].color;
@@ -779,7 +818,7 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 	copy (what the draws before it wrote), up to MAX_SNAPSHOTS a frame; the
 	ones after that sample the last copy.
 */
-#define MAX_SNAPSHOTS 16
+#define MAX_SNAPSHOTS 6 // with the scenes between them, within TARGET_SCENES
 /*
 	The snapshot: a colour surface and texture only (no depth buffer, a
 	scene into it needs none), in the kernel's pool when it fits (outside
@@ -889,7 +928,7 @@ static int snapshotMake(int w, int h) {
 		memset(&params, 0, sizeof(params));
 		params.width = w;
 		params.height = h;
-		params.scenesPerFrame = 8; // SCE_GXM_MAX_SCENES_PER_RENDERTARGET (more: invalid value)
+		params.scenesPerFrame = TARGET_SCENES; // more: invalid value
 		params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
 		params.driverMemBlock = -1;
 		err = sceGxmCreateRenderTarget(&params, &snap.rtgt);
