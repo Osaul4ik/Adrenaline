@@ -282,6 +282,7 @@ typedef struct {
 	float mvp[16];  // proj * view * world, 4x4 column-major
 	const GeSgxMatrices *m;
 	float vp_x[2], vp_y[2], vp_z[2]; // pixel = c[0] * clip + c[1] * w
+	float offx, offy;                // the drawing offset (PSP pixels): range culling
 	float uscale, vscale, uoff, voff;
 	// A framebuffer's rendering as the texture: the texture's part of it (generated coordinates times these)
 	float fbk_u, fbk_v;
@@ -399,6 +400,8 @@ static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
 	// screen = center + scale * clip / w - offset, in PSP pixels; times w and the output scale
 	float offx = (reg(w, GE_CMD_OFFSETX) & 0xFFFF) * (1.0f / 16.0f);
 	float offy = (reg(w, GE_CMD_OFFSETY) & 0xFFFF) * (1.0f / 16.0f);
+	x->offx = offx;
+	x->offy = offy;
 	x->vp_x[0] = freg(w, GE_CMD_VIEWPORTXSCALE) * GE_SGX_SCALE;
 	x->vp_x[1] = (freg(w, GE_CMD_VIEWPORTXCENTER) - offx) * GE_SGX_SCALE;
 	x->vp_y[0] = freg(w, GE_CMD_VIEWPORTYSCALE) * GE_SGX_SCALE;
@@ -1256,6 +1259,10 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 	}
 	set4(c[GE_SGX_UC_VP], x->vp_x[0], x->vp_x[1], x->vp_y[0], x->vp_y[1]);
 	set4(c[GE_SGX_UC_VPZ], x->vp_z[0], x->vp_z[1], x->fog1, x->fog2);
+	// Range culling: the screen (offset included) from 0 to 4096, in the program's pixels (offset taken, scaled)
+	set4(c[GE_SGX_UC_CULL], -x->offx * GE_SGX_SCALE, -x->offy * GE_SGX_SCALE, (4096.0f - x->offx) * GE_SGX_SCALE,
+		(4096.0f - x->offy) * GE_SGX_SCALE);
+	set4(c[GE_SGX_UC_CULL + 1], NAN, 0.0f, 0.0f, 0.0f);
 	set4(c[GE_SGX_UC_FLAGS], (float)x->uvgen, (float)x->uvproj, x->fog ? 1.0f : 0.0f, (x->lighting && x->reverse_normal) ? -1.0f : 1.0f);
 	uint32_t mc = x->material_color;
 	set4(c[GE_SGX_UC_MATAMB], (mc & 0xFF) / 255.0f, ((mc >> 8) & 0xFF) / 255.0f, ((mc >> 16) & 0xFF) / 255.0f, (mc >> 24) / 255.0f);

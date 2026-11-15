@@ -34,7 +34,9 @@
 // Never reuse a number (2 was taken by reverted sources whose programs may still be cached)
 // The generator's revision: a program that failed to compile is tried again when it changes
 #define GE_SGX_CG_GEN_REV 2
-#define GE_SGX_CG_VERSION 1 // TEST: the old cached programs (3 is the current sources)
+#define GE_SGX_CG_VERSION 1
+// The GPU transform's vertex programs (2xxx keys): 4 with range culling (never 1-3 again)
+#define GE_SGX_CG_VS_VERSION 4 // TEST: the old cached programs (3 is the current sources)
 
 #define GE_SGX_CG_DIR "ux0:data/adrenaline/sgx_shaders"
 // Written by adrenaline_user when it could not compile: the app compiles all programs at its next start

@@ -58,7 +58,8 @@ enum {
 	GE_SGX_UC_LIGHT = 17,    // 4 lights of GE_SGX_UC_LIGHT_SIZE
 	GE_SGX_UC_ENVLS = 45,    // 2: environment map light directions
 	GE_SGX_UC_TGEN = 47,     // 4 columns
-	GE_SGX_UC_COUNT = 51,
+	GE_SGX_UC_CULL = 51,     // range culling: x min, y min, x max, y max (pixels as x/w); next: NaN
+	GE_SGX_UC_COUNT = 53,
 };
 // One light: position + type (-1 off, 0 directional, 1 point, 2 spot),
 // direction + computation, attenuation + spot exponent, spot cutoff,

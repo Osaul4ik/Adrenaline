@@ -101,6 +101,15 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("	float x = vpx.x * c.x + vpx.y * c.w;\n	float y = vpx.z * c.y + vpx.w * c.w;\n");
 	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	if (c.w > 0.0)\n		z = clamp(z, 0.0, c.w);\n");
 	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
+	/*
+		Range culling (PPSSPP's): a vertex off the PSP's screen space (0 to
+		4096, offset included) and not before the near plane makes the GE
+		drop its whole primitive. Its position becomes NaN, which drops it
+		here too (a particle by the camera was a triangle across the screen).
+	*/
+	S("	float4 cr = uC[%d];\n	float iw = 1.0 / c.w;\n", GE_SGX_UC_CULL);
+	S("	if (!(c.z < -c.w) && (x * iw < cr.x || y * iw < cr.y || x * iw >= cr.z || y * iw >= cr.w || c.w < -1.0))\n"
+	  "		vPosition = uC[%d].xxxx;\n", GE_SGX_UC_CULL + 1);
 
 	// Texture coordinates
 	S("	float4 fl = uC[%d];\n", GE_SGX_UC_FLAGS);
@@ -308,7 +317,9 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 }
 
 void geSgxCgPath(uint32_t key, char *path, int size) {
-	snprintf(path, size, GE_SGX_CG_DIR "/v%d_%04x.gxp", GE_SGX_CG_VERSION, (unsigned)key);
+	// The GPU transform's vertex programs have a version of their own (their uniforms changed with range culling)
+	int version = (key & 0xF000u) == GE_SGX_VS_BASE ? GE_SGX_CG_VS_VERSION : GE_SGX_CG_VERSION;
+	snprintf(path, size, GE_SGX_CG_DIR "/v%d_%04x.gxp", version, (unsigned)key);
 }
 
 SceGxmProgram *geSgxCgLoadCached(uint32_t key) {
