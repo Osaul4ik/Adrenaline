@@ -61,9 +61,6 @@ void GeSgxLogText(const char *text, uint32_t len);
 // Free memory of that type our process can still allocate (in 1 MB blocks), in KB
 uint32_t GeSgxFreeKB(SceKernelMemBlockType type);
 
-// PSP VRAM is read through an uncached mirror (else with the DMA)
-int geSgxVramUncached(void);
-
 // Thread to report in the log (CPU use, core), no-op when the option is off
 void GeSgxTrackThread(SceUID uid, const char *name);
 
