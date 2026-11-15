@@ -108,6 +108,36 @@ jobs:
           cmake --build build/kernel-stubs
           cmake --install build/kernel-stubs
 
+      - name: Build adrenaline_kernel.skprx
+        run: |
+          cmake -S kernel -B build/kernel -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS="-std=gnu17"
+          cmake --build build/kernel
+
+      - name: Check adrenaline_kernel.skprx imports
+        # The module this one replaces is the prebuilt one: the same imports (libraries
+        # and NIDs) are required, so nothing is called that it did not call
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "ci")
+          from check_vita_imports import imports, load
+          new, _ = imports(load("build/kernel/adrenaline_kernel.skprx"))
+          ref, _ = imports(load("bubble/pkg/sce_module/adrenaline_kernel.skprx"))
+          def pairs(d):
+              return {(lib, lnid, nid) for (lib, lnid), nids in d.items() for nid in nids}
+          added, removed = pairs(new) - pairs(ref), pairs(ref) - pairs(new)
+          for lib, lnid, nid in sorted(added):
+              print("new import:     %s (0x%08X) 0x%08X" % (lib, lnid, nid))
+          for lib, lnid, nid in sorted(removed):
+              print("missing import: %s (0x%08X) 0x%08X" % (lib, lnid, nid))
+          print("%d imports, same as the prebuilt module: %s" % (len(pairs(new)), not added and not removed))
+          sys.exit(1 if added or removed else 0)
+          PY
+
+      - name: Use the new adrenaline_kernel.skprx
+        run: cp build/kernel/adrenaline_kernel.skprx bubble/pkg/sce_module/adrenaline_kernel.skprx
+
       - name: Build adrenaline_user.suprx
         run: |
           # the sources predate C23 (default of current vita-gcc) and GCC 14, where these warnings became errors
@@ -128,8 +158,8 @@ jobs:
         run: cp build/user/adrenaline_user.suprx bubble/pkg/sce_module/adrenaline_user.suprx
 
       - name: Build VPK
-        # adrenaline_kernel.skprx, adrenaline_vsh.suprx, usbdevice.skprx and eboot.pbp
-        # are the prebuilt ones from bubble/pkg (those modules are unchanged).
+        # adrenaline_vsh.suprx, usbdevice.skprx and eboot.pbp are the prebuilt ones
+        # from bubble/pkg (those modules are unchanged).
         run: |
           cmake -S bubble -B build/bubble -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_C_FLAGS="-std=gnu17 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
@@ -147,6 +177,7 @@ jobs:
           name: modules
           path: |
             build/user/adrenaline_user.suprx
+            build/kernel/adrenaline_kernel.skprx
             user/flash0/kd/systemctrl.prx
           if-no-files-found: error
 
@@ -166,4 +197,5 @@ jobs:
             build/bubble/Adrenaline.vpk \
             build/user/adrenaline_user.suprx \
             build/adrenaline_user.elf \
+            build/kernel/adrenaline_kernel.skprx \
             user/flash0/kd/systemctrl.prx

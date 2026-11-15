@@ -22,6 +22,7 @@
 #include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/cpu.h>
+#include <psp2kern/kernel/sysroot.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +33,6 @@
 
 #include "../adrenaline_compat.h"
 
-int ksceKernelSysrootGetShellPid();
 int module_get_export_func(SceUID pid, const char *modname, uint32_t libnid, uint32_t funcnid, uintptr_t *func);
 
 static tai_hook_ref_t ksceKernelAllocMemBlockRef;
@@ -94,21 +94,21 @@ static int sceCompatSecSetSSRAMAclPatched() {
   uint32_t a;
 
   a = 0;
-  ksceKernelMemcpyUserToKernel(&a, 0x70FC0000, sizeof(uint32_t));
+  ksceKernelMemcpyUserToKernel(&a, (const void *)0x70FC0000, sizeof(uint32_t));
 
   if (a != 0) {
     // jal 0x88FC0000
     a = 0x0E3F0000;
     if (module_nid == 0x8F2D0378) { // 3.60 retail
-      ksceKernelMemcpyKernelToUser(0x70602D58, &a, sizeof(uint32_t));
-      ksceKernelCpuDcacheWritebackRange((void *)0x70602D58, sizeof(uint32_t));
+      ksceKernelMemcpyKernelToUser((void *)0x70602D58, &a, sizeof(uint32_t));
+      ksceKernelDcacheCleanRangeForL1WBWA((void *)0x70602D58, sizeof(uint32_t));
     } else if (module_nid == 0x07937779 ||
                module_nid == 0x71BF9CC5 ||
                module_nid == 0x7C185186 ||
                module_nid == 0x52DFE3A7 ||
                module_nid == 0xE0E3AA51) { // 3.65-3.70 retail
-      ksceKernelMemcpyKernelToUser(0x70602D70, &a, sizeof(uint32_t));
-      ksceKernelCpuDcacheWritebackRange((void *)0x70602D70, sizeof(uint32_t));
+      ksceKernelMemcpyKernelToUser((void *)0x70602D70, &a, sizeof(uint32_t));
+      ksceKernelDcacheCleanRangeForL1WBWA((void *)0x70602D70, sizeof(uint32_t));
     }
   }
 
@@ -151,7 +151,7 @@ int kuCtrlPeekBufferPositive(int port, SceCtrlData *pad_data, int count) {
   // restore cpu offset
   asm volatile ("mcr p15, 0, %0, c13, c0, 4" :: "r" (off));
 
-  ksceKernelMemcpyKernelToUser((uintptr_t)pad_data, &pad, sizeof(SceCtrlData));
+  ksceKernelMemcpyKernelToUser(pad_data, &pad, sizeof(SceCtrlData));
 
   EXIT_SYSCALL(state);
   return res;
