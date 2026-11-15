@@ -197,10 +197,24 @@ static void compileSgxShaders(void) {
 	static uint32_t keys[1024];
 	int n = geSgxCgAllKeys(keys, 1024);
 	int i, missing = 0;
-	char path[96];
+	char path[96], mark[104];
+	/*
+		A program the compiler could not make, or that crashed it (its
+		.try mark left from the try), is not tried again: <path>.fail
+	*/
 	for (i = 0; i < n; i++) {
 		geSgxCgPath(keys[i], path, sizeof(path));
-		if (sceIoGetstat(path, &stat) < 0)
+		snprintf(mark, sizeof(mark), "%s.try", path);
+		if (sceIoGetstat(mark, &stat) >= 0) {
+			char fail[104];
+			snprintf(fail, sizeof(fail), "%s.fail", path);
+			sceIoRename(mark, fail);
+		}
+	}
+	for (i = 0; i < n; i++) {
+		geSgxCgPath(keys[i], path, sizeof(path));
+		snprintf(mark, sizeof(mark), "%s.fail", path);
+		if (sceIoGetstat(path, &stat) < 0 && sceIoGetstat(mark, &stat) < 0)
 			missing++;
 	}
 
@@ -231,14 +245,24 @@ static void compileSgxShaders(void) {
 		int x = psvDebugScreenGetX(), y = psvDebugScreenGetY();
 		for (i = 0; i < n; i++) {
 			geSgxCgPath(keys[i], path, sizeof(path));
-			if (sceIoGetstat(path, &stat) >= 0)
+			snprintf(mark, sizeof(mark), "%s.fail", path);
+			if (sceIoGetstat(path, &stat) >= 0 || sceIoGetstat(mark, &stat) >= 0)
 				continue;
+			// The .try mark: if the compiler crashes on this one, the next start skips it
+			snprintf(mark, sizeof(mark), "%s.try", path);
+			SceUID fd = sceIoOpen(mark, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+			if (fd >= 0)
+				sceIoClose(fd);
 			uint32_t size = 0;
 			SceGxmProgram *program = geSgxCgCompile(keys[i], &size, compileLog);
 			if (program) {
 				geSgxCgSave(keys[i], program, size);
 				free(program);
+				sceIoRemove(mark);
 			} else {
+				char fail[104];
+				snprintf(fail, sizeof(fail), "%s.fail", path);
+				sceIoRename(mark, fail);
 				failed++;
 			}
 			done++;

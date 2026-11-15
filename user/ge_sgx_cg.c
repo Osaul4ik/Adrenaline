@@ -205,7 +205,7 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		atest ? ", uniform float uAlphaRef" : "",
 		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "",
 		sc ? ", float4 wpos : WPOS, uniform float4 uScissor" : "",
-		sc ? "	if (wpos.x < uScissor.x || wpos.y < uScissor.y || wpos.x >= uScissor.z || wpos.y >= uScissor.w)\n		discard;\n" : "");
+		sc ? "	if (any(wpos.xy < uScissor.xy) || any(wpos.xy >= uScissor.zw))\n		discard;\n" : "");
 
 	if (!clear && textured) {
 		static const char *funcs[5] = {
