@@ -46,6 +46,10 @@
 #include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
 
+// Test: every 3D draw transformed on the CPU (the GPU transform's vertex programs not used)
+#define GE_SGX_TEST_CPU_TRANSFORM 1
+
+
 #define LOG_PATH "ux0:data/adrenaline_sgx_log.txt"
 #define LOG_INTERVAL_US (5 * 1000 * 1000)
 
@@ -299,7 +303,7 @@ static void acquireSlot(void) {
 			s->data.skipped_other = 0;
 			building = s;
 			walker.frame = &s->data;
-			walker.gpu_transform = !ge_sgx_gpu_failed;
+			walker.gpu_transform = !ge_sgx_gpu_failed && !GE_SGX_TEST_CPU_TRANSFORM;
 			walker.ngpu_bad = ge_sgx_gpu_nbad;
 			for (int b = 0; b < walker.ngpu_bad; b++)
 				walker.gpu_bad[b] = ge_sgx_gpu_bad[b];
@@ -789,7 +793,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 			walker.bulk_fn = bulkFn;
 			walker.clock_fn = clockUs;
 			walker.log_fn = GeSgxLog;
-			walker.gpu_transform = 1;
+			walker.gpu_transform = !GE_SGX_TEST_CPU_TRANSFORM;
+			GeSgxLog("GeSgx: transform on the %s\n", GE_SGX_TEST_CPU_TRANSFORM ? "CPU (test)" : "GPU");
 			walker.direct_start = RAM_START + 0x00800000u;
 			walker.direct_size = direct_size;
 			acquireSlot();

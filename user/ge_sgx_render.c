@@ -974,6 +974,17 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		if (aliases[a].dst == fb)
 			show = findTarget(aliases[a].src);
 	}
+	/*
+		Frames without draws (three in a row, not just a repeated flip): the game
+		writes the picture itself (CPU, transfers), so the renderings hold older
+		ones; the PSP picture is what it shows
+	*/
+	static uint32_t empty_frames = 0;
+	empty_frames = frame->ndraws ? 0 : empty_frames + 1;
+	if (empty_frames >= 3) {
+		show = NULL;
+		shown_fb = 0;
+	}
 	if (show) {
 		show->used = target_clock;
 		shown_fb = show->fb + 1;
