@@ -39,13 +39,16 @@
 #include "ge_sgx_tex.h"
 #include "ge_sgx_texconv.h"
 
-#define MAX_TEXTURES 512
+#define MAX_TEXTURES 1024
 #define BUDGET_BYTES (10 * 1024 * 1024) // 12 MB left too little RAM next to the framebuffer renderings
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
-// With the kernel's pool (ge_sgx_pool.c): all of it but what the depth buffer and the rest take
-#define POOL_KEEP_BYTES (8 * 1024 * 1024)
-#define POOL_BUDGET_MAX (64 * 1024 * 1024)
+/*
+	With the kernel's pool (ge_sgx_pool.c) textures go there first (all of it
+	but what the depth buffer takes), into the emulator's RAM when it is full:
+	the budget is both
+*/
+#define POOL_KEEP_BYTES (4 * 1024 * 1024)
 static uint32_t budget_max = BUDGET_BYTES;
 static int in_pool = 0;
 #define STAGING_BYTES (1024 * 1024)
@@ -93,14 +96,13 @@ int geSgxTexInit(void) {
 	staging[1] = staging[0] + STAGING_BYTES;
 
 	uint32_t pool = geSgxPoolBytes();
-	if (pool > POOL_KEEP_BYTES + 4 * 1024 * 1024) {
+	if (pool > POOL_KEEP_BYTES) {
 		in_pool = 1;
-		budget_max = pool - POOL_KEEP_BYTES;
-		if (budget_max > POOL_BUDGET_MAX)
-			budget_max = POOL_BUDGET_MAX;
+		budget_max = pool - POOL_KEEP_BYTES + BUDGET_BYTES;
 		budget = budget_max;
 	}
-	GeSgxLog("GeSgx textures: budget %u KB in %s\n", (unsigned)(budget_max / 1024), in_pool ? "the pool" : "the emulator's RAM");
+	GeSgxLog("GeSgx textures: budget %u KB (%u KB in the pool, the rest in the emulator's RAM)\n", (unsigned)(budget_max / 1024),
+		(unsigned)(in_pool ? (pool - POOL_KEEP_BYTES) / 1024 : 0));
 	return 1;
 }
 
@@ -255,8 +257,9 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	if (total_bytes + bytes > budget)
 		return failed(d, "budget");
 
-	// The emulator keeps a reserve of RAM: older textures are given up for this one, which waits
-	if (!in_pool && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
+	// The emulator keeps a reserve of RAM (when this one goes there): older textures are given up for it, it waits
+	int to_pool = in_pool && geSgxPoolFreeKB() >= bytes / 1024;
+	if (!to_pool && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
 		uint32_t saved = budget;
 		budget = total_bytes > bytes ? total_bytes - bytes : 0;
 		makeRoom(bytes);
@@ -299,19 +302,11 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	Entry *e = &entries[slot];
 	memset(e, 0, sizeof(*e));
 	e->mem = -1;
-	void *gpu = NULL;
-	if (in_pool) {
-		gpu = geSgxPoolAlloc(bytes);
-		if (!gpu) {
-			// No run of free pages that long: older ones are given up, this one waits
-			uint32_t saved = budget;
-			budget = total_bytes > 2 * bytes ? total_bytes - 2 * bytes : 0;
-			makeRoom(bytes);
-			budget = saved;
-			return failed(d, "pool full");
-		}
+	void *gpu = to_pool ? geSgxPoolAlloc(bytes) : NULL;
+	if (gpu) {
 		e->pool = gpu;
-	} else {
+	} else if (!to_pool || GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= bytes / 1024 + RESERVE_RAM_KB) {
+		// The emulator's RAM (no pool, the pool is full, or no run of free pages that long in it)
 		e->mem = sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL);
 		if (e->mem < 0) {
 			// Out of memory before the budget: the budget comes down to what fits, then one more try
@@ -329,6 +324,12 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 			e->mem = -1;
 			return failed(d, "map");
 		}
+	} else {
+		uint32_t saved = budget;
+		budget = total_bytes > 2 * bytes ? total_bytes - 2 * bytes : 0;
+		makeRoom(bytes);
+		budget = saved;
+		return failed(d, "pool full");
 	}
 	e->bytes = bytes;
 	total_bytes += bytes;
@@ -459,11 +460,11 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 void geSgxTexFrameDone(void) {
 	cur_frame++;
 	// A budget lowered when memory ran out comes back up while there is memory again
-	if (!in_pool && (cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
+	if ((cur_frame & 63) == 0 && budget < budget_max &&
 	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
 		budget += 512 * 1024;
-		if (budget > BUDGET_BYTES)
-			budget = BUDGET_BYTES;
+		if (budget > budget_max)
+			budget = budget_max;
 	}
 }
 

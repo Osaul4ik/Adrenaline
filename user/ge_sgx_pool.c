@@ -17,12 +17,11 @@
 */
 
 /*
-	SGX renderer: one big block of GPU memory from adrenaline_kernel, outside
-	the emulator's budget (see kernel/gesgx_mem.c), for the texture cache and
-	the depth buffer. Mapped for the GPU once, handed out in 4 KB pages.
-
-	CDRAM first (the GPU's own memory), main RAM else; the biggest size that
-	the kernel gives. Without it everything is as before: memblocks of the
+	SGX renderer: GPU memory from adrenaline_kernel, outside the emulator's
+	budget (see kernel/gesgx_mem.c), for the texture cache and the depth
+	buffer. A few physically contiguous blocks (the kernel gives 16 MB at
+	most in one, none of CDRAM), each mapped for the GPU once and handed out
+	in 4 KB pages. Without them everything is as before: memblocks of the
 	emulator's own budget.
 
 	Used from the walker thread (textures) and the draw thread (depth): a
@@ -39,14 +38,21 @@
 #include "../ge_sgx_kernel.h"
 
 #define PAGE 4096u
-#define MAX_PAGES (128u * 1024 * 1024 / PAGE)
+#define CHUNK_MAX_PAGES (16u * 1024 * 1024 / PAGE)
+#define MAX_CHUNKS 4
+// Not all there is: the system (the shell, the video decoder) shares the rest
+#define POOL_MAX_BYTES (48u * 1024 * 1024)
 
-static uint8_t *pool = NULL;
-static uint32_t pool_pages = 0;
-static uint32_t free_pages = 0;
-static uint32_t rover = 0;
+typedef struct {
+	uint8_t *base;
+	uint32_t pages, free, rover;
+	uint32_t used_map[CHUNK_MAX_PAGES / 32]; // bit set: page taken
+} Chunk;
+
+static Chunk chunks[MAX_CHUNKS];
+static int nchunks = 0;
+static uint32_t pool_pages = 0, free_pages = 0;
 static int pool_cdram = 0;
-static uint32_t used_map[MAX_PAGES / 32]; // bit set: page taken
 static volatile int lock = 0;
 
 static void take(void) {
@@ -58,7 +64,7 @@ static void give(void) {
 	__sync_lock_release(&lock);
 }
 
-static int tryPool(SceKernelMemBlockType type, uint32_t mb) {
+static int tryChunk(SceKernelMemBlockType type, uint32_t mb) {
 	uint32_t size = mb << 20;
 	void *base = NULL;
 	GeSgxKernelMemInfo info;
@@ -76,11 +82,14 @@ static int tryPool(SceKernelMemBlockType type, uint32_t mb) {
 		(unsigned)info.pa_err, (unsigned)info.paddr_err, (unsigned)info.mirror_err, (unsigned)map);
 	if (res < 0 || map < 0)
 		return 0;
-	pool = (uint8_t *)base;
-	pool_pages = size / PAGE;
-	free_pages = pool_pages;
-	pool_cdram = type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW;
-	memset(used_map, 0, sizeof(used_map));
+	Chunk *c = &chunks[nchunks++];
+	memset(c, 0, sizeof(*c));
+	c->base = (uint8_t *)base;
+	c->pages = c->free = size / PAGE;
+	pool_pages += c->pages;
+	free_pages += c->pages;
+	if (nchunks == 1)
+		pool_cdram = type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW;
 	return 1;
 }
 
@@ -89,16 +98,20 @@ uint32_t geSgxPoolInit(void) {
 	if (tried)
 		return pool_pages * PAGE;
 	tried = 1;
-	// Not all there is: the system (the shell, the display) shares the rest
-	static const uint32_t cdram_mb[] = { 48, 32, 16 };
-	static const uint32_t ram_mb[] = { 48, 32, 16 };
-	unsigned i;
-	for (i = 0; i < sizeof(cdram_mb) / sizeof(cdram_mb[0]) && !pool; i++)
-		tryPool(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, cdram_mb[i]);
-	for (i = 0; i < sizeof(ram_mb) / sizeof(ram_mb[0]) && !pool; i++)
-		tryPool(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, ram_mb[i]);
-	if (!pool)
-		GeSgxLog("GeSgx pool: none, the emulator's memory as before\n");
+	// CDRAM (the GPU's own memory) if the kernel has some, then main RAM: 16 MB blocks while it gives them, then smaller
+	static const uint32_t mb[] = { 16, 8, 4 };
+	unsigned k;
+	for (k = 0; k < sizeof(mb) / sizeof(mb[0]) && nchunks < MAX_CHUNKS && pool_pages * PAGE + (mb[k] << 20) <= POOL_MAX_BYTES; ) {
+		if (!tryChunk(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, mb[k]))
+			break;
+	}
+	for (k = 0; k < sizeof(mb) / sizeof(mb[0]); k++) {
+		while (nchunks < MAX_CHUNKS && pool_pages * PAGE + (mb[k] << 20) <= POOL_MAX_BYTES &&
+		       tryChunk(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, mb[k]))
+			;
+	}
+	GeSgxLog("GeSgx pool: %u KB in %d blocks%s\n", (unsigned)(pool_pages * (PAGE / 1024)), nchunks,
+		nchunks ? "" : ", the emulator's memory as before");
 	return pool_pages * PAGE;
 }
 
@@ -114,56 +127,61 @@ int geSgxPoolIsCdram(void) {
 	return pool_cdram;
 }
 
-static inline int taken(uint32_t p) {
-	return (used_map[p >> 5] >> (p & 31)) & 1;
+static inline int taken(const Chunk *c, uint32_t p) {
+	return (c->used_map[p >> 5] >> (p & 31)) & 1;
 }
 
-static void mark(uint32_t first, uint32_t n, int on) {
+static void mark(Chunk *c, uint32_t first, uint32_t n, int on) {
 	uint32_t p;
 	for (p = first; p < first + n; p++) {
 		if (on)
-			used_map[p >> 5] |= 1u << (p & 31);
+			c->used_map[p >> 5] |= 1u << (p & 31);
 		else
-			used_map[p >> 5] &= ~(1u << (p & 31));
+			c->used_map[p >> 5] &= ~(1u << (p & 31));
 	}
 }
 
-// First run of n free pages from start, below end; pool_pages if none
-static uint32_t findRun(uint32_t start, uint32_t end, uint32_t n) {
+// First run of n free pages from start, below end; c->pages if none
+static uint32_t findRun(const Chunk *c, uint32_t start, uint32_t end, uint32_t n) {
 	uint32_t p = start, run = 0;
 	while (p < end) {
 		// whole words taken are skipped
-		if ((p & 31) == 0 && used_map[p >> 5] == 0xFFFFFFFFu) {
+		if ((p & 31) == 0 && c->used_map[p >> 5] == 0xFFFFFFFFu) {
 			p += 32;
 			run = 0;
 			continue;
 		}
-		if (taken(p)) {
+		if (taken(c, p)) {
 			run = 0;
 		} else if (++run == n) {
 			return p + 1 - n;
 		}
 		p++;
 	}
-	return pool_pages;
+	return c->pages;
 }
 
 void *geSgxPoolAlloc(uint32_t bytes) {
 	uint32_t n = (bytes + PAGE - 1) / PAGE;
-	if (!pool || !n)
+	if (!nchunks || !n)
 		return NULL;
 	take();
 	void *mem = NULL;
-	if (n <= free_pages) {
+	int k;
+	for (k = 0; k < nchunks && !mem; k++) {
+		Chunk *c = &chunks[k];
+		if (n > c->free)
+			continue;
 		// next fit: from where the last one ended, then from the start
-		uint32_t first = findRun(rover, pool_pages, n);
-		if (first >= pool_pages)
-			first = findRun(0, rover + n < pool_pages ? rover + n : pool_pages, n);
-		if (first < pool_pages) {
-			mark(first, n, 1);
+		uint32_t first = findRun(c, c->rover, c->pages, n);
+		if (first >= c->pages)
+			first = findRun(c, 0, c->rover + n < c->pages ? c->rover + n : c->pages, n);
+		if (first < c->pages) {
+			mark(c, first, n, 1);
+			c->free -= n;
 			free_pages -= n;
-			rover = first + n < pool_pages ? first + n : 0;
-			mem = pool + first * PAGE;
+			c->rover = first + n < c->pages ? first + n : 0;
+			mem = c->base + first * PAGE;
 		}
 	}
 	give();
@@ -172,13 +190,19 @@ void *geSgxPoolAlloc(uint32_t bytes) {
 
 void geSgxPoolFree(void *mem, uint32_t bytes) {
 	uint32_t n = (bytes + PAGE - 1) / PAGE;
-	if (!pool || !mem || (uint8_t *)mem < pool)
+	int k;
+	for (k = 0; k < nchunks; k++) {
+		Chunk *c = &chunks[k];
+		if ((uint8_t *)mem < c->base || (uint8_t *)mem >= c->base + c->pages * PAGE)
+			continue;
+		uint32_t first = (uint32_t)((uint8_t *)mem - c->base) / PAGE;
+		if (first + n > c->pages)
+			return;
+		take();
+		mark(c, first, n, 0);
+		c->free += n;
+		free_pages += n;
+		give();
 		return;
-	uint32_t first = (uint32_t)((uint8_t *)mem - pool) / PAGE;
-	if (first + n > pool_pages)
-		return;
-	take();
-	mark(first, n, 0);
-	free_pages += n;
-	give();
+	}
 }

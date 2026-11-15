@@ -1789,30 +1789,28 @@ void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data) {
 
 // The CLUT of the last LOADCLUT, read the first time a draw uses it
 /*
-	Games load the same few CLUTs again and again (each object): within a
-	frame one read and hash per CLUT address is enough.
+	Games load the same CLUTs again and again (each object; Need for Speed
+	Carbon has one per texture, hundreds a frame): within a frame one read and
+	hash per CLUT address is enough. A table by address, one entry per slot.
 */
-#define CLUT_CACHE 8
+#define CLUT_CACHE 256
 static struct {
 	const GeSgxWalker *w;
 	uint32_t addr, bytes, flips, hash;
 	uint8_t data[GE_SGX_CLUT_BYTES];
 } clut_cache[CLUT_CACHE];
-static int clut_next = 0;
 
 static void readClut(GeSgxWalker *w) {
 	if (w->clut_read)
 		return;
 	w->clut_read = 1;
-	int i;
-	for (i = 0; i < CLUT_CACHE; i++) {
-		if (clut_cache[i].w == w && clut_cache[i].flips == w->flips && clut_cache[i].addr == w->clut_addr &&
-		    clut_cache[i].bytes == w->clut_load_bytes && w->clut_load_bytes) {
-			memcpy(w->clut, clut_cache[i].data, w->clut_load_bytes);
-			w->clut_bytes = w->clut_load_bytes;
-			w->clut_hash = clut_cache[i].hash;
-			return;
-		}
+	int i = (int)(((w->clut_addr >> 4) ^ (w->clut_addr >> 12)) & (CLUT_CACHE - 1));
+	if (clut_cache[i].w == w && clut_cache[i].flips == w->flips && clut_cache[i].addr == w->clut_addr &&
+	    clut_cache[i].bytes == w->clut_load_bytes && w->clut_load_bytes) {
+		memcpy(w->clut, clut_cache[i].data, w->clut_load_bytes);
+		w->clut_bytes = w->clut_load_bytes;
+		w->clut_hash = clut_cache[i].hash;
+		return;
 	}
 	if (w->clut_load_bytes == 0 || !geSgxRead(w, w->clut_addr, w->clut, w->clut_load_bytes)) {
 		w->clut_bytes = 0;
@@ -1821,8 +1819,6 @@ static void readClut(GeSgxWalker *w) {
 	}
 	w->clut_bytes = w->clut_load_bytes;
 	w->clut_hash = geSgxHash(w->clut, w->clut_bytes);
-	i = clut_next;
-	clut_next = (clut_next + 1) % CLUT_CACHE;
 	clut_cache[i].w = w;
 	clut_cache[i].addr = w->clut_addr;
 	clut_cache[i].bytes = w->clut_bytes;

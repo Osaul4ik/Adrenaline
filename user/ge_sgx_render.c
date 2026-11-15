@@ -1004,13 +1004,15 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			show = findTarget(aliases[a].src);
 	}
 	/*
-		Frames without draws (three in a row, not just a repeated flip): the game
-		writes the picture itself (CPU, transfers), so the renderings hold older
-		ones; the PSP picture is what it shows
+		Frames without draws for half a second: the game writes the picture
+		itself (CPU, transfers, a video), so the renderings hold older ones; the
+		PSP picture is what it shows. A few empty frames are not that: frames
+		the walker could not read whole (its lists were already overwritten)
+		or repeated flips, and the PSP picture then was a flash of another one.
 	*/
 	static uint32_t empty_frames = 0;
 	empty_frames = frame->ndraws ? 0 : empty_frames + 1;
-	if (empty_frames >= 3) {
+	if (empty_frames >= 30) {
 		show = NULL;
 		shown_fb = 0;
 	}
