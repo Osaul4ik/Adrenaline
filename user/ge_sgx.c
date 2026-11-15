@@ -467,9 +467,10 @@ static void publishSlot(uint32_t top) {
 	// Asked (L + SELECT): the next frame built, whatever its size
 	if (ge_sgx_trace_walker && !walker.trace) {
 		ge_sgx_trace_walker = 0;
+		static int dump_asks = 0;
 		trace_asked = 1;
 		walker.trace = 1;
-		walker.dump = 1;
+		walker.dump = ++dump_asks; // each ask its own textures written
 		trace_tries = 0;
 		geSgxBuildTraceClear(&walker);
 	}

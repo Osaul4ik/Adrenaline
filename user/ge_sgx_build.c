@@ -231,8 +231,11 @@ static int32_t drawTexture(GeSgxWalker *w) {
 		*/
 		static uint32_t dumped[48];
 		static uint32_t ndumped = 0;
-		if (!w->dump)
+		static int dump_seen = 0;
+		if (w->dump != dump_seen) { // a new ask (or none): its own list
+			dump_seen = w->dump;
 			ndumped = 0;
+		}
 		uint32_t k;
 		for (k = 0; k < ndumped && dumped[k] != d.addr; k++)
 			;

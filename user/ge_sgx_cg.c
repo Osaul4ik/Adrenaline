@@ -294,6 +294,7 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 						if (atests[atest] < 8)
 							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
 						ADD(key);
+						ADD(key | (1u << 12)); // with the exact scissor
 					}
 				}
 			}

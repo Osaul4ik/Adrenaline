@@ -194,8 +194,8 @@ static void compileSgxShaders(void) {
 	if (!requested && sgxRendererOption() < 2)
 		return;
 
-	static uint32_t keys[512];
-	int n = geSgxCgAllKeys(keys, 512);
+	static uint32_t keys[1024];
+	int n = geSgxCgAllKeys(keys, 1024);
 	int i, missing = 0;
 	char path[96];
 	for (i = 0; i < n; i++) {

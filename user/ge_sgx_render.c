@@ -1129,6 +1129,9 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		int sx1 = d->scissor[2] > tw ? tw : d->scissor[2], sy1 = d->scissor[3] > th ? th : d->scissor[3];
 		int exact = (sx0 & 31) || (sy0 & 31) || (sx1 != tw && (sx1 & 31)) || (sy1 != th && (sy1 & 31));
 		FragmentProgram *fp = fragmentProgram(d, vgxp, exact ? GE_SGX_KEY_SCISSOR : 0);
+		// The exact scissor's program not compiled yet (the app compiles it at Adrenaline's next start): the tiles' scissor
+		if (!fp && exact)
+			fp = fragmentProgram(d, vgxp, 0);
 		if (!fp) {
 			stats->waiting++;
 			drawOutcome(stats, GE_SGX_SKIP_FP, d, i, target_fb, frame);
