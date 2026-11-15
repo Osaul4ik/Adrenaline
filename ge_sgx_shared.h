@@ -86,7 +86,9 @@ typedef struct {
 	volatile unsigned int vram_copy_max_us; // the longest
 	volatile unsigned int vram_copy_how;    // 1: the DMA, 2: the CPU
 	char vram_copy_module[16];              // the module whose sceDmacMemcpy is used
-	unsigned int reserved2[3];
+	volatile unsigned int sync_peeks;   // DrawSync/ListSync(1) calls (polling whether the GE is done)
+	volatile unsigned int sync_held;    // ... answered "drawing" because the Vita side had not read the lists yet
+	volatile unsigned int callbacks;    // sceGeSetCallback calls (games told by the GE's interrupt that it is done)
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;

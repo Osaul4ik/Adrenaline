@@ -42,6 +42,7 @@ static int (* _sceGeListDeQueue)(int qid);
 static int (* _sceGeListUpdateStallAddr)(int qid, void *stall);
 static int (* _sceGeDrawSync)(int syncType);
 static int (* _sceGeListSync)(int qid, int syncType);
+static int (* _sceGeSetCallback)(PspGeCallbackData *cb);
 static int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 static u32 (* _sceKernelGetSystemTimeLow)(void);
 
@@ -174,18 +175,80 @@ static int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
 	return res;
 }
 
+/*
+	A game polling whether the GE is done (syncType 1) and then writing its
+	textures and lists again: the GE may be done before the Vita side has
+	read them (the second game's dialog textures, rewritten as text appears,
+	were read rewritten). While the Vita side has not read every event, a
+	finished GE is answered "drawing" (PSP_GE_LIST_DRAWING), up to the sync
+	timeout from the first such answer (then the Vita side counts as
+	stalled, as for DrawSync).
+*/
+#define PSP_GE_LIST_DRAWING_STATE 2
+static u32 hold_start = 0, hold_target = 0;
+static int holding = 0;
+
+static int vitaBehind(void) {
+	u32 target = ring->write;
+	if (shared->session != ring->session)
+		return 0;
+	u32 read = shared->read;
+	if ((int)(read - target) >= 0) {
+		holding = 0;
+		return 0;
+	}
+	if (vita_stalled) {
+		if (read == vita_stalled_read)
+			return 0;
+		vita_stalled = 0;
+	}
+	u32 now = timeNow();
+	if (!holding || hold_target != target) {
+		holding = 1;
+		hold_target = target;
+		hold_start = now;
+	} else if (_sceKernelGetSystemTimeLow && now - hold_start >= GE_SGX_SYNC_TIMEOUT_US) {
+		ring->sync_timeouts++;
+		vita_stalled = 1;
+		vita_stalled_read = read;
+		holding = 0;
+		return 0;
+	}
+	return 1;
+}
+
 static int sceGeDrawSyncPatched(int syncType) {
 	int res = _sceGeDrawSync(syncType);
-	if (syncType == 0)
+	if (syncType == 0) {
 		waitForVita();
+	} else if (syncType == 1) {
+		ring->sync_peeks++;
+		if (res == 0 && vitaBehind()) {
+			ring->sync_held++;
+			return PSP_GE_LIST_DRAWING_STATE;
+		}
+	}
 	return res;
 }
 
 static int sceGeListSyncPatched(int qid, int syncType) {
 	int res = _sceGeListSync(qid, syncType);
-	if (syncType == 0)
+	if (syncType == 0) {
 		waitForVita();
+	} else if (syncType == 1) {
+		ring->sync_peeks++;
+		if (res == 0 && vitaBehind()) {
+			ring->sync_held++;
+			return PSP_GE_LIST_DRAWING_STATE;
+		}
+	}
 	return res;
+}
+
+// Counted only: games that learn from the GE's interrupt that a list is done
+static int sceGeSetCallbackPatched(PspGeCallbackData *cb) {
+	ring->callbacks++;
+	return _sceGeSetCallback(cb);
 }
 
 /*
@@ -333,6 +396,7 @@ int GeSgxInit(void) {
 	_sceGeListUpdateStallAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE0D68148);
 	_sceGeDrawSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xB287BD61);
 	_sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
+	_sceGeSetCallback = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xA4FC06A4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
 	// VRAM copied with the DMA (1) or the CPU (2)
@@ -378,6 +442,8 @@ int GeSgxInit(void) {
 	sctrlHENPatchSyscall((u32)_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
 	sctrlHENPatchSyscall((u32)_sceGeDrawSync, sceGeDrawSyncPatched);
 	sctrlHENPatchSyscall((u32)_sceGeListSync, sceGeListSyncPatched);
+	if (_sceGeSetCallback)
+		sctrlHENPatchSyscall((u32)_sceGeSetCallback, sceGeSetCallbackPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 	ClearCaches();
 
