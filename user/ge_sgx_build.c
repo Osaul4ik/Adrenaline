@@ -222,6 +222,34 @@ static int32_t drawTexture(GeSgxWalker *w) {
 			(unsigned)reg(w, GE_CMD_TEXMODE), (unsigned)(((reg(w, GE_CMD_TEXMODE) >> 16) & 7) + 1), (unsigned)reg(w, 0xC8u),
 			(unsigned)d.clut_format, (unsigned)d.clut_bytes, c16 ? "16 bit" : "32 bit",
 			d.clut_bytes >= 8 ? (unsigned)pal[0] : 0u, d.clut_bytes >= 8 ? (unsigned)pal[1] : 0u, (unsigned)data[0], (unsigned)data[1]);
+
+		/*
+			Asked for (L + SELECT): each texture's PSP data and palette as they
+			are, once a frame, to check the conversion against them
+			(tex_<addr>_f<format>_<w>x<h>_b<bufw>_s<swizzle>_c<clut format>.raw,
+			the palette's bytes after the texels)
+		*/
+		static uint32_t dumped[48];
+		static uint32_t ndumped = 0;
+		if (!w->dump)
+			ndumped = 0;
+		uint32_t k;
+		for (k = 0; k < ndumped && dumped[k] != d.addr; k++)
+			;
+		if (w->dump && w->dump_fn && k == ndumped && ndumped < 48) {
+			dumped[ndumped++] = d.addr;
+			uint32_t bytes = geSgxTexRowBytes(d.format, d.bufw) * geSgxTexRows(&d);
+			static uint8_t raw[512 * 1024 + 1024];
+			if (bytes && bytes <= 512 * 1024 && geSgxRead(w, d.addr & 0x0FFFFFFFu, raw, bytes)) {
+				uint32_t cb = d.clut_bytes <= 1024 ? d.clut_bytes : 0;
+				if (cb)
+					memcpy(raw + bytes, w->clut, cb);
+				char name[96];
+				snprintf(name, sizeof(name), "tex_%X_f%u_%ux%u_b%u_s%u_c%X.raw", (unsigned)d.addr, (unsigned)d.format, (unsigned)d.w,
+					(unsigned)d.h, (unsigned)d.bufw, (unsigned)d.swizzle, (unsigned)d.clut_format);
+				w->dump_fn(name, raw, bytes + cb);
+			}
+		}
 	}
 	return id;
 }

@@ -704,6 +704,7 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	void *texture_user = w->texture_user;
 	GeSgxBulkFn bulk_fn = w->bulk_fn;
 	GeSgxVramCopyFn vram_copy_fn = w->vram_copy_fn;
+	void (*dump_fn)(const char *, const void *, uint32_t) = w->dump_fn;
 	uint32_t (* clock_fn)(void) = w->clock_fn;
 	uint32_t clock_every = w->clock_every;
 	void (* log_fn)(const char *fmt, ...) = w->log_fn;
@@ -721,6 +722,7 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	w->texture_user = texture_user;
 	w->bulk_fn = bulk_fn;
 	w->vram_copy_fn = vram_copy_fn;
+	w->dump_fn = dump_fn;
 }
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {

@@ -192,6 +192,9 @@ typedef struct {
 	void *texture_user;
 	GeSgxBulkFn bulk_fn;
 	GeSgxVramCopyFn vram_copy_fn;
+	// Diagnostics: a traced frame asked for writes its textures' PSP data (name, bytes) when dump is set
+	void (*dump_fn)(const char *name, const void *data, uint32_t bytes);
+	int dump;
 	/*
 		Optional clock for the build profile in the frame (any unit: the
 		frame's us_* are in it). clock_every: one primitive in that many is

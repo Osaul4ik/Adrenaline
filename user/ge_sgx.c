@@ -228,6 +228,18 @@ static void clockInit(GeSgxWalker *w) {
 	clock_ticks_per_us = 1;
 }
 
+// Diagnostics: a file of the asked trace's dump (the walker's textures)
+static void dumpFn(const char *name, const void *data, uint32_t bytes) {
+	char path[128];
+	sceIoMkdir("ux0:data/adrenaline/sgx_dump", 0777);
+	snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%s", name);
+	SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, data, bytes);
+		sceIoClose(fd);
+	}
+}
+
 /*
 	A GE transfer into VRAM on the Vita side's copy (the window, which the
 	flip's copy from the PSP fills too): the textures it brings are there
@@ -437,6 +449,7 @@ static void publishSlot(uint32_t top) {
 	if (walker.trace && building && walker.frame) {
 		if (building->data.ndraws >= 1000 || (trace_asked && building->data.ndraws)) {
 			trace_asked = 0;
+			walker.dump = 0;
 			uint32_t len;
 			const char *text = geSgxBuildTraceText(&len);
 			GeSgxLog("GeSgx T: begin (%u lines)\n", (unsigned)walker.trace_lines);
@@ -447,6 +460,7 @@ static void publishSlot(uint32_t top) {
 		} else if (++trace_tries >= 600) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
 			walker.trace = 0;
+			walker.dump = 0;
 		}
 		geSgxBuildTraceClear(&walker);
 	}
@@ -455,6 +469,7 @@ static void publishSlot(uint32_t top) {
 		ge_sgx_trace_walker = 0;
 		trace_asked = 1;
 		walker.trace = 1;
+		walker.dump = 1;
 		trace_tries = 0;
 		geSgxBuildTraceClear(&walker);
 	}
@@ -920,6 +935,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
 			walker.vram_copy_fn = vramCopyFn;
+			walker.dump_fn = dumpFn;
 			clockInit(&walker);
 			walker.log_fn = GeSgxLog;
 			walker.gpu_transform = !GE_SGX_TEST_CPU_TRANSFORM;
