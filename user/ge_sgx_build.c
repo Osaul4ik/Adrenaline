@@ -1086,8 +1086,11 @@ static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	w->trace_lines++;
-	int n = snprintf(trace_text + trace_len, TRACE_BYTES - trace_len, "GeSgx T: %s\n", line);
-	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES)
+	// The last 4 KB kept for the depth lines (below)
+	if (trace_len + 4096 >= TRACE_BYTES)
+		return;
+	int n = snprintf(trace_text + trace_len, TRACE_BYTES - 4096 - trace_len, "GeSgx T: %s\n", line);
+	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES - 4096)
 		trace_len += (uint32_t)n;
 	else
 		trace_text[trace_len] = '\0';

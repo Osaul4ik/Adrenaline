@@ -796,6 +796,17 @@ typedef struct {
 } Snapshot;
 static Snapshot snap;
 static int snap_ready = 0;
+/*
+	The copy's quad: its 4 vertices and 6 indices in uncached memory of its
+	own, written when the snapshot is made (vita2d's pool is cached memory:
+	what the CPU just wrote there may not have reached the RAM the GPU
+	reads, and stale indices made the GPU read past the vertices)
+*/
+typedef struct {
+	GeSgxVertex v[4];
+	uint16_t ix[8];
+} SnapQuad;
+static SnapQuad *snap_quad = NULL;
 static uint32_t snap_fb = 0xFFFFFFFFu; // framebuffer whose rendering the snapshot holds (this frame)
 static uint32_t snap_count = 0;        // snapshots this frame
 static int snap_failures = 0;
@@ -843,7 +854,26 @@ static int snapshotMake(int w, int h) {
 			snap.mem = NULL;
 		}
 	}
-	int err = snap.mem ? 0 : -1;
+	if (!snap_quad)
+		snap_quad = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, 4096, SCE_GXM_MEMORY_ATTRIB_READ);
+	int err = snap.mem && snap_quad ? 0 : -1;
+	if (!err) {
+		// Pixels of the target (the viewport is the screen's); the GPU no longer reads the old ones (finished)
+		int k;
+		for (k = 0; k < 4; k++) {
+			GeSgxVertex *v = &snap_quad->v[k];
+			v->x = (k & 1) ? (float)w : 0.0f;
+			v->y = (k & 2) ? (float)h : 0.0f;
+			v->z = 0.5f;
+			v->w = 1.0f;
+			v->u = (k & 1) ? 1.0f : 0.0f;
+			v->v = (k & 2) ? 1.0f : 0.0f;
+			v->color = 0xFFFFFFFFu;
+			v->fog = 1.0f;
+		}
+		static const uint16_t ix[6] = { 0, 1, 2, 1, 3, 2 };
+		memcpy(snap_quad->ix, ix, sizeof(ix));
+	}
 	if (!err) {
 		// Alpha 1 (the draws sampling it with its alpha get an opaque framebuffer, as the targets' are)
 		uint32_t *px = snap.mem, k, n = (uint32_t)w * h;
@@ -895,22 +925,7 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 	if (reset_pool)
 		vita2d_pool_reset();
 	sceGxmBeginScene(ctx, 0, snap.rtgt, NULL, NULL, NULL, &snap.sfc, NULL);
-	GeSgxVertex *v = vita2d_pool_memalign(4 * sizeof(GeSgxVertex), sizeof(GeSgxVertex));
-	uint16_t *ix = vita2d_pool_memalign(6 * sizeof(uint16_t), sizeof(uint16_t));
-	if (v && ix) {
-		int k;
-		for (k = 0; k < 4; k++) {
-			// Pixels of the target (the viewport is the screen's)
-			v[k].x = (k & 1) ? (float)w : 0.0f;
-			v[k].y = (k & 2) ? (float)h : 0.0f;
-			v[k].z = 0.5f;
-			v[k].w = 1.0f;
-			v[k].u = (k & 1) ? 1.0f : 0.0f;
-			v[k].v = (k & 2) ? 1.0f : 0.0f;
-			v[k].color = 0xFFFFFFFFu;
-			v[k].fog = 1.0f;
-		}
-		ix[0] = 0; ix[1] = 1; ix[2] = 2; ix[3] = 1; ix[4] = 3; ix[5] = 2;
+	{
 		SceGxmTexture tex = src->gxm_tex;
 		sceGxmTextureSetUAddrMode(&tex, SCE_GXM_TEXTURE_ADDR_CLAMP);
 		sceGxmTextureSetVAddrMode(&tex, SCE_GXM_TEXTURE_ADDR_CLAMP);
@@ -936,12 +951,12 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 				setColorUniform(uniforms, fp->fog_color, 0);
 		}
 		sceGxmSetFragmentTexture(ctx, 0, &tex);
-		sceGxmSetVertexStream(ctx, 0, v);
-		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, ix, 6);
+		sceGxmSetVertexStream(ctx, 0, snap_quad->v);
+		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, snap_quad->ix, 6);
 		sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 	}
 	sceGxmEndScene(ctx, NULL, NULL);
-	return v && ix;
+	return 1;
 }
 
 /*
