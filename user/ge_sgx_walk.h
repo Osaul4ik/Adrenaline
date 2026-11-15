@@ -184,8 +184,13 @@ typedef struct {
 	GeSgxTextureFn texture_fn;
 	void *texture_user;
 	GeSgxBulkFn bulk_fn;
-	// Optional microsecond clock, for the build profile in the frame
+	/*
+		Optional clock for the build profile in the frame (any unit: the
+		frame's us_* are in it). clock_every: one primitive in that many is
+		timed (a power of 2; 0 or 1 every one), for a clock that costs.
+	*/
 	uint32_t (* clock_fn)(void);
+	uint32_t clock_every;
 	// Optional log for diagnostics; while trace is set, the frame is traced into it
 	void (* log_fn)(const char *fmt, ...);
 	int trace;

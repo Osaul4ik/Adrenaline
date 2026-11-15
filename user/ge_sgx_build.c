@@ -178,6 +178,11 @@ uint32_t geSgxHash(const void *data, uint32_t size) {
 }
 
 static void readClut(GeSgxWalker *w);
+
+// The current primitive's timing (geSgxBuildPrim): its clock, NULL when it is not timed
+static uint32_t (* time_clk)(void) = NULL;
+static uint32_t time_every = 1;
+
 static void traceLine(GeSgxWalker *w, const char *fmt, ...);
 
 static int32_t drawTexture(GeSgxWalker *w) {
@@ -195,7 +200,10 @@ static int32_t drawTexture(GeSgxWalker *w) {
 	d.format = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
 	d.swizzle = (uint8_t)(reg(w, GE_CMD_TEXMODE) & 1);
 	if (d.format >= 4 && d.format <= 7) {
+		uint32_t tc = time_clk ? time_clk() : 0;
 		readClut(w);
+		if (time_clk)
+			w->frame->us_clut += (time_clk() - tc) * time_every;
 		d.clut_format = reg(w, GE_CMD_CLUTFORMAT);
 		d.clut = w->clut;
 		d.clut_bytes = w->clut_bytes;
@@ -1383,6 +1391,15 @@ static int rawGather(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout 
 	return 1;
 }
 
+static int timedUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, const Xform *x, uint32_t (* clk)(void), uint32_t every) {
+	if (!clk)
+		return gpuUniforms(w, f, l, x);
+	uint32_t t0 = clk();
+	int ok = gpuUniforms(w, f, l, x);
+	f->us_vuni += (clk() - t0) * every;
+	return ok;
+}
+
 void geSgxBuildFinish(GeSgxWalker *w) {
 	if (raw_frame == w->frame)
 		rawFlush(w);
@@ -1398,8 +1415,6 @@ void geSgxBuildFinish(GeSgxWalker *w) {
 	or point list of indices relative to them, which lets consecutive
 	primitives of one state share a GXM draw.
 */
-#define TIME_EVERY 32u
-
 void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l) {
 	GeSgxFrameData *f = w->frame;
 
@@ -1415,12 +1430,15 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	static const GeSgxWalker *cached_w = NULL;
 	static const GeSgxFrameData *cached_frame = NULL;
 	/*
-		Timing for the log: one primitive in TIME_EVERY, counted TIME_EVERY
-		times. The clock is a system call (2.4 us); read 3-5 times for every
-		primitive it took most of the walker's time in a race (12000 a frame).
+		Timing for the log: one primitive in clock_every, counted that many
+		times (a system call clock is 2.4 us; read 3-5 times for every
+		primitive it would take much of the walker's time, 12000 a frame).
 	*/
 	static uint32_t prims_seen = 0;
+	const uint32_t TIME_EVERY = w->clock_every > 1 ? w->clock_every : 1;
 	uint32_t (* clk)(void) = ((++prims_seen & (TIME_EVERY - 1)) == 0) ? w->clock_fn : NULL;
+	time_clk = clk;
+	time_every = TIME_EVERY;
 	uint32_t t0 = clk ? clk() : 0, t1;
 	if (w->state_dirty || cached_w != w || cached_frame != f) {
 		drawState(w, &cached_d);
@@ -1541,6 +1559,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		for (i = 0; i < count; i++)
 			prim_index[i] = i;
 	}
+	if (clk)
+		f->us_vindex += (clk() - t0) * TIME_EVERY;
 
 	uint32_t vstart = f->nvertices, istart = f->nindices;
 	GeSgxVertex *vout = &f->vertices[vstart];
@@ -1566,7 +1586,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			why = GE_SGX_CPU_SPRITES;
 		else if (!gpuLayout(w, l))
 			why = GE_SGX_CPU_LAYOUT;
-		else if (!gpuUniforms(w, f, l, xp))
+		else if (!timedUniforms(w, f, l, xp, clk, TIME_EVERY))
 			why = GE_SGX_CPU_FULL;
 		else if (range <= GE_SGX_MAX_DRAW_VERTICES && directVertices(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
 			// The GPU reads the PSP's memory: nothing to copy

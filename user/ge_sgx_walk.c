@@ -704,11 +704,13 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	void *texture_user = w->texture_user;
 	GeSgxBulkFn bulk_fn = w->bulk_fn;
 	uint32_t (* clock_fn)(void) = w->clock_fn;
+	uint32_t clock_every = w->clock_every;
 	void (* log_fn)(const char *fmt, ...) = w->log_fn;
 	int gpu_transform = w->gpu_transform;
 	uint32_t direct_start = w->direct_start, direct_size = w->direct_size;
 	geSgxWalkerInit(w, w->page_fn, w->user);
 	w->clock_fn = clock_fn;
+	w->clock_every = clock_every;
 	w->log_fn = log_fn;
 	w->gpu_transform = gpu_transform;
 	w->direct_start = direct_start;

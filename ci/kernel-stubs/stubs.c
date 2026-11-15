@@ -21,4 +21,8 @@ int kuGeSgxFreeMemBlock(void *base) {
   return 0;
 }
 
+unsigned int kuGeSgxCycleCounterEnable(void) {
+  return 0;
+}
+
 void _start() __attribute__ ((weak, alias ("module_start")));

@@ -164,7 +164,8 @@ typedef struct {
 	uint32_t state_builds;   // times the draw state was built anew
 	// Build profile (with a clock): state setup, texture lookups, vertices
 	// (reading and transforming), indices and the rest of a primitive
-	uint32_t us_state, us_texture, us_vertices, us_indices;
+	// Build profile, in the walker's clock (see clock_fn): vertices includes vindex (reading the indices) and vuni (uniforms), texture clut
+	uint32_t us_state, us_texture, us_vertices, us_indices, us_vindex, us_vuni, us_clut;
 } GeSgxFrameData;
 
 #endif

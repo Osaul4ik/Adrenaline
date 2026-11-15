@@ -246,3 +246,24 @@ int kuGeSgxFreeMemBlock(void *base) {
 	EXIT_SYSCALL(state);
 	return res;
 }
+
+/*
+	The CPU's cycle counter for the calling core's user code (the walker's
+	timing: one instruction instead of a 2.4 us system call). PMUSERENR lets
+	user mode read it, PMCR starts the counters, PMCNTENSET the cycle one.
+	Returns the counter (0: it does not run).
+*/
+unsigned int kuGeSgxCycleCounterEnable(void) {
+	uint32_t state;
+	ENTER_SYSCALL(state);
+	uint32_t v;
+	asm volatile("mcr p15, 0, %0, c9, c14, 0" :: "r"(1));            // PMUSERENR: user access
+	asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(v));            // PMCR
+	v = (v | 1u) & ~(1u << 3);                                       // enabled, every cycle (no divider)
+	asm volatile("mcr p15, 0, %0, c9, c12, 0" :: "r"(v));
+	asm volatile("mcr p15, 0, %0, c9, c12, 1" :: "r"(1u << 31));     // PMCNTENSET: the cycle counter
+	asm volatile("isb");
+	asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(v));            // PMCCNTR
+	EXIT_SYSCALL(state);
+	return v;
+}

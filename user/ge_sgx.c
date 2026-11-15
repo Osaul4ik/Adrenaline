@@ -43,6 +43,7 @@
 #include "main.h"
 #include "ge_sgx.h"
 #include "ge_sgx_pool.h"
+#include "../ge_sgx_kernel.h"
 #include "ge_sgx_tex.h"
 #include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
@@ -219,6 +220,41 @@ static uint32_t clockUs(void) {
 	return sceKernelGetProcessTimeLow();
 }
 
+/*
+	The walker's core's cycle counter (adrenaline_kernel lets user code read
+	it): one instruction, the build is timed at every primitive. Only on the
+	walker's thread, which stays on core 0 (where it is enabled).
+*/
+static uint32_t clock_ticks_per_us = 1;
+
+static uint32_t clockCycles(void) {
+	uint32_t v;
+	asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(v));
+	return v;
+}
+
+static void clockInit(GeSgxWalker *w) {
+	w->clock_fn = clockUs;
+	w->clock_every = 32;
+	clock_ticks_per_us = 1;
+	GeSgxLog("GeSgx clock: the cycle counter...\n");
+	uint32_t c0 = kuGeSgxCycleCounterEnable();
+	SceUInt64 t0 = sceKernelGetProcessTimeWide();
+	uint32_t c1 = clockCycles();
+	sceKernelDelayThread(20 * 1000);
+	uint32_t c2 = clockCycles();
+	SceUInt64 t1 = sceKernelGetProcessTimeWide();
+	uint32_t us = (uint32_t)(t1 - t0);
+	uint32_t tpu = us ? (c2 - c1) / us : 0;
+	GeSgxLog("GeSgx clock: cycle counter %08X %08X %08X over %u us: %u per us\n", (unsigned)c0, (unsigned)c1, (unsigned)c2, (unsigned)us, (unsigned)tpu);
+	if (tpu >= 100 && tpu <= 1000) {
+		w->clock_fn = clockCycles;
+		w->clock_every = 1;
+		clock_ticks_per_us = tpu;
+	}
+	GeSgxLog("GeSgx clock: %s\n", w->clock_fn == clockCycles ? "cycles, every primitive" : "the system's, one primitive in 32");
+}
+
 // Vertices of big primitives: one DMA (about 80 us a call, then 2 ns/byte against 11 for a copy)
 static int bulkFn(uint32_t addr, void *dst, uint32_t size) {
 	const uint8_t *src = geSgxPspPtr(addr, size);
@@ -360,6 +396,7 @@ static void acquireSlot(void) {
 			s->data.vertices_built = 0;
 			s->data.state_builds = 0;
 			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
+			s->data.us_vindex = s->data.us_vuni = s->data.us_clut = 0;
 			s->data.skipped_other = 0;
 			building = s;
 			walker.frame = &s->data;
@@ -805,7 +842,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
 	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0, frame_stats_cpu[3] = { 0 };
-	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[4] = { 0 }; // per log interval
+	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[7] = { 0 }; // per log interval
+	uint32_t interval_walk_us = 0; // all of the walker's time in it (the build included)
 	SceUInt64 session_start = 0;
 
 	// Per second
@@ -864,7 +902,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
-			walker.clock_fn = clockUs;
+			clockInit(&walker);
 			walker.log_fn = GeSgxLog;
 			walker.gpu_transform = !GE_SGX_TEST_CPU_TRANSFORM;
 			GeSgxLog("GeSgx: transform on the %s\n", GE_SGX_TEST_CPU_TRANSFORM ? "CPU (test)" : "GPU");
@@ -998,10 +1036,14 @@ static int GeSgxThread(SceSize args, void *argp) {
 							frame_stats_verts = building->data.nvertices;
 							built_vertices += building->data.vertices_built;
 							built_states += building->data.state_builds;
-							built_us[0] += building->data.us_state;
-							built_us[1] += building->data.us_texture;
-							built_us[2] += building->data.us_vertices;
-							built_us[3] += building->data.us_indices;
+							// The walker's clock: microseconds or cycles
+							built_us[0] += building->data.us_state / clock_ticks_per_us;
+							built_us[1] += building->data.us_texture / clock_ticks_per_us;
+							built_us[2] += building->data.us_vertices / clock_ticks_per_us;
+							built_us[3] += building->data.us_indices / clock_ticks_per_us;
+							built_us[4] += building->data.us_vindex / clock_ticks_per_us;
+							built_us[5] += building->data.us_vuni / clock_ticks_per_us;
+							built_us[6] += building->data.us_clut / clock_ticks_per_us;
 							built_frames++;
 						}
 						publishSlot(e->a);
@@ -1038,6 +1080,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 					(unsigned)e->type, (unsigned)dt, walker.count, (unsigned)walker.stats.commands, (unsigned)walker.stats.bad);
 			}
 			walk_us += dt;
+			interval_walk_us += dt;
 			if (dt > walk_max_us)
 				walk_max_us = dt;
 		}
@@ -1087,17 +1130,19 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u vertices %u indices %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u | interval: %u frames, vertices %u, states %u, us state %u texture %u (clut %u) vertices %u (index read %u, uniforms %u) indices %u, walk %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
 					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
 					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other,
 					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
-					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[2], (unsigned)built_us[3],
+					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[6], (unsigned)built_us[2], (unsigned)built_us[4],
+					(unsigned)built_us[5], (unsigned)built_us[3], (unsigned)interval_walk_us,
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
 				built_vertices = built_states = built_frames = 0;
 				memset(built_us, 0, sizeof(built_us));
+				interval_walk_us = 0;
 			}
 
 			if (now - thread_report >= LOG_INTERVAL_US) {
