@@ -181,6 +181,35 @@ static int sgxRendererOption(void) {
 }
 
 /*
+	A program the compiler failed on (or crashed on: its .try mark left
+	behind) gets <path>.fail with the generator's revision in it; it is
+	not tried again until the generator changes (GE_SGX_CG_GEN_REV)
+*/
+static void writeFail(const char *path) {
+	char fail[104], rev[16];
+	snprintf(fail, sizeof(fail), "%s.fail", path);
+	int len = snprintf(rev, sizeof(rev), "%d", GE_SGX_CG_GEN_REV);
+	SceUID fd = sceIoOpen(fail, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, rev, len);
+		sceIoClose(fd);
+	}
+}
+
+static int failedBefore(const char *path) {
+	char fail[104], rev[16], now[16];
+	snprintf(fail, sizeof(fail), "%s.fail", path);
+	SceUID fd = sceIoOpen(fail, SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return 0;
+	int len = sceIoRead(fd, rev, sizeof(rev) - 1);
+	sceIoClose(fd);
+	rev[len > 0 ? len : 0] = '\0';
+	snprintf(now, sizeof(now), "%d", GE_SGX_CG_GEN_REV);
+	return strcmp(rev, now) == 0;
+}
+
+/*
 	SGX renderer: libshacccg.suprx cannot be loaded inside the emulator
 	(ScePspemu), only in a normal app like this one. With the renderer on
 	(or when adrenaline_user asked for it, GE_SGX_CG_REQUEST), compile every
@@ -200,21 +229,23 @@ static void compileSgxShaders(void) {
 	char path[96], mark[104];
 	/*
 		A program the compiler could not make, or that crashed it (its
-		.try mark left from the try), is not tried again: <path>.fail
+		.try mark left from the try), is not tried again with this
+		generator: <path>.fail
 	*/
 	for (i = 0; i < n; i++) {
 		geSgxCgPath(keys[i], path, sizeof(path));
 		snprintf(mark, sizeof(mark), "%s.try", path);
 		if (sceIoGetstat(mark, &stat) >= 0) {
+			// The .try holds the revision it was tried with: a crash of an older generator is tried again
 			char fail[104];
 			snprintf(fail, sizeof(fail), "%s.fail", path);
+			sceIoRemove(fail);
 			sceIoRename(mark, fail);
 		}
 	}
 	for (i = 0; i < n; i++) {
 		geSgxCgPath(keys[i], path, sizeof(path));
-		snprintf(mark, sizeof(mark), "%s.fail", path);
-		if (sceIoGetstat(path, &stat) < 0 && sceIoGetstat(mark, &stat) < 0)
+		if (sceIoGetstat(path, &stat) < 0 && !failedBefore(path))
 			missing++;
 	}
 
@@ -245,14 +276,17 @@ static void compileSgxShaders(void) {
 		int x = psvDebugScreenGetX(), y = psvDebugScreenGetY();
 		for (i = 0; i < n; i++) {
 			geSgxCgPath(keys[i], path, sizeof(path));
-			snprintf(mark, sizeof(mark), "%s.fail", path);
-			if (sceIoGetstat(path, &stat) >= 0 || sceIoGetstat(mark, &stat) >= 0)
+			if (sceIoGetstat(path, &stat) >= 0 || failedBefore(path))
 				continue;
-			// The .try mark: if the compiler crashes on this one, the next start skips it
+			// The .try mark (with the generator's revision): if the compiler crashes on this one, the next start skips it
 			snprintf(mark, sizeof(mark), "%s.try", path);
 			SceUID fd = sceIoOpen(mark, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-			if (fd >= 0)
+			if (fd >= 0) {
+				char rev[16];
+				int len = snprintf(rev, sizeof(rev), "%d", GE_SGX_CG_GEN_REV);
+				sceIoWrite(fd, rev, len);
 				sceIoClose(fd);
+			}
 			uint32_t size = 0;
 			SceGxmProgram *program = geSgxCgCompile(keys[i], &size, compileLog);
 			if (program) {
@@ -260,9 +294,8 @@ static void compileSgxShaders(void) {
 				free(program);
 				sceIoRemove(mark);
 			} else {
-				char fail[104];
-				snprintf(fail, sizeof(fail), "%s.fail", path);
-				sceIoRename(mark, fail);
+				writeFail(path);
+				sceIoRemove(mark);
 				failed++;
 			}
 			done++;

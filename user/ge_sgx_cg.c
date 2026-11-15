@@ -205,7 +205,8 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		atest ? ", uniform float uAlphaRef" : "",
 		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "",
 		sc ? ", float4 wpos : WPOS, uniform float4 uScissor" : "",
-		sc ? "	if (any(wpos.xy < uScissor.xy) || any(wpos.xy >= uScissor.zw))\n		discard;\n" : "");
+		// One discard at the end with the alpha test's (two made the compiler fail on the biggest programs)
+		sc ? "	bool inside = all(wpos.xy >= uScissor.xy) && all(wpos.xy < uScissor.zw);\n" : "");
 
 	if (!clear && textured) {
 		static const char *funcs[5] = {
@@ -251,7 +252,9 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 			"c.a > uAlphaRef + (0.5 / 255.0)",         // greater
 			"c.a >= uAlphaRef - (0.5 / 255.0)",        // greater or equal
 		};
-		n += snprintf(buf + n, size - n, "	if (!(%s))\n		discard;\n", tests[afunc]);
+		n += snprintf(buf + n, size - n, sc ? "	if (!(inside && (%s)))\n		discard;\n" : "	if (!(%s))\n		discard;\n", tests[afunc]);
+	} else if (sc) {
+		n += snprintf(buf + n, size - n, "	if (!inside)\n		discard;\n");
 	}
 
 	n += snprintf(buf + n, size - n, "	return saturate(c);\n}\n");
