@@ -1398,6 +1398,8 @@ void geSgxBuildFinish(GeSgxWalker *w) {
 	or point list of indices relative to them, which lets consecutive
 	primitives of one state share a GXM draw.
 */
+#define TIME_EVERY 32u
+
 void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l) {
 	GeSgxFrameData *f = w->frame;
 
@@ -1412,7 +1414,13 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	static Xform cached_x;
 	static const GeSgxWalker *cached_w = NULL;
 	static const GeSgxFrameData *cached_frame = NULL;
-	uint32_t (* clk)(void) = w->clock_fn;
+	/*
+		Timing for the log: one primitive in TIME_EVERY, counted TIME_EVERY
+		times. The clock is a system call (2.4 us); read 3-5 times for every
+		primitive it took most of the walker's time in a race (12000 a frame).
+	*/
+	static uint32_t prims_seen = 0;
+	uint32_t (* clk)(void) = ((++prims_seen & (TIME_EVERY - 1)) == 0) ? w->clock_fn : NULL;
 	uint32_t t0 = clk ? clk() : 0, t1;
 	if (w->state_dirty || cached_w != w || cached_frame != f) {
 		drawState(w, &cached_d);
@@ -1450,13 +1458,13 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		} else if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
 			if (clk) {
 				t1 = clk();
-				f->us_state += t1 - t0;
+				f->us_state += (t1 - t0) * TIME_EVERY;
 				t0 = t1;
 			}
 			cached_d.texture = drawTexture(w);
 			if (clk) {
 				t1 = clk();
-				f->us_texture += t1 - t0;
+				f->us_texture += (t1 - t0) * TIME_EVERY;
 				t0 = t1;
 			}
 			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
@@ -1470,7 +1478,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	}
 	if (clk) {
 		t1 = clk();
-		f->us_state += t1 - t0;
+		f->us_state += (t1 - t0) * TIME_EVERY;
 		t0 = t1;
 	}
 	if ((cached_d.flags & GE_SGX_DRAW_TEXTURED) && cached_d.texture < 0) {
@@ -1717,8 +1725,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		if (type == GE_PRIM_RECTANGLES)
 			t_vert += t1 - t0; // corners and indices together
 		else
-			f->us_indices += t1 - t0;
-		f->us_vertices += t_vert;
+			f->us_indices += (t1 - t0) * TIME_EVERY;
+		f->us_vertices += t_vert * TIME_EVERY;
 	}
 	if (!xp->through)
 		f->draws_3d++;
