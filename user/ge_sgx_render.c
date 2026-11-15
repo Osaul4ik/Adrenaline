@@ -1301,6 +1301,66 @@ static void dumpFrame(SceGxmContext *ctx, uint32_t frame_no) {
 	}
 }
 
+/*
+	Diagnostics: the last HIST_FRAMES frames, each in one line (what it
+	flipped, what was shown, its draws in runs of the same texture: handle,
+	size, count; fb<X> for a framebuffer's rendering), written to the log
+	with an asked trace (L + SELECT): a glitch of one frame is gone before
+	the buttons are pressed, its frame is still here.
+*/
+#define HIST_FRAMES 160
+#define HIST_BYTES 1024
+static char hist[HIST_FRAMES][HIST_BYTES];
+static uint32_t hist_next = 0;
+
+static void histRecord(uint32_t frame_no, const GeSgxFrameData *frame, uint32_t fb, const Target *show) {
+	char *l = hist[hist_next % HIST_FRAMES];
+	hist_next++;
+	int n = snprintf(l, HIST_BYTES, "GeSgx H: frame %u flips %X shows %X, %u draws:", (unsigned)frame_no, (unsigned)fb,
+		show ? (unsigned)show->fb : 0xFFFFFFFFu, (unsigned)frame->ndraws);
+	uint32_t i, run_key = 0xFFFFFFFFu, run_n = 0, run_fb = 0;
+	for (i = 0; i <= frame->ndraws && n > 0 && n < HIST_BYTES - 48; i++) {
+		uint32_t key = 0xFFFFFFFEu, dfb = 0;
+		if (i < frame->ndraws) {
+			const GeSgxDraw *d = &frame->draws[i];
+			dfb = d->fb;
+			key = !(d->flags & GE_SGX_DRAW_TEXTURED) ? 0xFFFFFFFDu : d->fbtex ? (0x80000000u | (d->fbtex - 1)) : (uint32_t)d->texture;
+		}
+		if (i < frame->ndraws && key == run_key && dfb == run_fb) {
+			run_n++;
+			continue;
+		}
+		if (run_n) {
+			if (run_key == 0xFFFFFFFDu) {
+				n += snprintf(l + n, HIST_BYTES - n, " %X:-x%u", (unsigned)run_fb, (unsigned)run_n);
+			} else if (run_key & 0x80000000u) {
+				n += snprintf(l + n, HIST_BYTES - n, " %X:fb%Xx%u", (unsigned)run_fb, (unsigned)(run_key & 0x7FFFFFFFu), (unsigned)run_n);
+			} else {
+				const SceGxmTexture *t = geSgxTexGet((int32_t)run_key);
+				n += snprintf(l + n, HIST_BYTES - n, " %X:%X/%ux%ux%u", (unsigned)run_fb, (unsigned)run_key,
+					t ? (unsigned)sceGxmTextureGetWidth(t) : 0u, t ? (unsigned)sceGxmTextureGetHeight(t) : 0u, (unsigned)run_n);
+			}
+		}
+		run_key = key;
+		run_fb = dfb;
+		run_n = 1;
+	}
+	if (n > 0 && n < HIST_BYTES - 2) {
+		l[n++] = '\n';
+		l[n] = '\0';
+	} else {
+		l[HIST_BYTES - 2] = '\n';
+		l[HIST_BYTES - 1] = '\0';
+	}
+}
+
+static void histDump(void) {
+	uint32_t k, count = hist_next < HIST_FRAMES ? hist_next : HIST_FRAMES;
+	GeSgxLog("GeSgx H: the last %u frames\n", (unsigned)count);
+	for (k = hist_next - count; k != hist_next; k++)
+		GeSgxLogText(hist[k % HIST_FRAMES], strlen(hist[k % HIST_FRAMES]));
+}
+
 vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t fb,
 	const GeSgxAlias *aliases, int naliases, GeSgxRenderStats *stats, int *scenes) {
 	SceUInt64 t0 = sceKernelGetProcessTimeWide();
@@ -1316,8 +1376,10 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	rframes++;
 	rtrace = 0;
 	int asked = ge_sgx_trace_render && frame->ndraws;
-	if (asked)
+	if (asked) {
 		ge_sgx_trace_render = 0;
+		histDump();
+	}
 	if (asked || (frame->ndraws >= 1000 && big_traces < 3 && rframes - last_trace >= 300) || rframes == 600 || rframes == 1800) {
 		rtrace = 1;
 		rtrace_len = rtrace_lines = 0;
@@ -1494,6 +1556,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		if (asked)
 			dumpFrame(ctx, rframes);
 	}
+	histRecord(rframes, frame, fb, show);
 	return show ? show->tex : NULL;
 }
 
