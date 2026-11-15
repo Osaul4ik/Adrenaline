@@ -50,6 +50,24 @@ uint32_t geSgxTexRowBytes(uint32_t format, uint32_t bufw) {
 	}
 }
 
+/*
+	The GE reads a texture's rows a multiple of 16 bytes apart: the low bits
+	of its buffer width are ignored, and a width under 16 bytes is 16 bytes
+	(PPSSPP GetTextureBufw). The second game's 16x128 CLUT4 panels (buffer
+	width 16: 8 bytes) are rows of 16 bytes (32 texels): read as 8, half of
+	each was another row, and the 16 byte swizzle blocks did not even fit.
+*/
+uint32_t geSgxTexBufw(uint32_t format, uint32_t bufw_reg) {
+	static const uint16_t mask[11] = { 0x7F8, 0x7F8, 0x7F8, 0x7FC, 0x7E0, 0x7F0, 0x7F8, 0x7FC, 0x7FF, 0x7FF, 0x7FF };
+	static const uint8_t bits[11] = { 16, 16, 16, 32, 4, 8, 16, 32, 4, 8, 8 };
+	if (format > 10)
+		return bufw_reg & 0x7FF;
+	uint32_t bufw = bufw_reg & mask[format];
+	if (bufw == 0)
+		bufw = 128u / bits[format];
+	return bufw;
+}
+
 static inline int isDxt(uint32_t format) {
 	return format >= GE_TFMT_DXT1 && format <= GE_TFMT_DXT5;
 }

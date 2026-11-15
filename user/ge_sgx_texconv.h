@@ -40,6 +40,9 @@ enum GeSgxTexFormats {
 // Bytes of one row of bufw texels in PSP memory, 0 if the format is not supported
 uint32_t geSgxTexRowBytes(uint32_t format, uint32_t bufw);
 
+// The buffer width the GE uses (TEXBUFWIDTH's low 11 bits, rows 16 bytes apart at least)
+uint32_t geSgxTexBufw(uint32_t format, uint32_t bufw_reg);
+
 // Rows to read from PSP memory (swizzled textures are stored in blocks of 8 rows)
 uint32_t geSgxTexRows(const GeSgxTexDesc *d);
 

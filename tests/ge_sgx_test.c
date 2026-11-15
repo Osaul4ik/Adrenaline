@@ -1148,6 +1148,19 @@ static void testTexconv(void) {
 	CHECK(geSgxDecodeColor16(0, 0x07E0) == 0xFF00FF00u && geSgxDecodeColor16(2, 0x8F00) == 0x88FF0000u, "colour decode %08x %08x", geSgxDecodeColor16(0, 0x07E0), geSgxDecodeColor16(2, 0x8F00));
 }
 
+// The GE's texture buffer width: rows a multiple of 16 bytes apart, at least 16 bytes
+static void testTexBufw(void) {
+	CHECK(geSgxTexBufw(4, 16) == 32, "CLUT4 bufw 16: %u", (unsigned)geSgxTexBufw(4, 16));
+	CHECK(geSgxTexBufw(4, 64) == 64, "CLUT4 bufw 64: %u", (unsigned)geSgxTexBufw(4, 64));
+	CHECK(geSgxTexBufw(4, 0x30 | 0x0A0000) == 32, "CLUT4 bufw 48 with address bits: %u", (unsigned)geSgxTexBufw(4, 0x30 | 0x0A0000));
+	CHECK(geSgxTexBufw(5, 8) == 16, "CLUT8 bufw 8: %u", (unsigned)geSgxTexBufw(5, 8));
+	CHECK(geSgxTexBufw(5, 256) == 256, "CLUT8 bufw 256: %u", (unsigned)geSgxTexBufw(5, 256));
+	CHECK(geSgxTexBufw(3, 2) == 4, "8888 bufw 2: %u", (unsigned)geSgxTexBufw(3, 2));
+	CHECK(geSgxTexBufw(3, 100) == 100, "8888 bufw 100: %u", (unsigned)geSgxTexBufw(3, 100));
+	CHECK(geSgxTexBufw(0, 12) == 8, "5650 bufw 12: %u", (unsigned)geSgxTexBufw(0, 12));
+	CHECK(geSgxTexBufw(8, 5) == 5, "DXT1 bufw 5: %u", (unsigned)geSgxTexBufw(8, 5));
+}
+
 int main(void) {
 	ram = calloc(1, RAM_SIZE);
 	vram = calloc(1, VRAM_SIZE);
@@ -1178,6 +1191,7 @@ int main(void) {
 	testTransferAlias();
 	testTransferIntoVram();
 	testTexconv();
+	testTexBufw();
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);
 	free(ram);

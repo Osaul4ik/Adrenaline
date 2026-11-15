@@ -193,11 +193,11 @@ static int32_t drawTexture(GeSgxWalker *w) {
 	memset(&d, 0, sizeof(d));
 	uint32_t bufw = reg(w, GE_CMD_TEXBUFWIDTH0);
 	d.addr = (reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((bufw << 8) & 0x0F000000u);
-	d.bufw = bufw & 0x7FF;
 	uint32_t size = reg(w, GE_CMD_TEXSIZE0);
 	d.w = (uint16_t)(1u << (size & 0xF));
 	d.h = (uint16_t)(1u << ((size >> 8) & 0xF));
 	d.format = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
+	d.bufw = (uint16_t)geSgxTexBufw(d.format, bufw);
 	d.swizzle = (uint8_t)(reg(w, GE_CMD_TEXMODE) & 1);
 	if (d.format >= 4 && d.format <= 7) {
 		uint32_t tc = time_clk ? time_clk() : 0;
