@@ -71,6 +71,8 @@ vita2d_texture *geSgxRenderShown(void);
 // Debug mode (cycled with R + SELECT): 0 normal, else one feature off for every draw
 #define GE_SGX_DEBUG_MODES 6
 extern int ge_sgx_debug_mode;
+// L + SELECT: the next frame traced, its draws (render) and its textures (walker), whatever it is
+extern volatile int ge_sgx_trace_render, ge_sgx_trace_walker;
 extern const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES];
 
 #endif

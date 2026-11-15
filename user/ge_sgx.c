@@ -433,8 +433,10 @@ static void publishSlot(uint32_t top) {
 		probeVram();
 
 	static uint32_t big_frames = 0, trace_tries = 0;
+	static int trace_asked = 0;
 	if (walker.trace && building && walker.frame) {
-		if (building->data.ndraws >= 1000) {
+		if (building->data.ndraws >= 1000 || (trace_asked && building->data.ndraws)) {
+			trace_asked = 0;
 			uint32_t len;
 			const char *text = geSgxBuildTraceText(&len);
 			GeSgxLog("GeSgx T: begin (%u lines)\n", (unsigned)walker.trace_lines);
@@ -446,6 +448,14 @@ static void publishSlot(uint32_t top) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
 			walker.trace = 0;
 		}
+		geSgxBuildTraceClear(&walker);
+	}
+	// Asked (L + SELECT): the next frame built, whatever its size
+	if (ge_sgx_trace_walker && !walker.trace) {
+		ge_sgx_trace_walker = 0;
+		trace_asked = 1;
+		walker.trace = 1;
+		trace_tries = 0;
 		geSgxBuildTraceClear(&walker);
 	}
 	if (building && walker.frame && building->data.ndraws >= 300) {

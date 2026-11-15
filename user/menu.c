@@ -659,6 +659,16 @@ int AdrenalineDraw(SceSize args, void *argp) {
         GeSgxLog("GeSgx: debug mode %d: %s\n", ge_sgx_debug_mode, ge_sgx_debug_names[ge_sgx_debug_mode]);
       }
       debug_combo = combo;
+
+      // L + SELECT: the next frame traced into the log (to see what is wrong in it)
+      static int trace_combo = 0;
+      int tcombo = current_pad[PAD_LTRIGGER] && current_pad[PAD_SELECT];
+      if (tcombo && !trace_combo) {
+        ge_sgx_trace_render = 1;
+        ge_sgx_trace_walker = 1;
+        GeSgxLog("GeSgx: trace asked (L+SELECT)\n");
+      }
+      trace_combo = tcombo;
     }
 
     // Fast forward in pops

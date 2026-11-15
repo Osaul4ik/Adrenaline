@@ -637,6 +637,7 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 /* ---- Diagnostics ---- */
 
 int ge_sgx_debug_mode = 0;
+volatile int ge_sgx_trace_render = 0, ge_sgx_trace_walker = 0;
 const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES] = { "normal", "no alpha test", "no fog", "no depth test",
 	"no textures", "no stencil" };
 
@@ -646,8 +647,8 @@ const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES] = { "normal", "no alpha
 	the same outcome, programs and texture), kept in memory and written at
 	the end of the frame.
 */
-#define RTRACE_BYTES (64 * 1024)
-#define RTRACE_LINES 700
+#define RTRACE_BYTES (256 * 1024)
+#define RTRACE_LINES 2500
 static char rtrace_text[RTRACE_BYTES];
 static uint32_t rtrace_len = 0, rtrace_lines = 0;
 static int rtrace = 0;
@@ -674,6 +675,8 @@ static void rtraceAdd(const char *fmt, ...) {
 // The run of draws being summed up
 static struct {
 	uint32_t first, last, outcome, fkey, blend, vkey, tex, n3d, verts;
+	uint32_t flags, zs, stencil, scissor; // draw flags; ztest, colour mask, prim, texture mode; stencil; scissor (two corners, 8 px)
+	float z0;  // first vertex depth (CPU vertices; -1: GPU)
 	int active;
 } run;
 
@@ -681,17 +684,23 @@ static void runFlush(void) {
 	if (!run.active)
 		return;
 	run.active = 0;
-	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X\n",
+	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
+		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z0 %d\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
-		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu));
+		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
+		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xFF),
+		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
+		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
+		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f));
 }
 
 static uint32_t skip_seen[96];
 static uint32_t nskip_seen = 0;
 
 // One draw's outcome: counted, its kind logged once if it was not drawn, and traced
-static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDraw *d, uint32_t index, uint32_t target_fb) {
+static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDraw *d, uint32_t index, uint32_t target_fb,
+	const GeSgxFrameData *frame) {
 	uint32_t fkey = geSgxShaderKey(d), blend = blendKey(d), vkey = d->gpu ? d->vkey : 0;
 	uint32_t tex = !(d->flags & GE_SGX_DRAW_TEXTURED) ? 0 : d->fbtex ? (0x80000000u | (d->fbtex - 1)) : (uint32_t)d->texture;
 	if (outcome != OUTCOME_DRAWN) {
@@ -710,7 +719,14 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 	}
 	if (!rtrace)
 		return;
-	if (run.active && run.outcome == outcome && run.fkey == fkey && run.blend == blend && run.vkey == vkey && run.tex == tex && run.last + 1 == index) {
+	uint32_t zs = (uint32_t)d->ztest | ((uint32_t)d->cmask << 8) | ((uint32_t)d->prim << 16) | ((uint32_t)d->tex_mode << 24);
+	uint32_t st = d->sfunc == 0xFF ? 0xFFFFFFFFu :
+		((uint32_t)d->sfunc << 28) | ((uint32_t)(d->sops & 0xFFF) << 16) | ((uint32_t)d->sref << 8) | (uint32_t)d->swmask;
+	#define SC8(v) ((uint32_t)((v) < 0 ? 0 : (v) / 8 > 255 ? 255 : (v) / 8))
+	uint32_t sc = SC8(d->scissor[0]) | (SC8(d->scissor[1]) << 8) | (SC8(d->scissor[2]) << 16) | (SC8(d->scissor[3]) << 24);
+	#undef SC8
+	if (run.active && run.outcome == outcome && run.fkey == fkey && run.blend == blend && run.vkey == vkey && run.tex == tex &&
+	    run.flags == d->flags && run.zs == zs && run.stencil == st && run.scissor == sc && run.last + 1 == index) {
 		run.last = index;
 	} else {
 		runFlush();
@@ -721,6 +737,13 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.blend = blend;
 		run.vkey = vkey;
 		run.tex = tex;
+		run.flags = d->flags;
+		run.zs = zs;
+		run.stencil = st;
+		run.scissor = sc;
+		run.z0 = -1.0f;
+		if (!d->gpu && frame && d->count)
+			run.z0 = frame->vertices[d->base + frame->indices[d->first]].z;
 		run.n3d = run.verts = 0;
 	}
 	run.n3d += d->gpu ? 1 : 0;
@@ -768,7 +791,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 
 		// A clear writing nothing
 		if ((d->flags & GE_SGX_DRAW_CLEAR) && !(d->flags & (GE_SGX_DRAW_WRITE_COLOR | GE_SGX_DRAW_WRITE_DEPTH | GE_SGX_DRAW_WRITE_ALPHA))) {
-			drawOutcome(stats, GE_SGX_SKIP_CLEAR, d, i, target_fb);
+			drawOutcome(stats, GE_SGX_SKIP_CLEAR, d, i, target_fb, frame);
 			continue;
 		}
 
@@ -785,7 +808,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				t = geSgxTexGet(d->texture);
 			}
 			if (!t) {
-				drawOutcome(stats, d->fbtex ? GE_SGX_SKIP_FBTEX : GE_SGX_SKIP_TEX, d, i, target_fb);
+				drawOutcome(stats, d->fbtex ? GE_SGX_SKIP_FBTEX : GE_SGX_SKIP_TEX, d, i, target_fb, frame);
 				continue;
 			}
 			tex = *t;
@@ -804,7 +827,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			if (!g) {
 				if (waiting)
 					stats->waiting++;
-				drawOutcome(stats, GE_SGX_SKIP_VP, d, i, target_fb);
+				drawOutcome(stats, GE_SGX_SKIP_VP, d, i, target_fb, frame);
 				continue;
 			}
 			vp = g->program;
@@ -814,7 +837,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		FragmentProgram *fp = fragmentProgram(d, vgxp);
 		if (!fp) {
 			stats->waiting++;
-			drawOutcome(stats, GE_SGX_SKIP_FP, d, i, target_fb);
+			drawOutcome(stats, GE_SGX_SKIP_FP, d, i, target_fb, frame);
 			continue;
 		}
 
@@ -841,7 +864,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, x0, y0, x1 - 1, y1 - 1);
 		}
 		if (scissor_empty) {
-			drawOutcome(stats, GE_SGX_SKIP_SCISSOR, d, i, target_fb);
+			drawOutcome(stats, GE_SGX_SKIP_SCISSOR, d, i, target_fb, frame);
 			continue;
 		}
 
@@ -900,7 +923,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 
 		stats->draws++;
 		stats->vertices += d->count;
-		drawOutcome(stats, OUTCOME_DRAWN, d, i, target_fb);
+		drawOutcome(stats, OUTCOME_DRAWN, d, i, target_fb, frame);
 	}
 	runFlush();
 
@@ -926,13 +949,17 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	static uint32_t rframes = 0, last_trace = 0, big_traces = 0;
 	rframes++;
 	rtrace = 0;
-	if ((frame->ndraws >= 1000 && big_traces < 3 && rframes - last_trace >= 300) || rframes == 600 || rframes == 1800) {
+	int asked = ge_sgx_trace_render && frame->ndraws;
+	if (asked)
+		ge_sgx_trace_render = 0;
+	if (asked || (frame->ndraws >= 1000 && big_traces < 3 && rframes - last_trace >= 300) || rframes == 600 || rframes == 1800) {
 		rtrace = 1;
 		rtrace_len = rtrace_lines = 0;
 		last_trace = rframes;
 		if (frame->ndraws >= 1000)
 			big_traces++;
-		rtraceAdd("GeSgx R: frame %u: %u draws, %u vertices, %u indices, flipped fb %X, %d aliases, framebuffers:", (unsigned)rframes,
+		rtraceAdd("GeSgx R: frame %u%s: %u draws, %u vertices, %u indices, flipped fb %X, %d aliases, framebuffers:", (unsigned)rframes,
+			asked ? " (asked)" : "",
 			(unsigned)frame->ndraws, (unsigned)frame->nvertices, (unsigned)frame->nindices, (unsigned)fb, naliases);
 		uint32_t k;
 		for (k = 0; k < frame->nfbs; k++)
