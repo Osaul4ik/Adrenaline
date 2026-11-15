@@ -693,8 +693,8 @@ const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES] = { "normal", "no alpha
 	the same outcome, programs and texture), kept in memory and written at
 	the end of the frame.
 */
-#define RTRACE_BYTES (256 * 1024)
-#define RTRACE_LINES 2500
+#define RTRACE_BYTES (1024 * 1024)
+#define RTRACE_LINES 9000
 static char rtrace_text[RTRACE_BYTES];
 static uint32_t rtrace_len = 0, rtrace_lines = 0;
 static int rtrace = 0;
@@ -723,6 +723,7 @@ static struct {
 	uint32_t first, last, outcome, fkey, blend, vkey, tex, n3d, verts;
 	uint32_t flags, zs, stencil, scissor; // draw flags; ztest, colour mask, prim, texture mode; stencil; scissor (two corners, 8 px)
 	float z0, z1; // depth range of the first draw's vertices (CPU vertices; -1: GPU)
+	float x0, y0, x1, y1; // and their pixels (x/w, y/w)
 	uint32_t aref, color, tfmt; // alpha test reference; first CPU vertex colour; texture format
 	uint32_t tsize, topaque;    // texture: w | h << 16; texels with alpha > 0 (palette textures)
 	int active;
@@ -733,14 +734,14 @@ static void runFlush(void) {
 		return;
 	run.active = 0;
 	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
-		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d | aref %u colour %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
+		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
 		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xFF),
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
-		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f),
+		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f), (int)run.x0, (int)run.y0, (int)run.x1, (int)run.y1,
 		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.tfmt, (unsigned)(run.tsize & 0xFFFF), (unsigned)(run.tsize >> 16),
 		(unsigned)run.topaque);
 }
@@ -792,6 +793,7 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.stencil = st;
 		run.scissor = sc;
 		run.z0 = run.z1 = -1.0f;
+		run.x0 = run.y0 = run.x1 = run.y1 = 0.0f;
 		run.aref = d->atest_ref;
 		run.color = 0;
 		run.tfmt = 0;
@@ -816,7 +818,15 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 			run.color = frame->vertices[d->base + frame->indices[d->first]].color;
 		if (!d->gpu && frame && d->count) {
 			uint32_t k;
+			run.x0 = run.y0 = 1e9f;
+			run.x1 = run.y1 = -1e9f;
 			for (k = 0; k < d->count && k < 256; k++) {
+				const GeSgxVertex *vv = &frame->vertices[d->base + frame->indices[d->first + k]];
+				float iw = vv->w != 0.0f ? 1.0f / vv->w : 0.0f;
+				if (vv->x * iw < run.x0) run.x0 = vv->x * iw;
+				if (vv->y * iw < run.y0) run.y0 = vv->y * iw;
+				if (vv->x * iw > run.x1) run.x1 = vv->x * iw;
+				if (vv->y * iw > run.y1) run.y1 = vv->y * iw;
 				float z = frame->vertices[d->base + frame->indices[d->first + k]].z;
 				if (k == 0 || z < run.z0)
 					run.z0 = z;
