@@ -84,6 +84,7 @@ static GeSgxWalker walker;
 static uint32_t epoch = 1;
 static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
 static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000
+static int vram_inval = 0;             // VRAM blocks invalidated before they are read (see probeVram)
 static uint32_t *block_tag = NULL;     // block address | 1 (valid)
 static uint32_t *block_epoch = NULL;
 static uint8_t *block_data = NULL;
@@ -118,6 +119,8 @@ static const void *blockFn(void *user, uint32_t block) {
 	} else if (block >= VRAM_START && block < VRAM_START + 0x00800000u) {
 		// VRAM and its mirrors
 		src = vram_map + (block & (VRAM_SIZE - 1));
+		if (vram_inval)
+			ScePspemuConvertAddress(VRAM_START + (block & (VRAM_SIZE - 1)), KERMIT_INPUT_MODE, GE_SGX_BLOCK_SIZE);
 	} else {
 		return NULL;
 	}
@@ -150,9 +153,56 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 		uint32_t off = addr & (VRAM_SIZE - 1);
 		if (size > VRAM_SIZE - off)
 			return NULL;
+		if (vram_inval && size)
+			ScePspemuConvertAddress(VRAM_START + off, KERMIT_INPUT_MODE, size);
 		return vram_map + off;
 	}
 	return NULL;
+}
+
+/*
+	Diagnostics (and a fix if it finds one): textures in VRAM read as zeros.
+	When VRAM surely holds textures (a frame of the race), the non-zero words
+	of its texture area are counted through each mapping that may be VRAM:
+	the one in use, the same after a cache invalidation, the high bit one
+	(like RAM's) and CONVERT_ADDRESS. If the one in use has none and another
+	has many, VRAM is read through that one from then on.
+*/
+static uint32_t countNonZero(const uint8_t *base) {
+	if (!base || sceKernelFindMemBlockByAddr(base, VRAM_SIZE) < 0)
+		return 0xFFFFFFFFu;
+	const uint32_t *p = (const uint32_t *)(base + 0x000D0000u);
+	uint32_t i, n = 0;
+	for (i = 0; i < (0x001C0000u - 0x000D0000u) / 4; i++)
+		n += p[i] != 0;
+	return n;
+}
+
+static void probeVram(void) {
+	const uint8_t *cand[3];
+	cand[0] = (const uint8_t *)ScePspemuConvertAddress(0x80000000u | VRAM_START, 0, 0);
+	cand[1] = (const uint8_t *)(uintptr_t)CONVERT_ADDRESS(VRAM_START);
+	cand[2] = (const uint8_t *)(uintptr_t)SCE_PSPEMU_FRAMEBUFFER;
+	uint32_t in_use = countNonZero(vram_map);
+	ScePspemuConvertAddress(VRAM_START, KERMIT_INPUT_MODE, VRAM_SIZE);
+	uint32_t after_inval = countNonZero(vram_map);
+	uint32_t n[3];
+	int i, best = -1;
+	for (i = 0; i < 3; i++) {
+		n[i] = countNonZero(cand[i]);
+		if (n[i] != 0xFFFFFFFFu && n[i] > 1024 && (best < 0 || n[i] > n[best]))
+			best = i;
+	}
+	GeSgxLog("GeSgx VRAM probe: non-zero words of 0x%X: in use %08X: %d, after invalidation: %d | %08X: %d, %08X: %d, %08X: %d (-1: not mapped)\n",
+		(unsigned)((0x001C0000u - 0x000D0000u) / 4), (unsigned)(uintptr_t)vram_map, (int)in_use, (int)after_inval,
+		(unsigned)(uintptr_t)cand[0], (int)n[0], (unsigned)(uintptr_t)cand[1], (int)n[1], (unsigned)(uintptr_t)cand[2], (int)n[2]);
+	if (after_inval > 1024 && in_use < 64) {
+		vram_inval = 1;
+		GeSgxLog("GeSgx VRAM probe: stale cache - VRAM blocks invalidated before reading from now on\n");
+	} else if (in_use < 64 && after_inval < 64 && best >= 0 && cand[best] != vram_map) {
+		vram_map = cand[best];
+		GeSgxLog("GeSgx VRAM probe: VRAM read through %08X from now on\n", (unsigned)(uintptr_t)vram_map);
+	}
 }
 
 static uint32_t clockUs(void) {
@@ -344,6 +394,7 @@ static void publishSlot(uint32_t top) {
 		if (walker.log_fn && !walker.trace && (big_frames == 300 || big_frames == 1200 || big_frames == 2400)) {
 			walker.trace = 1;
 			trace_tries = 0;
+			probeVram();
 			geSgxBuildTraceClear(&walker);
 		}
 	}
