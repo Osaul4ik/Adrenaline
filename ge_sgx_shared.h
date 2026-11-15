@@ -80,10 +80,10 @@ typedef struct {
 	volatile unsigned int sync_timeouts; // ... and gave up
 	volatile unsigned int sync_wait_us;  // total time waited
 	volatile unsigned int sync_max_us;   // longest wait
-	volatile unsigned int vram_copies;   // VRAM copied into the shadow (see GE_SGX_VRAM_SHADOW)
-	volatile unsigned int vram_copy_us;  // total time of those copies
-	volatile unsigned int vram_copy_max_us;
-	volatile unsigned int vram_copy_how;  // 0 none, 1..3 the DMA function found (see systemctrl's ge_sgx.c), 9 the CPU
+	volatile unsigned int vram_copies;   // VRAM copies into the shadow queued (see GE_SGX_VRAM_SHADOW)
+	volatile unsigned int vram_copy_us;  // copies the GE refused
+	volatile unsigned int vram_copy_max_us; // copies skipped (the previous one still running)
+	volatile unsigned int vram_copy_how;  // 4: copied by the GE
 	unsigned int reserved2[8];
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
@@ -101,8 +101,8 @@ typedef struct {
 /*
 	PSP VRAM is the GE's own memory, which the Vita side cannot read: pspemu's
 	window for it (PSP 0x0BE00000, SCE_PSPEMU_VRAM, what ScePspemuConvertAddress
-	gives for 0x04000000) stays empty. The PSP side copies VRAM there with the
-	DMA at every display flip, so textures and CLUTs in VRAM can be read.
+	gives for 0x04000000) stays empty. The PSP side has the GE copy VRAM there
+	at every display flip, so textures and CLUTs in VRAM can be read.
 */
 #define GE_SGX_VRAM_SHADOW 0xABE00000 // uncached kernel address of PSP 0x0BE00000
 #define GE_SGX_VRAM_SIZE   0x00200000

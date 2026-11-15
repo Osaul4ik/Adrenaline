@@ -44,7 +44,6 @@ static int (* _sceGeDrawSync)(int syncType);
 static int (* _sceGeListSync)(int qid, int syncType);
 static int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 static u32 (* _sceKernelGetSystemTimeLow)(void);
-static int (* _sceDmacMemcpy)(void *dst, const void *src, SceSize size);
 
 static volatile GeSgxRing *ring = NULL; // uncached
 static u32 ring_mask = 0;
@@ -189,21 +188,48 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	return res;
 }
 
-// VRAM into its shadow, which the Vita side reads (see GE_SGX_VRAM_SHADOW)
+/*
+	VRAM into its shadow, which the Vita side reads (see GE_SGX_VRAM_SHADOW).
+	The GE copies it, with a list of ours queued at the flip: after the
+	frame's lists, without holding up the game (the CPU took ~120 ms for the
+	2 MB, the DMA function is not found). One copy at a time: a flip while
+	the previous one runs skips it.
+*/
+static u32 copy_list[16] __attribute__((aligned(16)));
+static int copy_qid = -1;
+
+static void buildCopyList(void) {
+	u32 *l = (u32 *)((u32)copy_list | 0x20000000); // uncached
+	u32 src = 0x04000000, dst = GE_SGX_VRAM_SHADOW & 0x0FFFFFFF;
+	int n = 0;
+	// 2 MB as 512 x 1024 pixels of 32 bits
+	l[n++] = (0xB2u << 24) | (src & 0xFFFFF0);                          // TRANSFERSRC
+	l[n++] = (0xB3u << 24) | ((src & 0xFF000000) >> 8) | 512;           // TRANSFERSRCW
+	l[n++] = (0xEBu << 24);                                             // TRANSFERSRCPOS
+	l[n++] = (0xB4u << 24) | (dst & 0xFFFFF0);                          // TRANSFERDST
+	l[n++] = (0xB5u << 24) | ((dst & 0xFF000000) >> 8) | 512;           // TRANSFERDSTW
+	l[n++] = (0xECu << 24);                                             // TRANSFERDSTPOS
+	l[n++] = (0xEEu << 24) | ((GE_SGX_VRAM_SIZE / 2048 - 1) << 10) | 511; // TRANSFERSIZE
+	l[n++] = (0xEAu << 24) | 1;                                         // TRANSFERSTART, 32 bits
+	l[n++] = (0x0Fu << 24);                                             // FINISH
+	l[n++] = (0x0Cu << 24);                                             // END
+}
+
 static void copyVram(void) {
-	// Kernel addresses: called with k1 = 0 (the flip comes from the game's syscall)
 	int k1 = pspSdkSetK1(0);
-	u32 start = timeNow();
-	if (_sceDmacMemcpy)
-		_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
-	else
-		memcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE); // uncached both
-	u32 took = timeNow() - start;
+	// The previous copy still queued or running (> 0; done is 0, and an error
+	// once its id is free again): skip this one
+	if (copy_qid >= 0 && _sceGeListSync(copy_qid, 1) > 0) {
+		pspSdkSetK1(k1);
+		ring->vram_copy_max_us++; // (with the GE: copies skipped)
+		return;
+	}
+	copy_qid = _sceGeListEnQueue(copy_list, NULL, -1, NULL);
 	pspSdkSetK1(k1);
-	ring->vram_copies++;
-	ring->vram_copy_us += took;
-	if (took > ring->vram_copy_max_us)
-		ring->vram_copy_max_us = took;
+	if (copy_qid >= 0)
+		ring->vram_copies++;
+	else
+		ring->vram_copy_us++; // (with the GE: lists refused)
 }
 
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
@@ -271,16 +297,10 @@ int GeSgxInit(void) {
 	_sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
-	// The DMA's memcpy: user library of the DMA manager, or the kernel one of DMACPLUS
-	u32 how = 0;
-	if ((_sceDmacMemcpy = (void *)FindProc("sceDMAManager", "sceDmac", 0x617F3FE6)))
-		how = 1;
-	else if ((_sceDmacMemcpy = (void *)FindProc("sceDMAManager", NULL, 0x617F3FE6)))
-		how = 2;
-	else if ((_sceDmacMemcpy = (void *)FindProc("sceDMACPLUS_Driver", "sceDmacplus_driver", 0xC7D33466)))
-		how = 3;
-	else
-		how = 9;
+	// VRAM is copied by the GE (4, see copyVram)
+	u32 how = 4;
+	buildCopyList();
+	copy_qid = -1;
 	log("GeSgx: VRAM copied with %d\n", (int)how);
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
