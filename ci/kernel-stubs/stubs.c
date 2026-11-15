@@ -13,4 +13,12 @@ int kuCtrlPeekBufferPositive(int port, void *pad_data, int count) {
   return 0;
 }
 
+int kuGeSgxAllocMemBlock(unsigned int type, unsigned int size, void **base, void *info) {
+  return 0;
+}
+
+int kuGeSgxFreeMemBlock(void *base) {
+  return 0;
+}
+
 void _start() __attribute__ ((weak, alias ("module_start")));

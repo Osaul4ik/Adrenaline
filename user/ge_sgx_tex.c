@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "ge_sgx.h"
+#include "ge_sgx_pool.h"
 #include "ge_sgx_tex.h"
 #include "ge_sgx_texconv.h"
 
@@ -42,6 +43,11 @@
 #define BUDGET_BYTES (10 * 1024 * 1024) // 12 MB left too little RAM next to the framebuffer renderings
 // Lowered when memory runs out first
 static uint32_t budget = BUDGET_BYTES;
+// With the kernel's pool (ge_sgx_pool.c): all of it but what the depth buffer and the rest take
+#define POOL_KEEP_BYTES (8 * 1024 * 1024)
+#define POOL_BUDGET_MAX (64 * 1024 * 1024)
+static uint32_t budget_max = BUDGET_BYTES;
+static int in_pool = 0;
 #define STAGING_BYTES (1024 * 1024)
 // RAM always left to the emulator
 #define RESERVE_RAM_KB (2 * 1024)
@@ -58,7 +64,8 @@ typedef struct {
 	uint32_t last_checked;
 	uint32_t dead_since;
 	uint32_t dead_seq; // freed once the GPU is done with this frame (the one being built when it died)
-	SceUID mem;
+	SceUID mem;    // memblock of the emulator's memory, or -1
+	void *pool;    // in the pool, or NULL
 	uint32_t bytes;
 	SceGxmTexture tex;
 } Entry;
@@ -84,10 +91,25 @@ int geSgxTexInit(void) {
 	sceKernelGetMemBlockBase(staging_mem, &base);
 	staging[0] = (uint8_t *)base;
 	staging[1] = staging[0] + STAGING_BYTES;
+
+	uint32_t pool = geSgxPoolBytes();
+	if (pool > POOL_KEEP_BYTES + 4 * 1024 * 1024) {
+		in_pool = 1;
+		budget_max = pool - POOL_KEEP_BYTES;
+		if (budget_max > POOL_BUDGET_MAX)
+			budget_max = POOL_BUDGET_MAX;
+		budget = budget_max;
+	}
+	GeSgxLog("GeSgx textures: budget %u KB in %s\n", (unsigned)(budget_max / 1024), in_pool ? "the pool" : "the emulator's RAM");
 	return 1;
 }
 
 static void freeMemory(Entry *e) {
+	if (e->pool) {
+		geSgxPoolFree(e->pool, e->bytes);
+		total_bytes -= e->bytes;
+		e->pool = NULL;
+	}
 	if (e->mem >= 0) {
 		void *base = NULL;
 		sceKernelGetMemBlockBase(e->mem, &base);
@@ -234,7 +256,7 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 		return failed(d, "budget");
 
 	// The emulator keeps a reserve of RAM: older textures are given up for this one, which waits
-	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
+	if (!in_pool && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) < bytes / 1024 + RESERVE_RAM_KB) {
 		uint32_t saved = budget;
 		budget = total_bytes > bytes ? total_bytes - bytes : 0;
 		makeRoom(bytes);
@@ -276,23 +298,37 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 
 	Entry *e = &entries[slot];
 	memset(e, 0, sizeof(*e));
-	e->mem = sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL);
-	if (e->mem < 0) {
-		// Out of memory before the budget: the budget comes down to what fits, then one more try
-		budget = total_bytes > 1024 * 1024 ? total_bytes - 512 * 1024 : total_bytes;
-		makeRoom(bytes);
-		e->mem = total_bytes + bytes <= budget ? sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL) : -1;
-	}
-	if (e->mem < 0) {
-		e->mem = -1;
-		return failed(d, "memory");
-	}
+	e->mem = -1;
 	void *gpu = NULL;
-	sceKernelGetMemBlockBase(e->mem, &gpu);
-	if (sceGxmMapMemory(gpu, bytes, SCE_GXM_MEMORY_ATTRIB_READ) < 0) {
-		sceKernelFreeMemBlock(e->mem);
-		e->mem = -1;
-		return failed(d, "map");
+	if (in_pool) {
+		gpu = geSgxPoolAlloc(bytes);
+		if (!gpu) {
+			// No run of free pages that long: older ones are given up, this one waits
+			uint32_t saved = budget;
+			budget = total_bytes > 2 * bytes ? total_bytes - 2 * bytes : 0;
+			makeRoom(bytes);
+			budget = saved;
+			return failed(d, "pool full");
+		}
+		e->pool = gpu;
+	} else {
+		e->mem = sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL);
+		if (e->mem < 0) {
+			// Out of memory before the budget: the budget comes down to what fits, then one more try
+			budget = total_bytes > 1024 * 1024 ? total_bytes - 512 * 1024 : total_bytes;
+			makeRoom(bytes);
+			e->mem = total_bytes + bytes <= budget ? sceKernelAllocMemBlock("SceGeSgxTexture", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, bytes, NULL) : -1;
+		}
+		if (e->mem < 0) {
+			e->mem = -1;
+			return failed(d, "memory");
+		}
+		sceKernelGetMemBlockBase(e->mem, &gpu);
+		if (sceGxmMapMemory(gpu, bytes, SCE_GXM_MEMORY_ATTRIB_READ) < 0) {
+			sceKernelFreeMemBlock(e->mem);
+			e->mem = -1;
+			return failed(d, "map");
+		}
 	}
 	e->bytes = bytes;
 	total_bytes += bytes;
@@ -423,7 +459,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 void geSgxTexFrameDone(void) {
 	cur_frame++;
 	// A budget lowered when memory ran out comes back up while there is memory again
-	if ((cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
+	if (!in_pool && (cur_frame & 63) == 0 && budget < BUDGET_BYTES &&
 	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
 		budget += 512 * 1024;
 		if (budget > BUDGET_BYTES)

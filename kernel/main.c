@@ -33,6 +33,9 @@
 
 #include "../adrenaline_compat.h"
 
+void geSgxKernelMemStart(void);
+void geSgxKernelMemStop(void);
+
 int module_get_export_func(SceUID pid, const char *modname, uint32_t libnid, uint32_t funcnid, uintptr_t *func);
 
 static tai_hook_ref_t ksceKernelAllocMemBlockRef;
@@ -202,6 +205,8 @@ int module_start(SceSize args, void *argp) {
     hooks[n_hooks] = taiHookFunctionExportForKernel(KERNEL_PID, &ksceKernelStartPreloadedModulesRef, "SceKernelModulemgr", 0x92C9FFC2, 0x998C7AE9, ksceKernelStartPreloadedModulesPatched);
   n_hooks++;
 
+  geSgxKernelMemStart();
+
   SceUID shell_pid = ksceKernelSysrootGetShellPid();
   ksceKernelLoadStartModuleForPid(shell_pid, "ux0:app/" ADRENALINE_TITLEID "/sce_module/adrenaline_vsh.suprx", 0, NULL, 0, NULL, NULL);
 
@@ -209,6 +214,8 @@ int module_start(SceSize args, void *argp) {
 }
 
 int module_stop(SceSize args, void *argp) {
+  geSgxKernelMemStop();
+
   taiHookReleaseForKernel(hooks[--n_hooks], ksceKernelStartPreloadedModulesRef);
   taiHookReleaseForKernel(hooks[--n_hooks], ksceSblAimgrIsDEXRef);
   taiHookReleaseForKernel(hooks[--n_hooks], SceGrabForDriver_E9C25A28_ref);

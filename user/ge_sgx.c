@@ -42,6 +42,7 @@
 
 #include "main.h"
 #include "ge_sgx.h"
+#include "ge_sgx_pool.h"
 #include "ge_sgx_tex.h"
 #include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
@@ -855,6 +856,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	geSgxWalkerInit(&walker, blockFn, NULL);
 
 	if (config.sgx_renderer >= GE_SGX_MODE_DRAW) {
+		geSgxPoolInit(); // before the texture cache, which takes most of it
 		int slots_ok = initSlots();
 		int tex_ok = geSgxTexInit();
 		GeSgxLog("GeSgx: frames %d, texture cache %d, free RAM now %u KB\n", slots_ok, tex_ok,

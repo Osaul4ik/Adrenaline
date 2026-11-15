@@ -36,6 +36,7 @@
 extern SceGxmContext *_vita2d_context;
 
 #include "ge_sgx.h"
+#include "ge_sgx_pool.h"
 #include "ge_sgx_render.h"
 #include "ge_sgx_shader.h"
 #include "ge_sgx_tex.h"
@@ -507,13 +508,20 @@ static void *sharedDepth(void) {
 	shared_depth_tried = 1;
 	uint32_t size = (4 * SHARED_DEPTH_W * SHARED_DEPTH_H + 256 * 1024 - 1) & ~(256 * 1024 - 1);
 	int cdram = 0;
-	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= size / 1024 + RESERVE_CDRAM_KB) {
+	const char *where = "";
+	// The kernel's pool first (outside the emulator's budget, already mapped for the GPU)
+	shared_depth = geSgxPoolAlloc(size);
+	if (shared_depth) {
+		cdram = geSgxPoolIsCdram();
+		where = " pool";
+	}
+	if (!shared_depth && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= size / 1024 + RESERVE_CDRAM_KB) {
 		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
 		cdram = shared_depth != NULL;
 	}
 	if (!shared_depth)
 		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-	GeSgxLog("GeSgx render: shared depth %s (%s)\n", shared_depth ? "ok" : "FAILED", cdram ? "CDRAM" : "RAM");
+	GeSgxLog("GeSgx render: shared depth %s (%s%s)\n", shared_depth ? "ok" : "FAILED", cdram ? "CDRAM" : "RAM", where);
 	return shared_depth;
 }
 

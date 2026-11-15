@@ -115,7 +115,8 @@ jobs:
 
       - name: Check adrenaline_kernel.skprx imports
         # The module this one replaces is the prebuilt one: no import (library and NID)
-        # it did not have, so nothing is called that it did not call. Fewer are fine
+        # it did not have, so nothing is called that it did not call, except the ones
+        # added on purpose (listed below, all in firmware 3.60). Fewer are fine
         # (current gcc inlines strcmp with a constant string, for one)
         run: |
           pip install --quiet pyyaml
@@ -127,12 +128,26 @@ jobs:
           ref, _ = imports(load("bubble/pkg/sce_module/adrenaline_kernel.skprx"))
           def pairs(d):
               return {(lib, lnid, nid) for (lib, lnid), nids in d.items() for nid in nids}
+          # kernel/gesgx_mem.c (memory for the SGX renderer)
+          allowed = {
+              (0x6F25E18A, 0xC94850C9), # SceSysmemForDriver ksceKernelAllocMemBlock
+              (0x6F25E18A, 0x009E1C61), # SceSysmemForDriver ksceKernelFreeMemBlock
+              (0x6F25E18A, 0xA841EDDA), # SceSysmemForDriver ksceKernelGetMemBlockBase
+              (0x6F25E18A, 0x98C15666), # SceSysmemForDriver ksceKernelGetMemBlockPARange
+              (0x7EE45391, 0x0AB9BF5C), # SceSysclibForDriver memset
+              (0xE2C40624, 0x9DCB4B7A), # SceThreadmgrForDriver ksceKernelGetProcessId
+              (0x887F19D0, 0x2A43912D), # SceProcEventForDriver ksceKernelRegisterProcEventHandler
+              (0x887F19D0, 0x3DED57CC), # SceProcEventForDriver ksceKernelUnregisterProcEventHandler
+          }
           added, removed = pairs(new) - pairs(ref), pairs(ref) - pairs(new)
+          for lib, lnid, nid in sorted(a for a in added if (a[1], a[2]) in allowed):
+              print("added on purpose: %s (0x%08X) 0x%08X" % (lib, lnid, nid))
+          added = {a for a in added if (a[1], a[2]) not in allowed}
           for lib, lnid, nid in sorted(added):
               print("new import:     %s (0x%08X) 0x%08X" % (lib, lnid, nid))
           for lib, lnid, nid in sorted(removed):
               print("missing import: %s (0x%08X) 0x%08X" % (lib, lnid, nid))
-          print("%d imports, none the prebuilt module did not have: %s" % (len(pairs(new)), not added))
+          print("%d imports, none unexpected: %s" % (len(pairs(new)), not added))
           sys.exit(1 if added else 0)
           PY
 

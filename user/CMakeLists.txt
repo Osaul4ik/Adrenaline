@@ -62,6 +62,7 @@ add_executable(adrenaline_user
   ge_sgx_shader.c
   ge_sgx_cg.c
   ge_sgx_render.c
+  ge_sgx_pool.c
   lz4/lz4.c
 )
 

@@ -44,6 +44,7 @@
 #include "utils.h"
 #include "math_utils.h"
 #include "ge_sgx.h"
+#include "ge_sgx_pool.h"
 #include "ge_sgx_render.h"
 #include "ge_sgx_shader.h"
 
@@ -887,8 +888,9 @@ int AdrenalineDraw(SceSize args, void *argp) {
           (unsigned)sgx_render.draws, (unsigned)sgx_render.gpu_draws, (unsigned)sgx_render.skipped[0], (unsigned)sgx_render.skipped[1],
           (unsigned)sgx_render.skipped[2], (unsigned)sgx_render.skipped[3], (unsigned)sgx_render.skipped[4], (unsigned)sgx_render.skipped[5],
           (unsigned)sgx_render.other_fb, (unsigned)sgx_render.render_us);
-        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB\n",
-          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
+        GeSgxLog("GeSgx memory: free CDRAM %u KB, RAM %u KB, pool %u of %u KB\n",
+          (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW),
+          (unsigned)geSgxPoolFreeKB(), (unsigned)(geSgxPoolBytes() / 1024));
         memset(&prof, 0, sizeof(prof));
         prof.start = prof_t;
       }

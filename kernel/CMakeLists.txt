@@ -16,6 +16,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 
 add_executable(adrenaline_kernel
   main.c
+  gesgx_mem.c
   utils.c
 )
 
@@ -26,6 +27,7 @@ target_link_libraries(adrenaline_kernel
   SceCtrlForDriver_stub
   SceIofilemgrForDriver_stub
   SceModulemgrForDriver_stub
+  SceProcEventForDriver_stub
   SceProcessmgrForDriver_stub
   SceSysclibForDriver_stub
   SceSysmemForDriver_stub
