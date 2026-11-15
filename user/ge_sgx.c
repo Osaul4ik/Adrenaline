@@ -891,6 +891,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 		rates.sync_waits = ring->sync_waits;
 		rates.sync_timeouts = ring->sync_timeouts;
 		rates.sync_max_us = ring->sync_max_us;
+		rates.vram_copies = ring->vram_copies;
+		rates.vram_copy_us = ring->vram_copy_us;
+		rates.vram_copy_max_us = ring->vram_copy_max_us;
 
 		if (lost != last_lost || (write - read) > entries) {
 			// Events are missing: start over from the next ones
@@ -1044,13 +1047,14 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u us, max %u)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
-					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs);
+					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
+					(unsigned)rates.vram_copies, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {

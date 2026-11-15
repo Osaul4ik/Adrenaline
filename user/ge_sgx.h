@@ -41,6 +41,7 @@ typedef struct {
 	uint32_t invalidates; // PSP memory blocks copied per second
 	uint32_t resyncs;     // ring gaps since the start
 	uint32_t sync_waits, sync_timeouts, sync_max_us; // PSP side, since the start
+	uint32_t vram_copies, vram_copy_us, vram_copy_max_us; // PSP side VRAM copies into the shadow, since the start
 
 	// Memory left for the renderer, measured at the start
 	uint32_t cdram_kb;

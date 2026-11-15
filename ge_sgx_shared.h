@@ -80,7 +80,10 @@ typedef struct {
 	volatile unsigned int sync_timeouts; // ... and gave up
 	volatile unsigned int sync_wait_us;  // total time waited
 	volatile unsigned int sync_max_us;   // longest wait
-	unsigned int reserved2[12];
+	volatile unsigned int vram_copies;   // VRAM copied into the shadow (see GE_SGX_VRAM_SHADOW)
+	volatile unsigned int vram_copy_us;  // total time of those copies
+	volatile unsigned int vram_copy_max_us;
+	unsigned int reserved2[9];
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
@@ -93,6 +96,15 @@ typedef struct {
 } GeSgxAck;
 
 #define GE_SGX_ACK_ADDRESS 0xABCDFFC0 // last line of ADRENALINE_ADDRESS/ADRENALINE_SIZE
+
+/*
+	PSP VRAM is the GE's own memory, which the Vita side cannot read: pspemu's
+	window for it (PSP 0x0BE00000, SCE_PSPEMU_VRAM, what ScePspemuConvertAddress
+	gives for 0x04000000) stays empty. The PSP side copies VRAM there with the
+	DMA at every display flip, so textures and CLUTs in VRAM can be read.
+*/
+#define GE_SGX_VRAM_SHADOW 0xABE00000 // uncached kernel address of PSP 0x0BE00000
+#define GE_SGX_VRAM_SIZE   0x00200000
 
 // Longest time a DrawSync/ListSync waits for the Vita side to read the lists
 #define GE_SGX_SYNC_TIMEOUT_US 3000

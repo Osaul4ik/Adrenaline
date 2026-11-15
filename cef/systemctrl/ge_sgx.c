@@ -44,6 +44,7 @@ static int (* _sceGeDrawSync)(int syncType);
 static int (* _sceGeListSync)(int qid, int syncType);
 static int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 static u32 (* _sceKernelGetSystemTimeLow)(void);
+static int (* _sceDmacMemcpy)(void *dst, const void *src, SceSize size);
 
 static volatile GeSgxRing *ring = NULL; // uncached
 static u32 ring_mask = 0;
@@ -188,7 +189,24 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	return res;
 }
 
+// VRAM into its shadow, which the Vita side reads (see GE_SGX_VRAM_SHADOW)
+static void copyVram(void) {
+	if (!_sceDmacMemcpy)
+		return;
+	// Kernel addresses: called with k1 = 0 (the flip comes from the game's syscall)
+	int k1 = pspSdkSetK1(0);
+	u32 start = timeNow();
+	_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
+	u32 took = timeNow() - start;
+	pspSdkSetK1(k1);
+	ring->vram_copies++;
+	ring->vram_copy_us += took;
+	if (took > ring->vram_copy_max_us)
+		ring->vram_copy_max_us = took;
+}
+
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
+	copyVram();
 	ringPush(GE_SGX_EVENT_FLIP, (u32)topaddr, bufferwidth, pixelformat, sync);
 	return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -252,6 +270,9 @@ int GeSgxInit(void) {
 	_sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
+	_sceDmacMemcpy = (void *)FindProc("sceDMAManager", "sceDmac", 0x617F3FE6);
+	if (!_sceDmacMemcpy)
+		log("GeSgx: sceDmacMemcpy not found, VRAM not copied\n");
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
 	    !_sceGeDrawSync || !_sceGeListSync || !_sceDisplaySetFrameBuf) {
