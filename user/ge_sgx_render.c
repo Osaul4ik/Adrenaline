@@ -1355,6 +1355,12 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			int r = snapshotTarget(ctx, t->tex, t->w, t->h, *scenes == 0);
 			snap_fb = r > 0 ? dfb : 0xFFFFFFFFu;
 			rtraceAdd("GeSgx R: scene %d: snapshot of fb %X for draw %u%s\n", *scenes, (unsigned)dfb, (unsigned)i, r > 0 ? "" : " FAILED");
+			if (asked && r > 0) {
+				char path[96];
+				sceGxmFinish(ctx);
+				snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_s%d_snapshot.bmp", (unsigned)rframes, *scenes);
+				dumpBmp(path, snap.mem, snap.w, snap.h, snap.w);
+			}
 			if (r >= 0)
 				(*scenes)++;
 		}
@@ -1380,6 +1386,14 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		}
 		renderDraws(ctx, frame, i, j, t->w, t->h, dfb, stats);
 		vita2d_end_drawing();
+		// Asked (L + SELECT): the smaller renderings after each of their scenes (the blur's steps)
+		if (asked && (t->w != 960 || t->h != 544)) {
+			char path[96];
+			sceGxmFinish(ctx);
+			sceIoMkdir("ux0:data/adrenaline/sgx_dump", 0777);
+			snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_s%d_%X.bmp", (unsigned)rframes, *scenes, (unsigned)dfb);
+			dumpBmp(path, vita2d_texture_get_datap(t->tex), t->w, t->h, (int)vita2d_texture_get_stride(t->tex) / 4);
+		}
 		(*scenes)++;
 		if (dfb != fb)
 			stats->other_fb += j - i;

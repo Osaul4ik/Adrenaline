@@ -21,9 +21,9 @@
 	are walked (before DrawSync returns to the game), so a texture is read
 	as the GE read it.
 
-	A cached texture is checked once per frame with a sampled hash of its
-	memory (64 words plus both ends: the PSP RAM is uncached, ~125 ns per
-	read). When it changed, a new entry is made: entries never change while
+	A cached texture is checked once per frame with a hash of its memory
+	(all of it up to 2 KB, else 64 words plus both ends: the PSP RAM is
+	uncached, ~125 ns per read). When it changed, a new entry is made: entries never change while
 	a published frame may still use them, and are freed only some frames
 	after they were last used (the GPU may still be reading them).
 */
@@ -185,14 +185,29 @@ static uint32_t sourceBytes(const GeSgxTexDesc *d) {
 	return geSgxTexRowBytes(d->format, d->bufw) * geSgxTexRows(d);
 }
 
-// Hash of 64 words spread over the texture and of both ends
+/*
+	Hash of a texture's memory: all of it for small ones (up to 2 KB: the
+	second game's 16x128 CLUT4 panels were uploaded while the game was still
+	writing them, and the 64 samples, each the first word of its 16 bytes,
+	never saw the rest change), else 64 words spread over it, each at
+	another word of its step (not always the first), and both ends
+*/
+#define FULL_HASH_BYTES 2048
 static uint32_t sampleHash(const uint8_t *src, uint32_t size) {
 	uint32_t h = 2166136261u ^ size;
-	uint32_t i, step = (size / 64) & ~3u;
-	uint32_t v;
+	uint32_t i, v;
 
+	if (size <= FULL_HASH_BYTES) {
+		for (i = 0; i + 4 <= size; i += 4) {
+			memcpy(&v, src + i, 4);
+			h = (h ^ v) * 16777619u;
+		}
+		return h;
+	}
+	uint32_t step = (size / 64) & ~3u;
 	for (i = 0; i < 64 && step; i++) {
-		memcpy(&v, src + i * step, 4);
+		uint32_t in = (i * 4u * 7u) % step & ~3u; // a different word of each step
+		memcpy(&v, src + i * step + in, 4);
 		h = (h ^ v) * 16777619u;
 	}
 	if (size >= 16) {
