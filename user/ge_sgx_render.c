@@ -677,6 +677,7 @@ static struct {
 	uint32_t first, last, outcome, fkey, blend, vkey, tex, n3d, verts;
 	uint32_t flags, zs, stencil, scissor; // draw flags; ztest, colour mask, prim, texture mode; stencil; scissor (two corners, 8 px)
 	float z0, z1; // depth range of the first draw's vertices (CPU vertices; -1: GPU)
+	uint32_t aref, color, tfmt; // alpha test reference; first CPU vertex colour; texture format
 	int active;
 } run;
 
@@ -685,14 +686,15 @@ static void runFlush(void) {
 		return;
 	run.active = 0;
 	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
-		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d\n",
+		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d | aref %u colour %08X tex format %08X\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
 		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xFF),
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
-		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f));
+		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f),
+		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.tfmt);
 }
 
 static uint32_t skip_seen[96];
@@ -742,6 +744,16 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.stencil = st;
 		run.scissor = sc;
 		run.z0 = run.z1 = -1.0f;
+		run.aref = d->atest_ref;
+		run.color = 0;
+		run.tfmt = 0;
+		if ((d->flags & GE_SGX_DRAW_TEXTURED) && !d->fbtex) {
+			const SceGxmTexture *gt = geSgxTexGet(d->texture);
+			if (gt)
+				run.tfmt = (uint32_t)sceGxmTextureGetFormat(gt);
+		}
+		if (!d->gpu && frame && d->count)
+			run.color = frame->vertices[d->base + frame->indices[d->first]].color;
 		if (!d->gpu && frame && d->count) {
 			uint32_t k;
 			for (k = 0; k < d->count && k < 256; k++) {
@@ -768,7 +780,22 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 	ones after that sample the last copy.
 */
 #define MAX_SNAPSHOTS 16
-static vita2d_texture *snap_tex = NULL;
+/*
+	The snapshot: a colour surface and texture only (no depth buffer, a
+	scene into it needs none), in the kernel's pool when it fits (outside
+	the emulator's memory, mapped for the GPU), else a block of its own
+*/
+typedef struct {
+	SceGxmColorSurface sfc;
+	SceGxmTexture tex;
+	SceGxmRenderTarget *rtgt;
+	void *mem;
+	uint32_t bytes;
+	SceUID uid; // its block (-1: in the pool)
+	int w, h;
+} Snapshot;
+static Snapshot snap;
+static int snap_ready = 0;
 static uint32_t snap_fb = 0xFFFFFFFFu; // framebuffer whose rendering the snapshot holds (this frame)
 static uint32_t snap_count = 0;        // snapshots this frame
 static int snap_failures = 0;
@@ -777,39 +804,83 @@ static int selfSampling(const GeSgxDraw *d, uint32_t fb) {
 	return (d->flags & GE_SGX_DRAW_TEXTURED) && !(d->flags & GE_SGX_DRAW_CLEAR) && d->fbtex == fb + 1;
 }
 
+static void snapshotFree(SceGxmContext *ctx) {
+	if (!snap_ready)
+		return;
+	if (ctx)
+		sceGxmFinish(ctx); // the GPU may still read or write it
+	if (snap.rtgt)
+		sceGxmDestroyRenderTarget(snap.rtgt);
+	if (snap.uid >= 0) {
+		sceGxmUnmapMemory(snap.mem);
+		sceKernelFreeMemBlock(snap.uid);
+	} else if (snap.mem) {
+		geSgxPoolFree(snap.mem, snap.bytes);
+	}
+	memset(&snap, 0, sizeof(snap));
+	snap_ready = 0;
+}
+
+static int snapshotMake(int w, int h) {
+	memset(&snap, 0, sizeof(snap));
+	snap.uid = -1;
+	snap.w = w;
+	snap.h = h;
+	snap.bytes = ((uint32_t)w * h * 4 + 0xFFF) & ~0xFFFu;
+	const char *where = "pool";
+	snap.mem = geSgxPoolAlloc(snap.bytes);
+	if (!snap.mem) {
+		where = "RAM";
+		snap.uid = sceKernelAllocMemBlock("SceGeSgxSnapshot", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, snap.bytes, NULL);
+		if (snap.uid >= 0) {
+			sceKernelGetMemBlockBase(snap.uid, &snap.mem);
+			if (sceGxmMapMemory(snap.mem, snap.bytes, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) < 0) {
+				sceKernelFreeMemBlock(snap.uid);
+				snap.uid = -1;
+				snap.mem = NULL;
+			}
+		} else {
+			snap.mem = NULL;
+		}
+	}
+	int err = snap.mem ? 0 : -1;
+	if (!err) {
+		// Alpha 1 (the draws sampling it with its alpha get an opaque framebuffer, as the targets' are)
+		uint32_t *px = snap.mem, k, n = (uint32_t)w * h;
+		for (k = 0; k < n; k++)
+			px[k] = 0xFF000000u;
+		err = sceGxmColorSurfaceInit(&snap.sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+			SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, w, snap.mem);
+	}
+	if (!err)
+		err = sceGxmTextureInitLinear(&snap.tex, snap.mem, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0);
+	if (!err) {
+		SceGxmRenderTargetParams params;
+		memset(&params, 0, sizeof(params));
+		params.width = w;
+		params.height = h;
+		params.scenesPerFrame = MAX_SNAPSHOTS;
+		params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+		params.driverMemBlock = -1;
+		err = sceGxmCreateRenderTarget(&params, &snap.rtgt);
+	}
+	snap_ready = 1;
+	if (err) {
+		if (snap_failures++ < 8)
+			GeSgxLog("GeSgx render: snapshot %dx%d FAILED (%08X)\n", w, h, (unsigned)err);
+		snapshotFree(NULL);
+		return 0;
+	}
+	GeSgxLog("GeSgx render: snapshot %dx%d in %s, for draws sampling their own framebuffer\n", w, h, where);
+	return 1;
+}
+
 // 1: copied; 0: a scene but no copy; -1: no scene (nothing to copy into)
 static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, int h, int reset_pool) {
-	if (snap_tex && ((int)vita2d_texture_get_width(snap_tex) != w || (int)vita2d_texture_get_height(snap_tex) != h)) {
-		sceGxmFinish(ctx);
-		if (snap_tex->gxm_rtgt)
-			sceGxmDestroyRenderTarget(snap_tex->gxm_rtgt);
-		if (snap_tex->depth_UID >= 0)
-			sceKernelFreeMemBlock(snap_tex->depth_UID);
-		vita2d_free_texture(snap_tex);
-		snap_tex = NULL;
-	}
-	int fresh = 0;
-	if (!snap_tex) {
-		SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
-		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
-		snap_tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
-		vita2d_texture_set_alloc_memblock_type(type);
-		if (snap_tex && (!snap_tex->gxm_rtgt || snap_tex->depth_UID < 0)) {
-			if (snap_tex->gxm_rtgt)
-				sceGxmDestroyRenderTarget(snap_tex->gxm_rtgt);
-			if (snap_tex->depth_UID >= 0)
-				sceKernelFreeMemBlock(snap_tex->depth_UID);
-			vita2d_free_texture(snap_tex);
-			snap_tex = NULL;
-		}
-		if (!snap_tex) {
-			if (snap_failures++ < 8)
-				GeSgxLog("GeSgx render: snapshot %dx%d FAILED\n", w, h);
-			return -1;
-		}
-		GeSgxLog("GeSgx render: snapshot %dx%d for draws sampling their own framebuffer\n", w, h);
-		fresh = 1;
-	}
+	if (snap_ready && (snap.w != w || snap.h != h))
+		snapshotFree(ctx);
+	if (!snap_ready && !snapshotMake(w, h))
+		return -1;
 
 	// Replace with the texture's colour, no blending: a copy (alpha is never written, the clear's 1 stays)
 	GeSgxDraw d;
@@ -821,18 +892,17 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 	if (!fp)
 		return -1;
 
-	vita2d_start_drawing_advanced(snap_tex, reset_pool ? VITA_2D_RESET_POOL : 0);
-	if (fresh) {
-		vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
-		vita2d_clear_screen();
-	}
+	if (reset_pool)
+		vita2d_pool_reset();
+	sceGxmBeginScene(ctx, 0, snap.rtgt, NULL, NULL, NULL, &snap.sfc, NULL);
 	GeSgxVertex *v = vita2d_pool_memalign(4 * sizeof(GeSgxVertex), sizeof(GeSgxVertex));
 	uint16_t *ix = vita2d_pool_memalign(6 * sizeof(uint16_t), sizeof(uint16_t));
 	if (v && ix) {
 		int k;
 		for (k = 0; k < 4; k++) {
-			v[k].x = (k & 1) ? 960.0f : 0.0f;
-			v[k].y = (k & 2) ? 544.0f : 0.0f;
+			// Pixels of the target (the viewport is the screen's)
+			v[k].x = (k & 1) ? (float)w : 0.0f;
+			v[k].y = (k & 2) ? (float)h : 0.0f;
 			v[k].z = 0.5f;
 			v[k].w = 1.0f;
 			v[k].u = (k & 1) ? 1.0f : 0.0f;
@@ -870,7 +940,7 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, ix, 6);
 		sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 	}
-	vita2d_end_drawing();
+	sceGxmEndScene(ctx, NULL, NULL);
 	return v && ix;
 }
 
@@ -928,8 +998,8 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				Target *src = sfb == target_fb ? NULL : findTarget(sfb);
 				if (src)
 					t = &src->tex->gxm_tex;
-				else if (sfb == target_fb && snap_fb == sfb && snap_tex)
-					t = &snap_tex->gxm_tex; // its own framebuffer: the copy made before it
+				else if (sfb == target_fb && snap_fb == sfb && snap_ready)
+					t = &snap.tex; // its own framebuffer: the copy made before it
 			} else {
 				t = geSgxTexGet(d->texture);
 			}
