@@ -71,9 +71,42 @@ typedef struct {
 	void *pool;    // in the pool, or NULL
 	uint32_t bytes;
 	SceGxmTexture tex;
+	int16_t next;  // next live entry of the same address bucket, -1: none
 } Entry;
 
 static Entry entries[MAX_TEXTURES];
+
+/*
+	Live entries by texture address: a lookup that is not one of the recent
+	ones looks at the few of its address, not at all of them (hundreds live
+	in Need for Speed Carbon, thousands of lookups a frame)
+*/
+#define BUCKETS 512
+static int16_t buckets[BUCKETS]; // first entry + 1, 0: none
+
+static inline uint32_t bucketOf(uint32_t addr) {
+	return ((addr >> 4) ^ (addr >> 13)) & (BUCKETS - 1);
+}
+
+static void linkLive(int i) {
+	uint32_t b = bucketOf(entries[i].key.addr);
+	entries[i].next = (int16_t)(buckets[b] - 1);
+	buckets[b] = (int16_t)(i + 1);
+}
+
+static void unlinkLive(int i) {
+	uint32_t b = bucketOf(entries[i].key.addr);
+	int j = buckets[b] - 1;
+	if (j == i) {
+		buckets[b] = (int16_t)(entries[i].next + 1);
+		return;
+	}
+	while (j >= 0 && entries[j].next != i)
+		j = entries[j].next;
+	if (j >= 0)
+		entries[j].next = entries[i].next;
+}
+
 static int last_hit = -1;
 static uint32_t cur_frame = 1;
 static uint32_t total_bytes = 0;
@@ -126,6 +159,7 @@ static void freeMemory(Entry *e) {
 
 static void kill(Entry *e) {
 	if (e->live) {
+		unlinkLive((int)(e - entries));
 		e->live = 0;
 		e->dead_since = cur_frame;
 		e->dead_seq = GeSgxBuildingSeq();
@@ -362,6 +396,7 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	e->used = 1;
 	__sync_synchronize();
 	e->live = 1;
+	linkLive(slot);
 
 	stats.uploads++;
 	stats.upload_kb += size / 1024;
@@ -409,7 +444,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 			if (r >= 0 && r < MAX_TEXTURES && entries[r].live && sameKey(&entries[r].key, d))
 				found = r;
 		}
-		for (i = 0; i < MAX_TEXTURES && found < 0; i++) {
+		for (i = buckets[bucketOf(d->addr)] - 1; i >= 0 && found < 0; i = entries[i].next) {
 			if (entries[i].live && sameKey(&entries[i].key, d))
 				found = i;
 		}

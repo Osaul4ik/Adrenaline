@@ -127,7 +127,15 @@ typedef struct {
 
 #define GE_SGX_VRAM_WANT_ADDRESS 0xABCDFF80
 
-// Longest time a DrawSync/ListSync waits for the Vita side to read the lists
-#define GE_SGX_SYNC_TIMEOUT_US 3000
+/*
+	Longest time a DrawSync/ListSync waits for the Vita side to read the lists.
+	After DrawSync the game writes its next lists over these: a wait cut short
+	leaves the Vita side reading new commands in old lists (the 'bad list'
+	ones, objects missing and stripes). Long enough for the heaviest frames
+	(Need for Speed Carbon's race: 50-60 ms), the game waits for the walker;
+	only a Vita side that stopped reading (then not waited for again until it
+	reads) costs it once.
+*/
+#define GE_SGX_SYNC_TIMEOUT_US 100000
 
 #endif
