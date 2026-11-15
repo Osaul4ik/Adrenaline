@@ -80,11 +80,12 @@ typedef struct {
 	volatile unsigned int sync_timeouts; // ... and gave up
 	volatile unsigned int sync_wait_us;  // total time waited
 	volatile unsigned int sync_max_us;   // longest wait
-	volatile unsigned int vram_copies;   // VRAM copies into the shadow queued (see GE_SGX_VRAM_SHADOW)
-	volatile unsigned int vram_copy_us;  // copies the GE refused
-	volatile unsigned int vram_copy_max_us; // copies skipped (the previous one still running)
-	volatile unsigned int vram_copy_how;  // 4: copied by the GE, 0: not copied (high memory layout)
-	unsigned int reserved2[8];
+	volatile unsigned int vram_copies;      // VRAM copies into the window (see GE_SGX_VRAM_SHADOW)
+	volatile unsigned int vram_copy_us;     // their total time
+	volatile unsigned int vram_copy_max_us; // the longest
+	volatile unsigned int vram_copy_how;    // 1: the DMA, 2: the CPU
+	char vram_copy_module[16];              // the module whose sceDmacMemcpy is used
+	unsigned int reserved2[4];
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
@@ -99,15 +100,15 @@ typedef struct {
 #define GE_SGX_ACK_ADDRESS 0xABCDFFC0 // last line of ADRENALINE_ADDRESS/ADRENALINE_SIZE
 
 /*
-	PSP VRAM is the GE's own memory, which the Vita side cannot read (pspemu's
-	window for it, SCE_PSPEMU_VRAM, stays empty). At every display flip the PSP
-	side has the GE copy it into PSP RAM above the game's 32 MB, which the
-	Vita side reads instead (the same place ge_native uses, so only without a
-	high memory layout). The GE's copy list lies right after it.
+	PSP VRAM is the GE's own memory inside the PSP part of the chip: the Vita
+	side cannot read it. pspemu has a window for it in PSP RAM (PSP 0x0BE00000,
+	SCE_PSPEMU_VRAM, what ScePspemuConvertAddress gives for 0x04000000), which
+	the PSP kernel fills only when it suspends (that is how savestates keep
+	VRAM). The PSP side copies VRAM into that window at every display flip,
+	with the DMA, so the Vita side reads VRAM there as it is.
 */
-#define GE_SGX_VRAM_SHADOW 0x0A000000 // PSP physical address of the copy
+#define GE_SGX_VRAM_SHADOW 0xABE00000 // uncached kernel address of PSP 0x0BE00000
 #define GE_SGX_VRAM_SIZE   0x00200000
-#define GE_SGX_VRAM_LIST   0x0A200000 // the copy list
 
 // Longest time a DrawSync/ListSync waits for the Vita side to read the lists
 #define GE_SGX_SYNC_TIMEOUT_US 3000

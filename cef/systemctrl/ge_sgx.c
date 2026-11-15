@@ -189,59 +189,64 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 }
 
 /*
-	VRAM into its shadow, which the Vita side reads (see GE_SGX_VRAM_SHADOW).
-	The GE copies it, with a list of ours queued at the flip (after the
-	frame's lists, without holding up the game; as ge_native queues its
-	framebuffer copy). One copy at a time: a flip while the previous one is
-	queued or running skips it.
+	VRAM into pspemu's window for it (see GE_SGX_VRAM_SHADOW), at every flip.
+	With the DMA: sceDmacMemcpy is looked up in every loaded module (its
+	library "sceDmac" is not where the name says), else the CPU (~120 ms).
 */
-static int copy_on = 0;
-static int copy_qid = -1;
-
-static void buildCopyList(void) {
-	u32 *l = (u32 *)(GE_SGX_VRAM_LIST | 0xA0000000); // uncached
-	u32 src = 0x04000000, dst = GE_SGX_VRAM_SHADOW;
-	int n = 0;
-	// 2 MB as 512 x 1024 pixels of 32 bits
-	l[n++] = (0xB2u << 24) | (src & 0xFFFFF0);                            // TRANSFERSRC
-	l[n++] = (0xB3u << 24) | ((src & 0xFF000000) >> 8) | 512;             // TRANSFERSRCW
-	l[n++] = (0xEBu << 24);                                               // TRANSFERSRCPOS
-	l[n++] = (0xB4u << 24) | (dst & 0xFFFFF0);                            // TRANSFERDST
-	l[n++] = (0xB5u << 24) | ((dst & 0xFF000000) >> 8) | 512;             // TRANSFERDSTW
-	l[n++] = (0xECu << 24);                                               // TRANSFERDSTPOS
-	l[n++] = (0xEEu << 24) | ((GE_SGX_VRAM_SIZE / 2048 - 1) << 10) | 511; // TRANSFERSIZE
-	l[n++] = (0xEAu << 24) | 1;                                           // TRANSFERSTART, 32 bits
-	l[n++] = (0x0Fu << 24);                                               // FINISH
-	l[n++] = (0x0Cu << 24);                                               // END
-}
+static int (* _sceDmacMemcpy)(void *dst, const void *src, SceSize size) = NULL;
 
 static void copyVram(void) {
-	if (!copy_on)
-		return;
-	int k1 = pspSdkSetK1(0);
-	// The previous copy still queued or running (> 0; done is 0, and an error
-	// once its id is free again): skip this one
-	if (copy_qid >= 0 && _sceGeListSync(copy_qid, 1) > 0) {
-		pspSdkSetK1(k1);
-		ring->vram_copy_max_us++; // skipped
-		return;
-	}
-	copy_qid = _sceGeListEnQueue((void *)GE_SGX_VRAM_LIST, NULL, -1, NULL);
-	pspSdkSetK1(k1);
-	if (copy_qid >= 0)
-		ring->vram_copies++;
+	int k1 = pspSdkSetK1(0); // kernel addresses (the flip comes from the game's syscall)
+	u32 start = timeNow();
+	if (_sceDmacMemcpy)
+		_sceDmacMemcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE);
 	else
-		ring->vram_copy_us++; // refused
+		memcpy((void *)GE_SGX_VRAM_SHADOW, (const void *)0x44000000, GE_SGX_VRAM_SIZE); // uncached both
+	u32 took = timeNow() - start;
+	pspSdkSetK1(k1);
+	ring->vram_copies++;
+	ring->vram_copy_us += took;
+	if (took > ring->vram_copy_max_us)
+		ring->vram_copy_max_us = took;
 }
 
-// The game's memory must end below the shadow (no high memory layout)
-static int userMemoryBelowShadow(void) {
-	PspSysmemPartitionInfo info;
-	memset(&info, 0, sizeof(info));
-	info.size = sizeof(info);
-	if (sceKernelQueryMemoryPartitionInfo661(PSP_MEMORY_PARTITION_USER, &info) < 0)
+// An export of any loaded module, by library name and NID; the module's name into *modname
+static u32 findExport(const char *libname, u32 nid, const char **modname) {
+	int (* getIdList)(SceUID *readbuf, int readbufsize, int *idcount) =
+		(void *)FindProc("sceModuleManager", "ModuleMgrForKernel", 0x644395E2);
+	if (!getIdList)
 		return 0;
-	return ((info.startaddr & 0x0FFFFFFF) + info.memsize) <= GE_SGX_VRAM_SHADOW;
+
+	static SceUID ids[128];
+	int count = 0;
+	if (getIdList(ids, sizeof(ids), &count) < 0)
+		return 0;
+	if (count > 128)
+		count = 128;
+
+	int m;
+	for (m = 0; m < count; m++) {
+		SceModule2 *mod = sceKernelFindModuleByUID661(ids[m]);
+		if (!mod)
+			continue;
+		int i = 0;
+		while (i < mod->ent_size) {
+			SceLibraryEntryTable *entry = (SceLibraryEntryTable *)(mod->ent_top + i);
+			if (entry->libname && strcmp(entry->libname, libname) == 0) {
+				u32 *table = entry->entrytable;
+				int total = entry->stubcount + entry->vstubcount;
+				int j;
+				for (j = 0; j < total; j++) {
+					if (table[j] == nid) {
+						*modname = mod->modname;
+						return table[j + total];
+					}
+				}
+			}
+			i += entry->len * 4;
+		}
+	}
+	return 0;
 }
 
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
@@ -309,12 +314,10 @@ int GeSgxInit(void) {
 	_sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
-	// VRAM is copied by the GE (4, see copyVram), unless the game's memory reaches the shadow (0)
-	copy_qid = -1;
-	copy_on = userMemoryBelowShadow();
-	u32 how = copy_on ? 4 : 0;
-	if (copy_on)
-		buildCopyList();
+	// VRAM copied with the DMA (1) or the CPU (2)
+	const char *dmac_module = "";
+	_sceDmacMemcpy = (void *)findExport("sceDmac", 0x617F3FE6, &dmac_module);
+	u32 how = _sceDmacMemcpy ? 1 : 2;
 	log("GeSgx: VRAM copied with %d\n", (int)how);
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
@@ -329,6 +332,7 @@ int GeSgxInit(void) {
 	}
 
 	ring->vram_copy_how = how;
+	strncpy((char *)ring->vram_copy_module, dmac_module, sizeof(ring->vram_copy_module) - 1);
 	ring->magic = GE_SGX_MAGIC;
 	ring->version = GE_SGX_VERSION;
 	ring->session = shared->session + 1;

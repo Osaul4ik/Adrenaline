@@ -802,8 +802,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	benchmarkMemory();
 
 	ram_map = (const uint8_t *)ScePspemuConvertAddress(0x80000000u | RAM_START, 0, 0);
-	// The PSP side's copy of VRAM (pspemu's own window for it stays empty, see GE_SGX_VRAM_SHADOW)
-	vram_map = (const uint8_t *)ScePspemuConvertAddress(GE_SGX_VRAM_SHADOW, 0, 0);
+	// pspemu's window for VRAM, which the PSP side keeps filled (see GE_SGX_VRAM_SHADOW)
+	vram_map = (const uint8_t *)ScePspemuConvertAddress(VRAM_START, 0, 0);
 	if (!ram_map || !vram_map || !initBlockCache()) {
 		GeSgxLog("GeSgx: no memory map (%08X %08X) or block cache\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
 		return 0;
@@ -1048,14 +1048,14 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (refused %u, skipped %u, how %u)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u us, max %u, how %u %s)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
-					(unsigned)rates.vram_copies, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how);
+					(unsigned)rates.vram_copies, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {
