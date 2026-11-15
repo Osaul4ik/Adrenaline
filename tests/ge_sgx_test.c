@@ -1003,6 +1003,42 @@ static void testTransferAlias(void) {
 	CHECK(w->naliases == 1 && w->aliases[0].src == 0x88000 && w->aliases[0].dst == 0, "aliases %d src %x dst %x", w->naliases, w->naliases ? w->aliases[0].src : 0, w->naliases ? w->aliases[0].dst : 0);
 }
 
+static struct { int calls; uint32_t dst, src, row, rows, dstride, sstride; } vcopy;
+
+static void fakeVramCopy(uint32_t dst, uint32_t src, uint32_t row_bytes, uint32_t rows, uint32_t dst_stride, uint32_t src_stride) {
+	vcopy.calls++;
+	vcopy.dst = dst; vcopy.src = src; vcopy.row = row_bytes; vcopy.rows = rows;
+	vcopy.dstride = dst_stride; vcopy.sstride = src_stride;
+}
+
+/* A transfer into VRAM is done on the Vita side's copy when walked: its rectangle in bytes */
+static void testTransferIntoVram(void) {
+	resetFrame();
+	memset(&vcopy, 0, sizeof(vcopy));
+	w->vram_copy_fn = fakeVramCopy;
+	L l = { 0x08800000 };
+	emit(&l, C(0xB2, 0x910000));               // from RAM 0x08910000, 64 pixels a row, at (2, 3)
+	emit(&l, C(0xB3, (0x08 << 16) | 64));
+	emit(&l, C(0xB4, 0x100000));               // into VRAM 0x04100000, 128 a row, at (4, 5)
+	emit(&l, C(0xB5, (0x04 << 16) | 128));
+	emit(&l, C(0xEB, (3 << 10) | 2));
+	emit(&l, C(0xEC, (5 << 10) | 4));
+	emit(&l, C(0xEE, (7 << 10) | 15));         // 16 x 8, 16 bit
+	emit(&l, C(0xEA, 0));
+	emit(&l, C(0xB4, 0x910000));               // RAM to RAM: not done here
+	emit(&l, C(0xB5, (0x08 << 16) | 128));
+	emit(&l, C(0xEA, 0));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	w->vram_copy_fn = NULL;
+	CHECK(vcopy.calls == 1, "calls %d", vcopy.calls);
+	CHECK(vcopy.dst == 0x04100000u + 5 * 256 + 4 * 2 && vcopy.src == 0x08910000u + 3 * 128 + 2 * 2,
+		"dst %x src %x", vcopy.dst, vcopy.src);
+	CHECK(vcopy.row == 32 && vcopy.rows == 8 && vcopy.dstride == 256 && vcopy.sstride == 128,
+		"row %u rows %u strides %u %u", vcopy.row, vcopy.rows, vcopy.dstride, vcopy.sstride);
+}
+
 /* ---- texture conversion ---- */
 
 static void swizzle(uint8_t *dst, const uint8_t *src, uint32_t rowbytes, uint32_t rows) {
@@ -1140,6 +1176,7 @@ int main(void) {
 	testFbTexture();
 	testFbTextureGenerated();
 	testTransferAlias();
+	testTransferIntoVram();
 	testTexconv();
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);

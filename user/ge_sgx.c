@@ -85,6 +85,7 @@ static GeSgxWalker walker;
 static uint32_t epoch = 1;
 static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
 static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000 (the PSP side's copy of it)
+static uint32_t vram_writes = 0, vram_write_bytes = 0; // GE transfers into it done here (vramCopyFn)
 // pspemu maps PSP VRAM uncached (a USER_RW_UNCACHE block): the CPU reads it as it is
 // The VRAM pages read so far, for the PSP side to copy only those (GeSgxVramWant)
 static uint32_t vram_want[GE_SGX_VRAM_PAGES / 32];
@@ -225,6 +226,40 @@ static void clockInit(GeSgxWalker *w) {
 	w->clock_fn = clockUs;
 	w->clock_every = 32; // a system call (2.4 us): one primitive in 32 is timed
 	clock_ticks_per_us = 1;
+}
+
+/*
+	A GE transfer into VRAM on the Vita side's copy (the window, which the
+	flip's copy from the PSP fills too): the textures it brings are there
+	for this frame's draws. Source anywhere (RAM, VRAM), rows may overlap.
+*/
+static void vramCopyFn(uint32_t dst, uint32_t src, uint32_t row_bytes, uint32_t rows, uint32_t dst_stride, uint32_t src_stride) {
+	if (!vram_map || !rows || !row_bytes)
+		return;
+	dst &= 0x0FFFFFFFu;
+	src &= 0x0FFFFFFFu;
+	uint32_t span = (rows - 1) * dst_stride + row_bytes, sspan = (rows - 1) * src_stride + row_bytes;
+	if (dst < VRAM_START || dst >= VRAM_START + 0x00800000u)
+		return;
+	uint32_t off = dst & (VRAM_SIZE - 1);
+	if (off + span > VRAM_SIZE)
+		return;
+	const uint8_t *s = geSgxPspPtr(src, sspan);
+	if (!s)
+		return;
+	uint8_t *d = (uint8_t *)vram_map + off;
+	uint32_t r;
+	if (dst_stride == row_bytes && src_stride == row_bytes) {
+		memmove(d, s, span);
+	} else {
+		for (r = 0; r < rows; r++)
+			memmove(d + r * dst_stride, s + r * src_stride, row_bytes);
+	}
+	wantVram(off, span);
+	geSgxTexMemoryWritten(dst, span);
+	vram_writes++;
+	vram_write_bytes += span;
+	epoch++; // the walker's blocks of it are read again
 }
 
 // Vertices of big primitives: one DMA (about 80 us a call, then 2 ns/byte against 11 for a copy)
@@ -874,6 +909,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		if (slots_ok && tex_ok) {
 			walker.texture_fn = geSgxTexLookup;
 			walker.bulk_fn = bulkFn;
+			walker.vram_copy_fn = vramCopyFn;
 			clockInit(&walker);
 			walker.log_fn = GeSgxLog;
 			walker.gpu_transform = !GE_SGX_TEST_CPU_TRANSFORM;
@@ -1089,14 +1125,15 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u | waits %u timeouts %u max %u us resyncs %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
-					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module);
+					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
+					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024));
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {

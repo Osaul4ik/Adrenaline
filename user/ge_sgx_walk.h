@@ -132,6 +132,13 @@ typedef int32_t (* GeSgxTextureFn)(void *user, const GeSgxTexDesc *desc);
 */
 typedef int (* GeSgxBulkFn)(uint32_t addr, void *dst, uint32_t size);
 
+/*
+	Optional: a GE transfer into VRAM, done on the Vita side's copy of it
+	when the walker meets it (the PSP's GE does it later, the textures it
+	brings are read before that): rows of row_bytes, strides in bytes.
+*/
+typedef void (* GeSgxVramCopyFn)(uint32_t dst, uint32_t src, uint32_t row_bytes, uint32_t rows, uint32_t dst_stride, uint32_t src_stride);
+
 #define GE_SGX_CLUT_BYTES 1024
 #define GE_SGX_GPU_BAD_MAX 8
 #define GE_SGX_MAX_ALIASES 4
@@ -184,6 +191,7 @@ typedef struct {
 	GeSgxTextureFn texture_fn;
 	void *texture_user;
 	GeSgxBulkFn bulk_fn;
+	GeSgxVramCopyFn vram_copy_fn;
 	/*
 		Optional clock for the build profile in the frame (any unit: the
 		frame's us_* are in it). clock_every: one primitive in that many is

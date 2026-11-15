@@ -492,6 +492,19 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 	return handle;
 }
 
+void geSgxTexMemoryWritten(uint32_t addr, uint32_t size) {
+	addr &= 0x0FFFFFFFu;
+	int i;
+	for (i = 0; i < MAX_TEXTURES; i++) {
+		Entry *e = &entries[i];
+		if (!e->live)
+			continue;
+		uint32_t a = e->key.addr & 0x0FFFFFFFu, n = sourceBytes(&e->key);
+		if (a < addr + size && addr < a + n)
+			e->last_checked = cur_frame - 1; // checked again at its next use
+	}
+}
+
 void geSgxTexFrameDone(void) {
 	cur_frame++;
 	// A budget lowered when memory ran out comes back up while there is memory again

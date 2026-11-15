@@ -1873,6 +1873,23 @@ void geSgxBuildTransfer(GeSgxWalker *w) {
 			(unsigned)tw, (unsigned)th, (reg(w, GE_CMD_TRANSFERSTART) & 1) ? 4u : 2u, w->frame ? (unsigned)w->frame->ndraws : 0u);
 	}
 
+	/*
+		Into VRAM (games bring textures this way, Need for Speed Carbon while it
+		races): done on the Vita side's copy of VRAM now, walked or not. The
+		PSP's GE does it when it gets to it, after the textures were read here;
+		the copy of VRAM at the flip would only bring it for the next frame.
+	*/
+	if (w->vram_copy_fn && dst >= 0x04000000u && dst < 0x04800000u) {
+		uint32_t bpp = (reg(w, GE_CMD_TRANSFERSTART) & 1) ? 4u : 2u;
+		uint32_t sstride = (reg(w, GE_CMD_TRANSFERSRCW) & 0x7F8u) * bpp, dstride = (reg(w, GE_CMD_TRANSFERDSTW) & 0x7F8u) * bpp;
+		uint32_t sp = reg(w, GE_CMD_TRANSFERSRCPOS), dp = reg(w, GE_CMD_TRANSFERDSTPOS);
+		uint32_t s0 = src + ((sp >> 10) & 0x3FF) * sstride + (sp & 0x3FF) * bpp;
+		uint32_t d0 = dst + ((dp >> 10) & 0x3FF) * dstride + (dp & 0x3FF) * bpp;
+		if (sstride && dstride)
+			w->vram_copy_fn(d0, s0, tw * bpp, th, dstride, sstride);
+		w->state_dirty = 1; // the texture of the next draw is looked up again
+	}
+
 	if (!w->frame)
 		return;
 

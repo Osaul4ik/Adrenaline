@@ -38,6 +38,8 @@ int geSgxTexInit(void);
 void geSgxTexReset(void);
 int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *desc); // GeSgxTextureFn
 void geSgxTexFrameDone(void); // after each published frame
+// PSP memory written (a GE transfer): the textures there are checked again at their next use
+void geSgxTexMemoryWritten(uint32_t addr, uint32_t size);
 void geSgxTexStats(GeSgxTexStats *stats);
 
 // Draw thread: the texture of a handle from a published frame
