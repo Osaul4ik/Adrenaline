@@ -260,9 +260,10 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	SceUInt64 t0 = sceKernelGetProcessTimeWide();
 
 	// PSP memory is uncached: one DMA for big textures, bursts for small ones. VRAM
-	// always with the DMA: the CPU sees stale zeros there (small textures came out
-	// transparent)
-	if (size >= 16 * 1024 || ((d->addr & 0x0FFFFFFFu) >= 0x04000000u && (d->addr & 0x0FFFFFFFu) < 0x04800000u))
+	// with the DMA unless there is its uncached mirror: through the cached mapping
+	// the CPU sees stale zeros (small textures came out transparent)
+	uint32_t a = d->addr & 0x0FFFFFFFu;
+	if (size >= 16 * 1024 || (a >= 0x04000000u && a < 0x04800000u && !geSgxVramUncached()))
 		sceDmacMemcpy(staging[0], src, size);
 	else
 		memcpy(staging[0], src, size);

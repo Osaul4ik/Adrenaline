@@ -85,7 +85,15 @@ static GeSgxWalker walker;
 static uint32_t epoch = 1;
 static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
 static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000
-static int vram_inval = 0;             // VRAM blocks invalidated before they are read (see probeVram)
+/*
+	PSP VRAM is written by the PSP side behind the CPU's cache: through the
+	cacheable mapping above the CPU reads stale data (zeros). It is read
+	through an uncached mirror of that memory block (vram_nc, used once it
+	has been checked against the DMA), or else with the DMA.
+*/
+static const uint8_t *vram_nc = NULL;
+static int vram_nc_ok = 0;
+static SceUID vram_nc_block = -1;
 static uint32_t *block_tag = NULL;     // block address | 1 (valid)
 static uint32_t *block_epoch = NULL;
 static uint8_t *block_data = NULL;
@@ -118,22 +126,18 @@ static const void *blockFn(void *user, uint32_t block) {
 	if (block >= RAM_START && block < RAM_START + PSP_RAM_SIZE) {
 		src = ram_map + (block - RAM_START);
 	} else if (block >= VRAM_START && block < VRAM_START + 0x00800000u) {
-		// VRAM and its mirrors
-		src = vram_map + (block & (VRAM_SIZE - 1));
-		if (vram_inval)
-			ScePspemuConvertAddress(VRAM_START + (block & (VRAM_SIZE - 1)), KERMIT_INPUT_MODE, GE_SGX_BLOCK_SIZE);
-		/*
-			Read with the DMA: the CPU sees stale zeros there (small textures and
-			CLUTs in VRAM read as zeros, transparent; those copied with the DMA
-			were right). Not cached here either: the game changes VRAM any time.
-		*/
-		block_calls++;
-		uint32_t vi = (block / GE_SGX_BLOCK_SIZE) & (BLOCK_CACHE_ENTRIES - 1);
-		uint8_t *vdst = block_data + vi * GE_SGX_BLOCK_SIZE;
-		sceDmacMemcpy(vdst, src, GE_SGX_BLOCK_SIZE);
-		block_tag[vi] = 0;
-		block_copies++;
-		return vdst;
+		// VRAM and its mirrors: uncached, or with the DMA (not kept: VRAM changes any time)
+		if (vram_nc_ok) {
+			src = vram_nc + (block & (VRAM_SIZE - 1));
+		} else {
+			block_calls++;
+			uint32_t vi = (block / GE_SGX_BLOCK_SIZE) & (BLOCK_CACHE_ENTRIES - 1);
+			uint8_t *vdst = block_data + vi * GE_SGX_BLOCK_SIZE;
+			sceDmacMemcpy(vdst, vram_map + (block & (VRAM_SIZE - 1)), GE_SGX_BLOCK_SIZE);
+			block_tag[vi] = 0;
+			block_copies++;
+			return vdst;
+		}
 	} else {
 		return NULL;
 	}
@@ -166,29 +170,120 @@ const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 		uint32_t off = addr & (VRAM_SIZE - 1);
 		if (size > VRAM_SIZE - off)
 			return NULL;
+		if (vram_nc_ok)
+			return vram_nc + off;
 		/*
-			The CPU sees stale zeros in VRAM: up to VRAM_SCRATCH bytes are copied
-			with the DMA into a buffer, which the caller reads (the walker's
-			thread only; valid until the next call)
+			No uncached mirror: up to VRAM_SCRATCH bytes are copied with the DMA
+			into a buffer, which the caller reads (the walker's thread only;
+			valid until the next call). Bigger ones come as they are: the caller
+			copies them with the DMA (see the texture cache)
 		*/
 		if (size && size <= VRAM_SCRATCH) {
 			static uint8_t scratch[VRAM_SCRATCH] __attribute__((aligned(64)));
 			sceDmacMemcpy(scratch, vram_map + off, size);
 			return scratch;
 		}
-		if (vram_inval && size)
-			ScePspemuConvertAddress(VRAM_START + off, KERMIT_INPUT_MODE, size);
 		return vram_map + off;
 	}
 	return NULL;
 }
 
+int geSgxVramUncached(void) {
+	return vram_nc_ok;
+}
+
 /*
-	Diagnostics: textures and CLUTs in VRAM read as zeros with the CPU. When
-	VRAM surely holds textures (a frame of the race), the non-zero words of
-	its texture area are counted as the CPU reads them, as the DMA copies
-	them, and as the CPU reads them after a cache invalidation; if that helps,
-	VRAM is invalidated before the CPU reads it from then on.
+	The uncached mirror: a memory block of an uncached type over the same
+	pages as the block that holds VRAM (sceKernelAllocMemBlock with a base
+	block). Each attempt is logged.
+*/
+static void mirrorVram(void) {
+	SceKernelMemBlockInfo info;
+	memset(&info, 0, sizeof(info));
+	info.size = sizeof(info);
+	SceUID uid = sceKernelFindMemBlockByAddr(vram_map, 0);
+	int r = sceKernelGetMemBlockInfoByAddr((void *)vram_map, &info);
+	GeSgxLog("GeSgx VRAM: block %X (info %X): base %08X, size %X, type %08X, memory type %X, access %X\n", (unsigned)uid, (unsigned)r,
+		(unsigned)(uintptr_t)info.mappedBase, (unsigned)info.mappedSize, (unsigned)info.type, (unsigned)info.memoryType, (unsigned)info.access);
+	if (uid < 0 || r < 0 || !info.mappedSize)
+		return;
+
+	static const SceKernelMemBlockType types[] = {
+		SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE,
+		0x0D808060, // USER_MAIN_PHYCONT_NC_RW
+		0x09408060, // USER_CDRAM_RW
+	};
+	unsigned t;
+	for (t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+		SceKernelAllocMemBlockOpt opt;
+		memset(&opt, 0, sizeof(opt));
+		opt.size = sizeof(opt);
+		opt.attr = 0x40; // SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_MIRROR_BLOCKID
+		opt.uidBaseBlock = uid;
+		SceUID mb = sceKernelAllocMemBlock("SceGeSgxVramNC", types[t], info.mappedSize, &opt);
+		GeSgxLog("GeSgx VRAM: uncached mirror as type %08X: %X\n", (unsigned)types[t], (unsigned)mb);
+		if (mb >= 0) {
+			void *base = NULL;
+			sceKernelGetMemBlockBase(mb, &base);
+			vram_nc_block = mb;
+			vram_nc = (const uint8_t *)base + (vram_map - (const uint8_t *)info.mappedBase);
+			GeSgxLog("GeSgx VRAM: mirror at %08X, VRAM at %08X there\n", (unsigned)(uintptr_t)base, (unsigned)(uintptr_t)vram_nc);
+			return;
+		}
+	}
+}
+
+/*
+	The mirror is used once it reads what the DMA reads, where VRAM is not
+	zero (the framebuffers, once the game has drawn): checked every 30th
+	frame until it does, or found different (then freed). The read speed of
+	the three ways is logged.
+*/
+static void checkVramMirror(void) {
+	static uint32_t frames = 0, tries = 0;
+	if (!vram_nc || vram_nc_ok || (++frames % 30) != 0)
+		return;
+
+	// 16 KB in the middle of the first framebuffer
+	static uint32_t dma[4096], nc[4096];
+	const uint32_t off = 0x20000;
+	sceDmacMemcpy(dma, vram_map + off, sizeof(dma));
+	memcpy(nc, vram_nc + off, sizeof(nc));
+	uint32_t i, nonzero = 0, diff = 0;
+	for (i = 0; i < 4096; i++) {
+		nonzero += dma[i] != 0;
+		diff += dma[i] != nc[i];
+	}
+	if (nonzero < 256)
+		return;
+
+	tries++;
+	if (diff) {
+		GeSgxLog("GeSgx VRAM: the uncached mirror differs from the DMA in %u of 4096 words (try %u)\n", (unsigned)diff, (unsigned)tries);
+		if (tries >= 5) {
+			GeSgxLog("GeSgx VRAM: uncached mirror not used, VRAM read with the DMA\n");
+			sceKernelFreeMemBlock(vram_nc_block);
+			vram_nc_block = -1;
+			vram_nc = NULL;
+		}
+		return;
+	}
+
+	uint32_t t0 = sceKernelGetProcessTimeLow();
+	memcpy(nc, vram_nc + off, sizeof(nc));
+	uint32_t t1 = sceKernelGetProcessTimeLow();
+	sceDmacMemcpy(nc, vram_map + off, sizeof(nc));
+	uint32_t t2 = sceKernelGetProcessTimeLow();
+	memcpy(nc, vram_map + off, sizeof(nc));
+	uint32_t t3 = sceKernelGetProcessTimeLow();
+	vram_nc_ok = 1;
+	GeSgxLog("GeSgx VRAM: uncached mirror reads what the DMA does (%u non-zero words): used from now on | 16 KB: uncached %u us, DMA %u us, cached %u us\n",
+		(unsigned)nonzero, (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2));
+}
+
+/*
+	Diagnostics: the non-zero words of VRAM's texture area (a frame of the
+	race) as the cached mapping, the DMA and the uncached mirror read them.
 */
 static uint32_t countNonZero(const uint8_t *base) {
 	if (!base)
@@ -200,7 +295,6 @@ static uint32_t countNonZero(const uint8_t *base) {
 	return n;
 }
 
-// The same words copied with the DMA (which does not go through the CPU's cache)
 static uint32_t countNonZeroDma(const uint8_t *base) {
 	static uint32_t chunk[16384];
 	uint32_t off, i, n = 0;
@@ -213,16 +307,9 @@ static uint32_t countNonZeroDma(const uint8_t *base) {
 }
 
 static void probeVram(void) {
-	uint32_t cpu = countNonZero(vram_map);
-	uint32_t dma = countNonZeroDma(vram_map);
-	ScePspemuConvertAddress(VRAM_START, KERMIT_INPUT_MODE, VRAM_SIZE);
-	uint32_t after_inval = countNonZero(vram_map);
-	GeSgxLog("GeSgx VRAM probe: non-zero words of 0x%X at %08X: CPU %u, DMA %u, CPU after invalidation %u\n",
-		(unsigned)((0x001C0000u - 0x000D0000u) / 4), (unsigned)(uintptr_t)vram_map, (unsigned)cpu, (unsigned)dma, (unsigned)after_inval);
-	if (after_inval > cpu + 1024 && !vram_inval) {
-		vram_inval = 1;
-		GeSgxLog("GeSgx VRAM probe: stale CPU cache - VRAM invalidated before the CPU reads it from now on\n");
-	}
+	GeSgxLog("GeSgx VRAM probe: non-zero words of 0x%X: cached %u, DMA %u, uncached mirror %d (%s)\n",
+		(unsigned)((0x001C0000u - 0x000D0000u) / 4), (unsigned)countNonZero(vram_map), (unsigned)countNonZeroDma(vram_map),
+		vram_nc ? (int)countNonZero(vram_nc) : -1, vram_nc_ok ? "in use" : "not in use");
 }
 
 static uint32_t clockUs(void) {
@@ -393,6 +480,8 @@ static void publishSlot(uint32_t top) {
 		80 s into it. The lines wait in memory until the frame is done: written
 		if it has many draws (the race), started again with the next one if not.
 	*/
+	checkVramMirror();
+
 	static uint32_t big_frames = 0, trace_tries = 0;
 	if (walker.trace && building && walker.frame) {
 		if (building->data.ndraws >= 1000) {
@@ -833,6 +922,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		return 0;
 	}
 	GeSgxLog("GeSgx: RAM map %08X, VRAM map %08X\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
+	mirrorVram();
 
 	/*
 		The GPU reads PSP RAM where it is: vertex data is not copied. The
