@@ -114,8 +114,9 @@ jobs:
           cmake --build build/kernel
 
       - name: Check adrenaline_kernel.skprx imports
-        # The module this one replaces is the prebuilt one: the same imports (libraries
-        # and NIDs) are required, so nothing is called that it did not call
+        # The module this one replaces is the prebuilt one: no import (library and NID)
+        # it did not have, so nothing is called that it did not call. Fewer are fine
+        # (current gcc inlines strcmp with a constant string, for one)
         run: |
           pip install --quiet pyyaml
           python3 - <<'PY'
@@ -131,8 +132,8 @@ jobs:
               print("new import:     %s (0x%08X) 0x%08X" % (lib, lnid, nid))
           for lib, lnid, nid in sorted(removed):
               print("missing import: %s (0x%08X) 0x%08X" % (lib, lnid, nid))
-          print("%d imports, same as the prebuilt module: %s" % (len(pairs(new)), not added and not removed))
-          sys.exit(1 if added or removed else 0)
+          print("%d imports, none the prebuilt module did not have: %s" % (len(pairs(new)), not added))
+          sys.exit(1 if added else 0)
           PY
 
       - name: Use the new adrenaline_kernel.skprx
