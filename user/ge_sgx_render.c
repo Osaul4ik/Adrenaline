@@ -474,22 +474,26 @@ static void stencilOff(SceGxmContext *ctx) {
 /*
 	Every PSP framebuffer drawn into has its own rendering (at twice its
 	size): the shown one, and those games draw to use as textures
-	(reflections, blur, the menus' backgrounds). They share one depth and
-	stencil buffer (in CDRAM, the GPU's fast memory, when it fits): each
-	scene starts from it cleared.
+	(reflections, blur, the menus' backgrounds). Each has its own depth and
+	stencil buffer (in the kernel's pool when it fits, else vita2d's): a
+	frame that draws into another framebuffer in between (Need for Speed
+	Carbon's reflection) goes on with the depth and stencil it had, they are
+	stored at the end of its scene and loaded at the start of the next one.
+	A frame's first scene of a target starts from them cleared.
 */
 #define MAX_TARGET_BYTES (10 * 1024 * 1024)
 // CDRAM always left to the emulator (with none left, Carbon's loading screen ended in an error)
 #define RESERVE_CDRAM_KB 1024
-#define SHARED_DEPTH_W 960
-#define SHARED_DEPTH_H 544
 
 typedef struct {
 	uint32_t fb;
 	uint16_t w, h;
 	vita2d_texture *tex;
 	int fresh;      // never drawn: cleared first
-	int own_depth;  // its depth buffer is vita2d's (bigger than the shared one)
+	int own_depth;  // its depth buffer is vita2d's (else pool_depth)
+	void *pool_depth;
+	uint32_t pool_depth_bytes;
+	uint32_t scene_frame; // frame (rframes + 1) of its last scene
 	uint32_t used;  // frame it was last drawn or shown
 	uint32_t bytes;
 } Target;
@@ -497,33 +501,8 @@ typedef struct {
 static Target targets[GE_SGX_MAX_FBS];
 static uint32_t target_bytes = 0;
 static uint32_t target_clock = 0;
-static void *shared_depth = NULL;
-static int shared_depth_tried = 0;
 static int target_failures = 0;
 static uint32_t shown_fb = 0; // VRAM offset + 1 of the shown framebuffer (0: none; 0 is a framebuffer too)
-
-static void *sharedDepth(void) {
-	if (shared_depth_tried)
-		return shared_depth;
-	shared_depth_tried = 1;
-	uint32_t size = (4 * SHARED_DEPTH_W * SHARED_DEPTH_H + 256 * 1024 - 1) & ~(256 * 1024 - 1);
-	int cdram = 0;
-	const char *where = "";
-	// The kernel's pool first (outside the emulator's budget, already mapped for the GPU)
-	shared_depth = geSgxPoolAlloc(size);
-	if (shared_depth) {
-		cdram = geSgxPoolIsCdram();
-		where = " pool";
-	}
-	if (!shared_depth && GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= size / 1024 + RESERVE_CDRAM_KB) {
-		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-		cdram = shared_depth != NULL;
-	}
-	if (!shared_depth)
-		shared_depth = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
-	GeSgxLog("GeSgx render: shared depth %s (%s%s)\n", shared_depth ? "ok" : "FAILED", cdram ? "CDRAM" : "RAM", where);
-	return shared_depth;
-}
 
 static Target *findTarget(uint32_t fb) {
 	int i;
@@ -541,6 +520,8 @@ static void freeTarget(Target *t) {
 	sceGxmFinish(_vita2d_context);
 	if (t->tex->gxm_rtgt)
 		sceGxmDestroyRenderTarget(t->tex->gxm_rtgt);
+	if (t->pool_depth)
+		geSgxPoolFree(t->pool_depth, t->pool_depth_bytes);
 	if (t->own_depth && t->tex->depth_UID >= 0) {
 		void *base = NULL;
 		if (sceKernelGetMemBlockBase(t->tex->depth_UID, &base) >= 0 && base)
@@ -554,8 +535,6 @@ static void freeTarget(Target *t) {
 
 static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	uint32_t bytes = (uint32_t)w * h * 4;
-	if (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H)
-		sharedDepth(); // before the colour: the depth buffer is the busier one, CDRAM goes to it first
 	SceKernelMemBlockType type = vita2d_texture_get_alloc_memblock_type();
 
 	// CDRAM if it fits with the emulator's reserve (the depth buffer usually took it), main RAM else
@@ -585,9 +564,10 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		return NULL;
 	}
 
-	// vita2d made a depth buffer for it: the shared one instead, when it is big enough
+	// vita2d made a depth buffer for it: one in the pool instead, when it fits
 	int own_depth = 1;
-	void *depth = (w <= SHARED_DEPTH_W && h <= SHARED_DEPTH_H) ? sharedDepth() : NULL;
+	uint32_t depth_bytes = (uint32_t)((w + 31) & ~31) * ((h + 31) & ~31) * 4;
+	void *depth = geSgxPoolAlloc(depth_bytes);
 	if (depth) {
 		void *old = NULL;
 		sceKernelGetMemBlockBase(tex->depth_UID, &old);
@@ -598,6 +578,7 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		sceKernelFreeMemBlock(tex->depth_UID);
 		tex->depth_UID = -1;
 		own_depth = 0;
+		bytes += depth_bytes;
 	} else {
 		bytes += (uint32_t)((w + 31) & ~31) * ((h + 31) & ~31) * 4;
 	}
@@ -608,11 +589,14 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	t->tex = tex;
 	t->fresh = 1;
 	t->own_depth = own_depth;
+	t->pool_depth = own_depth ? NULL : depth;
+	t->pool_depth_bytes = own_depth ? 0 : depth_bytes;
+	t->scene_frame = 0;
 	t->used = target_clock;
 	t->bytes = bytes;
 	target_bytes += bytes;
 	GeSgxLog("GeSgx render: target %X %dx%d in %s, depth %s | targets %u KB, free CDRAM %u KB, RAM %u KB\n",
-		(unsigned)fb, w, h, in_cdram ? "CDRAM" : "RAM", own_depth ? "own" : "shared", (unsigned)(target_bytes / 1024),
+		(unsigned)fb, w, h, in_cdram ? "CDRAM" : "RAM", own_depth ? "vita2d's" : "pool", (unsigned)(target_bytes / 1024),
 		(unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW), (unsigned)GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW));
 	return t;
 }
@@ -979,6 +963,18 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		}
 		rtraceAdd("GeSgx R: scene %d: draws %u-%u into fb %X, rendering %dx%d%s\n", *scenes, (unsigned)i, (unsigned)(j - 1), (unsigned)dfb,
 			t->w, t->h, t->fresh ? " (new, cleared)" : "");
+		// Depth and stencil: kept from its scene before in this frame, kept for one after
+		int again = 0;
+		for (k = j; k < frame->ndraws && !again; k++)
+			again = frame->draws[k].fb == dfb;
+		int resumed = t->scene_frame == rframes + 1;
+		sceGxmDepthStencilSurfaceSetForceLoadMode(&t->tex->gxm_sfd,
+			resumed ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+		sceGxmDepthStencilSurfaceSetForceStoreMode(&t->tex->gxm_sfd,
+			again ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
+		t->scene_frame = rframes + 1;
+		if (resumed || again)
+			rtraceAdd("GeSgx R:   depth and stencil%s%s\n", resumed ? " loaded" : "", again ? " stored" : "");
 		vita2d_start_drawing_advanced(t->tex, *scenes == 0 ? VITA_2D_RESET_POOL : 0);
 		if (t->fresh) {
 			vita2d_set_clear_color(RGBA8(0, 0, 0, 255));
