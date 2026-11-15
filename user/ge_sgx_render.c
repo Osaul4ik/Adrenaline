@@ -57,6 +57,7 @@ typedef struct {
 	const SceGxmProgramParameter *alpha_ref;
 	const SceGxmProgramParameter *env;
 	const SceGxmProgramParameter *fog_color;
+	const SceGxmProgramParameter *scissor; // exact scissor (x0, y0, x1, y1 in pixels)
 } FragmentProgram;
 
 typedef struct {
@@ -256,8 +257,10 @@ static const SceGxmProgram *registeredGxp(uint32_t key, SceGxmShaderPatcherId *i
 	return gxp;
 }
 
-static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram *vgxp) {
-	uint32_t key = geSgxShaderKey(d);
+// extra: shader key bits from the render state (GE_SGX_KEY_SCISSOR)
+#define GE_SGX_KEY_SCISSOR (1u << 12)
+static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram *vgxp, uint32_t extra) {
+	uint32_t key = geSgxShaderKey(d) | extra;
 	uint32_t blend = blendKey(d);
 	int i;
 
@@ -333,6 +336,7 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	fp->alpha_ref = sceGxmProgramFindParameterByName(gxp, "uAlphaRef");
 	fp->env = sceGxmProgramFindParameterByName(gxp, "uEnv");
 	fp->fog_color = sceGxmProgramFindParameterByName(gxp, "uFogColor");
+	fp->scissor = sceGxmProgramFindParameterByName(gxp, "uScissor");
 	return fp;
 }
 
@@ -827,6 +831,19 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 }
 
 /*
+	The viewport: the vertex programs give positions in pixels of the
+	target scaled into 960x544 (x * 2 / 960 - 1). GXM sets a scene's viewport
+	to its render target's size, so in a smaller target (Carbon's 256x256
+	reflection, 512x512 blur) the picture was squeezed into a corner
+	(256 * 256 / 960 = 68 pixels wide). Every scene of this renderer sets
+	the 960x544 one: a vertex's pixel is the target's pixel, whatever its
+	size. Depth: the programs give 0..1 (z clamped into 0..w).
+*/
+static void setViewport(SceGxmContext *ctx) {
+	sceGxmSetViewport(ctx, 480.0f, 480.0f, 272.0f, -272.0f, 0.0f, 1.0f);
+}
+
+/*
 	A draw that samples the framebuffer it draws into (Need for Speed
 	Carbon's blur: a pass reading one part of its 256x256 framebuffer into
 	another). The GPU cannot sample the surface it renders to: the scene
@@ -974,13 +991,14 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 	d.flags = GE_SGX_DRAW_TEXTURED | GE_SGX_DRAW_TCC;
 	d.tfunc = 3;
 	d.sfunc = 0xFF;
-	FragmentProgram *fp = fragmentProgram(&d, vertex_gxp);
+	FragmentProgram *fp = fragmentProgram(&d, vertex_gxp, 0);
 	if (!fp)
 		return -1;
 
 	if (reset_pool)
 		vita2d_pool_reset();
 	sceGxmBeginScene(ctx, 0, snap.rtgt, NULL, NULL, NULL, &snap.sfc, NULL);
+	setViewport(ctx);
 	{
 		SceGxmTexture tex = src->gxm_tex;
 		sceGxmTextureSetUAddrMode(&tex, SCE_GXM_TEXTURE_ADDR_CLAMP);
@@ -1021,6 +1039,7 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 */
 static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_t first, uint32_t last,
 	int tw, int th, uint32_t target_fb, GeSgxRenderStats *stats) {
+	setViewport(ctx);
 	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
 	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
 	int last_zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS, last_zwrite = 0;
@@ -1101,7 +1120,15 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			vgxp = g->gxp;
 		}
 
-		FragmentProgram *fp = fragmentProgram(d, vgxp);
+		/*
+			The scissor: the region clip (below) works in 32x32 tiles; a scissor
+			not on them (the minimap's square: its lines showed past it, outside
+			the circle) is made exact in the fragment program
+		*/
+		int sx0 = d->scissor[0] < 0 ? 0 : d->scissor[0], sy0 = d->scissor[1] < 0 ? 0 : d->scissor[1];
+		int sx1 = d->scissor[2] > tw ? tw : d->scissor[2], sy1 = d->scissor[3] > th ? th : d->scissor[3];
+		int exact = (sx0 & 31) || (sy0 & 31) || (sx1 != tw && (sx1 & 31)) || (sy1 != th && (sy1 & 31));
+		FragmentProgram *fp = fragmentProgram(d, vgxp, exact ? GE_SGX_KEY_SCISSOR : 0);
 		if (!fp) {
 			stats->waiting++;
 			drawOutcome(stats, GE_SGX_SKIP_FP, d, i, target_fb, frame);
@@ -1162,9 +1189,13 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			last_stencil = skey;
 		}
 
-		if (fp->alpha_ref || fp->env || fp->fog_color) {
+		if (fp->alpha_ref || fp->env || fp->fog_color || fp->scissor) {
 			void *uniforms = NULL;
 			sceGxmReserveFragmentDefaultUniformBuffer(ctx, &uniforms);
+			if (fp->scissor) {
+				float sc[4] = { (float)sx0, (float)sy0, (float)sx1, (float)sy1 };
+				sceGxmSetUniformDataF(uniforms, fp->scissor, 0, 4, sc);
+			}
 			if (fp->alpha_ref) {
 				float ref = d->atest_ref / 255.0f;
 				sceGxmSetUniformDataF(uniforms, fp->alpha_ref, 0, 1, &ref);

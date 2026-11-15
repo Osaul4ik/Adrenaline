@@ -192,16 +192,20 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	int dbl = (key >> 5) & 1;
 	int atest = (key >> 6) & 1;
 	int afunc = (key >> 7) & 7;
+	int sc = (key >> 12) & 1; // exact scissor (the region clip is 32x32 tiles)
 
 	int n = snprintf(buf, size,
-		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s) : COLOR\n"
+		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s) : COLOR\n"
 		"{\n"
+		"%s"
 		"	float4 v = vColor;\n"
 		"	float4 c = v;\n",
 		textured ? ", uniform sampler2D uTexture" : "",
 		(textured && tfunc == 2) ? ", uniform float4 uEnv" : "",
 		atest ? ", uniform float uAlphaRef" : "",
-		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "");
+		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "",
+		sc ? ", float4 wpos : WPOS, uniform float4 uScissor" : "",
+		sc ? "	if (wpos.x < uScissor.x || wpos.y < uScissor.y || wpos.x >= uScissor.z || wpos.y >= uScissor.w)\n		discard;\n" : "");
 
 	if (!clear && textured) {
 		static const char *funcs[5] = {
