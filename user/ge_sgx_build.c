@@ -178,6 +178,7 @@ uint32_t geSgxHash(const void *data, uint32_t size) {
 }
 
 static void readClut(GeSgxWalker *w);
+static void traceLine(GeSgxWalker *w, const char *fmt, ...);
 
 static int32_t drawTexture(GeSgxWalker *w) {
 	if (!w->texture_fn)
@@ -200,7 +201,21 @@ static int32_t drawTexture(GeSgxWalker *w) {
 		d.clut_bytes = w->clut_bytes;
 		d.clut_hash = w->clut_hash;
 	}
-	return w->texture_fn(w->texture_user, &d);
+	int32_t id = w->texture_fn(w->texture_user, &d);
+
+	// Traced frame: every texture with what its data starts with (and its palette)
+	if (w->trace) {
+		uint32_t data[2] = { 0, 0 };
+		geSgxRead(w, d.addr & 0x0FFFFFFFu, data, 8);
+		const uint32_t *pal = (const uint32_t *)w->clut;
+		uint32_t c16 = (d.clut_format & 3) != 3;
+		traceLine(w, "texture id %d: %X fmt %u %ux%u bufw %u swizzle %u mode %X levels %u texlevel %X | clut fmt %X bytes %u, %s %08X %08X | data %08X %08X",
+			(int)id, (unsigned)d.addr, (unsigned)d.format, (unsigned)d.w, (unsigned)d.h, (unsigned)d.bufw, (unsigned)d.swizzle,
+			(unsigned)reg(w, GE_CMD_TEXMODE), (unsigned)(((reg(w, GE_CMD_TEXMODE) >> 16) & 7) + 1), (unsigned)reg(w, 0xC8u),
+			(unsigned)d.clut_format, (unsigned)d.clut_bytes, c16 ? "16 bit" : "32 bit",
+			d.clut_bytes >= 8 ? (unsigned)pal[0] : 0u, d.clut_bytes >= 8 ? (unsigned)pal[1] : 0u, (unsigned)data[0], (unsigned)data[1]);
+	}
+	return id;
 }
 
 /*
@@ -990,13 +1005,13 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	the traced frame (walker trace set) in order.
 */
 #define SEEN_MAX 160
-#define TRACE_LINES 600
+#define TRACE_LINES 900
 static uint32_t seen[SEEN_MAX];
 static uint32_t nseen = 0;
 static uint32_t trace_fb_key = 0, trace_tex_key = 0;
 
 // The traced frame's lines, written to the log only if it is a frame of the race
-#define TRACE_BYTES (48 * 1024)
+#define TRACE_BYTES (96 * 1024)
 static char trace_text[TRACE_BYTES];
 static uint32_t trace_len = 0;
 
@@ -1048,6 +1063,23 @@ static void diag(GeSgxWalker *w, int traced, uint32_t a, uint32_t b, uint32_t c,
 	}
 	if (first)
 		w->log_fn("GeSgx seen: %s\n", line);
+}
+
+// A line of the traced frame only
+static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
+	if (!w->trace || w->trace_lines >= TRACE_LINES)
+		return;
+	char line[240];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	w->trace_lines++;
+	int n = snprintf(trace_text + trace_len, TRACE_BYTES - trace_len, "GeSgx T: %s\n", line);
+	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES)
+		trace_len += (uint32_t)n;
+	else
+		trace_text[trace_len] = '\0';
 }
 
 // The current framebuffer and VRAM texture of a draw (state just built)
