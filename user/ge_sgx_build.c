@@ -1028,8 +1028,11 @@ const char *geSgxBuildTraceText(uint32_t *len) {
 	return trace_text;
 }
 
+static uint32_t trace_depth_lines = 0;
+
 void geSgxBuildTraceClear(GeSgxWalker *w) {
 	trace_len = 0;
+	trace_depth_lines = 0;
 	w->trace_lines = 0;
 	trace_fb_key = trace_tex_key = 0;
 }
@@ -1578,6 +1581,31 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		big vertex buffer: only the vertices they use are gathered. Sprites,
 		morphing and 32 bit indices stay on the CPU path.
 	*/
+	/*
+		Diagnostics (traced frames): the depth of the first vertex of a few
+		3D draws with the depth test and a scissor smaller than the screen
+		(the minimap, drawn behind a mask written into the depth buffer),
+		past the trace's line limit
+	*/
+	if (w->trace && !xp->through && trace_depth_lines < 12 && count && (reg(w, GE_CMD_ZTESTENABLE) & 1)) {
+		uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
+		if ((s1 & 0xFFFFF) != 0 || (s2 & 0x3FF) < 479 || ((s2 >> 10) & 0x3FF) < 271) {
+			GeSgxVertex tv;
+			bulk_count = 0;
+			if (vertexOut(w, xp, prim_index[0], &tv)) {
+				trace_depth_lines++;
+				char line[200];
+				int n = snprintf(line, sizeof(line), "GeSgx T: depth: draw %u, first vertex z %.1f w %.4f -> %.1f | viewport z %.1f %.1f | minz %u maxz %u\n",
+					(unsigned)f->ndraws, tv.z * 65535.0f, tv.w, tv.w != 0.0f ? tv.z / tv.w * 65535.0f : 0.0f,
+					xp->vp_z[0] * 65535.0f, xp->vp_z[1] * 65535.0f, (unsigned)(reg(w, 0xD6) & 0xFFFF), (unsigned)(reg(w, 0xD7) & 0xFFFF));
+				if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES) {
+					memcpy(trace_text + trace_len, line, (size_t)n + 1);
+					trace_len += (uint32_t)n;
+				}
+			}
+		}
+	}
+
 	int gpu = 0;
 	uint32_t raw_off = 0;
 	if (w->gpu_transform && f->raw && !xp->through) {

@@ -859,7 +859,7 @@ static int snapshotMake(int w, int h) {
 		memset(&params, 0, sizeof(params));
 		params.width = w;
 		params.height = h;
-		params.scenesPerFrame = MAX_SNAPSHOTS;
+		params.scenesPerFrame = 8; // SCE_GXM_MAX_SCENES_PER_RENDERTARGET (more: invalid value)
 		params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
 		params.driverMemBlock = -1;
 		err = sceGxmCreateRenderTarget(&params, &snap.rtgt);
