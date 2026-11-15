@@ -83,7 +83,7 @@ static GeSgxWalker walker;
 */
 static uint32_t epoch = 1;
 static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address space
-static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000
+static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000 (the PSP side's copy of it)
 // pspemu maps PSP VRAM uncached (a USER_RW_UNCACHE block): the CPU reads it as it is
 static uint32_t *block_tag = NULL;     // block address | 1 (valid)
 static uint32_t *block_epoch = NULL;
@@ -802,7 +802,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 	benchmarkMemory();
 
 	ram_map = (const uint8_t *)ScePspemuConvertAddress(0x80000000u | RAM_START, 0, 0);
-	vram_map = (const uint8_t *)ScePspemuConvertAddress(VRAM_START, 0, 0);
+	// The PSP side's copy of VRAM (pspemu's own window for it stays empty, see GE_SGX_VRAM_SHADOW)
+	vram_map = (const uint8_t *)ScePspemuConvertAddress(GE_SGX_VRAM_SHADOW, 0, 0);
 	if (!ram_map || !vram_map || !initBlockCache()) {
 		GeSgxLog("GeSgx: no memory map (%08X %08X) or block cache\n", (unsigned)(uintptr_t)ram_map, (unsigned)(uintptr_t)vram_map);
 		return 0;
