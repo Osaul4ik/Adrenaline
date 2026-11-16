@@ -487,7 +487,8 @@ static void publishSlot(uint32_t top) {
 		geSgxBuildTraceClear(&walker);
 	}
 	// Asked (L + SELECT): the next frame built, whatever its size
-	if (ge_sgx_trace_walker && !walker.trace) {
+	// (over an automatic trace still waiting for a frame of 1000 draws: it kept the ask waiting)
+	if (ge_sgx_trace_walker) {
 		ge_sgx_trace_walker = 0;
 		static int dump_asks = 0;
 		trace_asked = 1;
@@ -1079,6 +1080,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 					geSgxWalkerRun(&walker);
 					break;
 				case GE_SGX_EVENT_FLIP: {
+					geSgxBuildTraceNote(&walker, "flip: %X (%d lists queued)", (unsigned)e->a, walker.count);
 					int nrects = geSgxWalkerFlip(&walker, e->a, rects, GE_SGX_FRAME_RECTS, &frame_stats);
 					if (walker.texture_fn) {
 						if (building && walker.frame) {

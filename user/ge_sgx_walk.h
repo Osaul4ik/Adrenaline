@@ -238,6 +238,8 @@ void geSgxBuildTransfer(GeSgxWalker *w);
 // The traced frame's lines so far, and starting them again
 const char *geSgxBuildTraceText(uint32_t *len);
 void geSgxBuildTraceClear(GeSgxWalker *w);
+// A line into the traced frame's trace (lists, events)
+void geSgxBuildTraceNote(GeSgxWalker *w, const char *fmt, ...);
 // Before the frame is published: copies the vertex data still pending
 void geSgxBuildFinish(GeSgxWalker *w);
 

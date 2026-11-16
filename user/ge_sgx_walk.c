@@ -437,6 +437,8 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 
 	uint32_t behaviour = (data >> 16) & 0xFF;
 	uint32_t target = (((data & 0xFFFF) << 16) | (end & 0xFFFF)) & ~3u;
+	geSgxBuildTraceNote(w, "list: signal %06X end %06X at %X (draw %u)", (unsigned)data, (unsigned)(end & 0xFFFFFF), (unsigned)list->pc,
+		w->frame ? (unsigned)w->frame->ndraws : 0u);
 	uint32_t next = list->pc + 8;
 
 	switch (behaviour) {
@@ -727,6 +729,8 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {
 	int i = findList(w, qid);
+	geSgxBuildTraceNote(w, "list: queued qid %X at %X stall %X%s (%d lists, draw %u)%s", (unsigned)qid, (unsigned)list, (unsigned)stall,
+		head ? " head" : "", w->count, w->frame ? (unsigned)w->frame->ndraws : 0u, i >= 0 ? ", replaces the unfinished one of its qid" : "");
 	if (i >= 0)
 		removeList(w, i);
 
@@ -759,6 +763,7 @@ void geSgxWalkerStall(GeSgxWalker *w, int qid, uint32_t stall) {
 
 void geSgxWalkerDequeue(GeSgxWalker *w, int qid) {
 	int i = findList(w, qid);
+	geSgxBuildTraceNote(w, "list: dequeued qid %X%s", (unsigned)qid, i >= 0 ? " (unfinished)" : "");
 	if (i >= 0)
 		removeList(w, i);
 }
@@ -772,6 +777,8 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 		int res = walkList(w, &w->lists[0]);
 		if (res == WALK_STALLED)
 			break;
+		geSgxBuildTraceNote(w, "list: qid %X from %X %s at %X (depth %d, draw %u)", (unsigned)w->lists[0].qid, (unsigned)w->lists[0].start,
+			res == WALK_BAD ? "BAD" : "done", (unsigned)w->lists[0].pc, w->lists[0].depth, w->frame ? (unsigned)w->frame->ndraws : 0u);
 		if (res == WALK_BAD) {
 			GeSgxList *l = &w->lists[0];
 			w->stats.bad++;

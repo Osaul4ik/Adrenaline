@@ -1120,6 +1120,19 @@ static void diag(GeSgxWalker *w, int traced, uint32_t a, uint32_t b, uint32_t c,
 		w->log_fn("GeSgx seen: %s\n", line);
 }
 
+static void traceLine(GeSgxWalker *w, const char *fmt, ...);
+
+void geSgxBuildTraceNote(GeSgxWalker *w, const char *fmt, ...) {
+	if (!w->trace)
+		return;
+	char line[200];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	traceLine(w, "%s", line);
+}
+
 // A line of the traced frame only
 static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
 	if (!w->trace || w->trace_lines >= TRACE_LINES)
