@@ -430,6 +430,11 @@ static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
 	x->fog = (reg(w, GE_CMD_FOGENABLE) & 1) && !(reg(w, GE_CMD_CLEARMODE) & 1);
 	x->fog1 = freg(w, GE_CMD_FOG1);
 	x->fog2 = freg(w, GE_CMD_FOG2);
+	// The PSP takes infinities and NaNs as big numbers (PPSSPP's UpdateFogCoef): fog end = start
+	if (!(x->fog1 - x->fog1 == 0.0f))
+		x->fog1 = signbit(x->fog1) ? -65535.0f : 65535.0f;
+	if (!(x->fog2 - x->fog2 == 0.0f))
+		x->fog2 = signbit(x->fog2) ? -65535.0f : 65535.0f;
 
 	x->lighting = (reg(w, GE_CMD_LIGHTINGENABLE) & 1) && !(reg(w, GE_CMD_CLEARMODE) & 1);
 	if (!x->lighting)
@@ -1814,10 +1819,35 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			y = 0 was half off the screen (Persona 2's bar over the town map
 			lost its top row) and lines of rows overlapped by one pixel.
 		*/
-		if (d.prim == GE_SGX_DRAW_LINES || d.prim == GE_SGX_DRAW_POINTS) {
+		if (d.prim == GE_SGX_DRAW_POINTS) {
 			for (i = 0; i < nv; i++) {
 				vout[i].x += vout[i].w * (GE_SGX_SCALE * 0.5f);
 				vout[i].y += vout[i].w * (GE_SGX_SCALE * 0.5f);
+			}
+		} else if (d.prim == GE_SGX_DRAW_LINES) {
+			/*
+				A line across its minor axis only: along it, it runs from its
+				first pixel's edge (moved there too, the first 960x544 column of
+				Persona 2's rows was left out). Vertices shared by two lines (strips,
+				indices) move with the first.
+			*/
+			static uint8_t moved[GE_SGX_MAX_DRAW_VERTICES];
+			memset(moved, 0, nv);
+			for (i = 0; i + 1 < ni; i += 2) {
+				GeSgxVertex *a = &vout[iout[i]], *b = &vout[iout[i + 1]];
+				float dx = fabsf(b->x / b->w - a->x / a->w), dy = fabsf(b->y / b->w - a->y / a->w);
+				int k;
+				for (k = 0; k < 2; k++) {
+					uint16_t vi = iout[i + k];
+					if (vi >= nv || moved[vi])
+						continue;
+					moved[vi] = 1;
+					GeSgxVertex *v = &vout[vi];
+					if (dx >= dy)
+						v->y += v->w * (GE_SGX_SCALE * 0.5f);
+					else
+						v->x += v->w * (GE_SGX_SCALE * 0.5f);
+				}
 			}
 		}
 		f->nvertices = vstart + nv;

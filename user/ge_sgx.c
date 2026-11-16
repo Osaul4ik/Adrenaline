@@ -402,6 +402,8 @@ static void toGpu(const void *gpu, const void *src, uint32_t bytes) {
 }
 
 // Walker thread: a slot to build the next frame in (NULL: none free)
+static int cpu_frame_asked = 0;
+
 static void acquireSlot(void) {
 	int i;
 	building = NULL;
@@ -426,9 +428,11 @@ static void acquireSlot(void) {
 			s->data.us_state = s->data.us_texture = s->data.us_vertices = s->data.us_indices = 0;
 			s->data.us_vindex = s->data.us_vuni = s->data.us_clut = 0;
 			s->data.skipped_other = 0;
+			s->data.asked = cpu_frame_asked;
 			building = s;
 			walker.frame = &s->data;
-			walker.gpu_transform = !ge_sgx_gpu_failed && !GE_SGX_TEST_CPU_TRANSFORM;
+			// An asked trace's frame on the CPU: its draws' pixels, depth and colours in the render trace
+			walker.gpu_transform = !ge_sgx_gpu_failed && !GE_SGX_TEST_CPU_TRANSFORM && !cpu_frame_asked;
 			walker.ngpu_bad = ge_sgx_gpu_nbad;
 			for (int b = 0; b < walker.ngpu_bad; b++)
 				walker.gpu_bad[b] = ge_sgx_gpu_bad[b];
@@ -457,7 +461,10 @@ static void publishSlot(uint32_t top) {
 	static int trace_asked = 0;
 	if (walker.trace && building && walker.frame) {
 		if (building->data.ndraws >= 1000 || (trace_asked && building->data.ndraws)) {
+			if (trace_asked)
+				building->data.asked = 1;
 			trace_asked = 0;
+			cpu_frame_asked = 0;
 			walker.dump = 0;
 			uint32_t len;
 			const char *text = geSgxBuildTraceText(&len);
@@ -478,6 +485,7 @@ static void publishSlot(uint32_t top) {
 		ge_sgx_trace_walker = 0;
 		static int dump_asks = 0;
 		trace_asked = 1;
+		cpu_frame_asked = 1;
 		walker.trace = 1;
 		walker.dump = ++dump_asks; // each ask its own textures written
 		trace_tries = 0;
