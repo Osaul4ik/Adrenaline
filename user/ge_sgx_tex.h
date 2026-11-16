@@ -31,6 +31,9 @@ typedef struct {
 	uint32_t upload_us;
 	uint32_t checks;    // content checks of cached textures
 	uint32_t failed;    // could not be uploaded (format, memory)
+	uint32_t full_checks; // since the last call: textures verified in full
+	uint32_t full_kb;
+	uint32_t full_missed; // changes that only the full check saw (the samples did not)
 } GeSgxTexStats;
 
 // Walker thread

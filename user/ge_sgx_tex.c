@@ -26,6 +26,14 @@
 	uncached, ~125 ns per read). When it changed, a new entry is made: entries never change while
 	a published frame may still use them, and are freed only some frames
 	after they were last used (the GPU may still be reading them).
+
+	The 64 samples cannot see a change that touches none of their words: a
+	big texture the game rewrites in parts (a screen sized one, tiles at a
+	time) would keep showing its old parts. So the bigger ones are also
+	verified in full (a DMA of the texture and a hash of all of it): at
+	every use for a texture that was seen to change (dynamic), every
+	FULL_EVERY frames for the others (staggered, within a budget per frame).
+	The hashes of an entry are those of the bytes that were uploaded.
 */
 
 #include <psp2/kernel/dmac.h>
@@ -63,6 +71,10 @@ typedef struct {
 	int live;   // found by lookups
 	GeSgxTexDesc key;
 	uint32_t sample;
+	uint32_t full;       // hash of all of the texture's memory (has_full)
+	uint32_t last_full;  // frame of the last full check
+	uint8_t has_full;
+	uint8_t dynamic;     // changed while cached: checked in full at every use
 	uint32_t last_used;
 	uint32_t last_checked;
 	uint32_t dead_since;
@@ -229,6 +241,36 @@ static uint32_t sampleHash(const uint8_t *src, uint32_t size) {
 	return h;
 }
 
+/*
+	Full verification (see the top). A hash of every word: a changed word
+	always changes it (each step is a bijection of the state).
+*/
+#define FULL_EVERY 32                  // frames between full checks of a texture that has not changed
+#define FULL_FRAME_BYTES (2 * 1024 * 1024) // what the checks of one frame may read
+#define FULL_FRAME_CALLS 8             // and how many textures they may check
+
+static uint32_t full_frame_bytes = 0;
+static uint32_t full_frame_calls = 0;
+
+static uint32_t wordsHash(const uint8_t *src, uint32_t size) {
+	uint32_t h = 2166136261u ^ size;
+	uint32_t i, v;
+	for (i = 0; i + 4 <= size; i += 4) {
+		memcpy(&v, src + i, 4);
+		h = (h ^ v) * 16777619u;
+	}
+	return h;
+}
+
+// Whether this entry is to be checked in full now (the frame's budget allows it)
+static int fullDue(const Entry *e, uint32_t size) {
+	if (!e->has_full || size > STAGING_BYTES)
+		return 0;
+	if (full_frame_calls >= FULL_FRAME_CALLS || full_frame_bytes + size > FULL_FRAME_BYTES)
+		return 0;
+	return e->dynamic || cur_frame - e->last_full >= FULL_EVERY;
+}
+
 static SceGxmTextureFormat gxmFormat(uint32_t format) {
 	switch (format) {
 		case GE_TFMT_5650: return SCE_GXM_TEXTURE_FORMAT_U5U6U5_BGR;
@@ -289,7 +331,7 @@ static int failed(const GeSgxTexDesc *d, const char *why) {
 	return -1;
 }
 
-static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
+static int32_t upload(const GeSgxTexDesc *d, int dynamic) {
 	uint32_t rowbytes = geSgxTexRowBytes(d->format, d->bufw);
 	uint32_t rows = geSgxTexRows(d);
 	uint32_t size = rowbytes * rows;
@@ -350,6 +392,16 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 		memcpy(staging[0], src, have);
 	if (have < size)
 		memset(staging[0] + have, 0, size - have);
+
+	/*
+		The entry's hashes are of the bytes just copied (before the conversion
+		reuses the staging memory), not of a read made before the copy: what the
+		game wrote in between would then be neither in the texture nor seen as a change
+	*/
+	uint32_t sample = sampleHash(staging[0], have), full = 0;
+	int has_full = have > FULL_HASH_BYTES && have <= STAGING_BYTES;
+	if (has_full)
+		full = wordsHash(staging[0], have);
 
 	const uint8_t *linear = staging[0];
 	if (d->swizzle && d->format < GE_TFMT_DXT1) {
@@ -418,6 +470,11 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	e->key = *d;
 	e->key.clut = NULL;
 	e->sample = sample;
+	e->full = full;
+	e->has_full = (uint8_t)has_full;
+	e->dynamic = (uint8_t)dynamic;
+	// Staggered, so the full checks of textures loaded together do not all fall in one frame
+	e->last_full = cur_frame - (uint32_t)slot % FULL_EVERY;
 	e->last_used = cur_frame;
 	e->last_checked = cur_frame;
 	e->used = 1;
@@ -456,7 +513,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 	if (!geSgxTexRowBytes(d->format, d->bufw))
 		return failed(d, "format");
 
-	int found = -1, i;
+	int found = -1, i, changed = 0;
 	for (i = 0; i < RECENT; i++) {
 		if (bad[i].frame == cur_frame + 1 && sameKey(&bad[i].key, d)) {
 			stats.failed++;
@@ -494,12 +551,31 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 		const uint8_t *src = geSgxPspPtr(d->addr, size);
 		uint32_t sample = src ? sampleHash(src, size) : 0;
 		stats.checks++;
-		if (src && sample == e->sample) {
+		int same = src && sample == e->sample;
+		if (same && fullDue(e, size)) {
+			// The samples saw no change: look at all of it
+			full_frame_calls++;
+			full_frame_bytes += size;
+			stats.full_checks++;
+			stats.full_kb += size / 1024;
+			if (size >= 16 * 1024)
+				sceDmacMemcpy(staging[0], src, size);
+			else
+				memcpy(staging[0], src, size);
+			e->last_full = cur_frame;
+			if (wordsHash(staging[0], size) != e->full) {
+				stats.full_missed++; // a change that the 64 samples did not see
+				same = 0;
+			}
+		}
+		if (same) {
 			e->last_checked = cur_frame;
 			e->last_used = cur_frame;
 			last_hit = found;
 			return found;
 		}
+		// It changed while cached: from now on it is checked in full at every use
+		changed = 1;
 		kill(e);
 	}
 
@@ -510,7 +586,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 		return lookupFailed(d);
 	}
 
-	int32_t handle = upload(d, sampleHash(src, size));
+	int32_t handle = upload(d, changed);
 	if (handle < 0)
 		return lookupFailed(d);
 	last_hit = handle;
@@ -534,6 +610,8 @@ void geSgxTexMemoryWritten(uint32_t addr, uint32_t size) {
 
 void geSgxTexFrameDone(void) {
 	cur_frame++;
+	full_frame_bytes = 0;
+	full_frame_calls = 0;
 	// A budget lowered when memory ran out comes back up while there is memory again
 	if ((cur_frame & 63) == 0 && budget < budget_max &&
 	    GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) >= RESERVE_RAM_KB + 2048) {
@@ -554,6 +632,7 @@ void geSgxTexStats(GeSgxTexStats *out) {
 	stats.kb = total_bytes / 1024;
 	*out = stats;
 	stats.uploads = stats.upload_kb = stats.upload_us = stats.checks = stats.failed = 0;
+	stats.full_checks = stats.full_kb = stats.full_missed = 0;
 }
 
 const SceGxmTexture *geSgxTexGet(int32_t handle) {

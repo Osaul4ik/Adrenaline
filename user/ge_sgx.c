@@ -1357,6 +1357,8 @@ per_second:;
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
+				GeSgxLog("GeSgx textures: full checks %u (%u KB), changes the samples missed %u\n",
+					(unsigned)ts.full_checks, (unsigned)ts.full_kb, (unsigned)ts.full_missed);
 				built_vertices = built_states = built_frames = 0;
 				memset(built_us, 0, sizeof(built_us));
 				interval_walk_us = 0;
