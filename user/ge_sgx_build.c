@@ -1061,7 +1061,7 @@ static uint32_t nseen = 0;
 static uint32_t trace_fb_key = 0, trace_tex_key = 0;
 
 // The traced frame's lines, written to the log only if it is a frame of the race
-#define TRACE_BYTES (96 * 1024)
+#define TRACE_BYTES (160 * 1024)
 static char trace_text[TRACE_BYTES];
 static uint32_t trace_len = 0;
 
@@ -1070,11 +1070,13 @@ const char *geSgxBuildTraceText(uint32_t *len) {
 	return trace_text;
 }
 
-static uint32_t trace_depth_lines = 0;
+static uint32_t trace_depth_lines = 0, trace_vertex_lines = 0;
+#define TRACE_RESERVE (64 * 1024)
 
 void geSgxBuildTraceClear(GeSgxWalker *w) {
 	trace_len = 0;
 	trace_depth_lines = 0;
+	trace_vertex_lines = 0;
 	w->trace_lines = 0;
 	trace_fb_key = trace_tex_key = 0;
 }
@@ -1128,11 +1130,11 @@ static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	w->trace_lines++;
-	// The last 4 KB kept for the depth lines (below)
-	if (trace_len + 4096 >= TRACE_BYTES)
+	// The last 64 KB kept for the depth and vertex lines (below)
+	if (trace_len + TRACE_RESERVE >= TRACE_BYTES)
 		return;
-	int n = snprintf(trace_text + trace_len, TRACE_BYTES - 4096 - trace_len, "GeSgx T: %s\n", line);
-	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES - 4096)
+	int n = snprintf(trace_text + trace_len, TRACE_BYTES - TRACE_RESERVE - trace_len, "GeSgx T: %s\n", line);
+	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES - TRACE_RESERVE)
 		trace_len += (uint32_t)n;
 	else
 		trace_text[trace_len] = '\0';
@@ -1651,6 +1653,39 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 					memcpy(trace_text + trace_len, line, (size_t)n + 1);
 					trace_len += (uint32_t)n;
 				}
+			}
+		}
+	}
+
+	/*
+		Diagnostics (traced frames): the first three vertices of each 3D draw
+		as the CPU transform makes them (pixels, depth, w, colour, fog), the
+		GPU path's draws included: what the trace of the renderer cannot know
+		of them (The 3rd Birthday's HUD and fog, drawn but not seen)
+	*/
+	if (w->trace && !xp->through && trace_vertex_lines < 360 && count) {
+		char line[400];
+		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X |", (unsigned)f->ndraws, (unsigned)type,
+			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF));
+		uint32_t k;
+		bulk_count = 0;
+		for (k = 0; k < 3 && k < count && n > 0 && n < (int)sizeof(line) - 100; k++) {
+			GeSgxVertex tv;
+			if (!vertexOut(w, xp, prim_index[k], &tv)) {
+				n += snprintf(line + n, sizeof(line) - n, " -");
+				continue;
+			}
+			float iw = tv.w != 0.0f ? 1.0f / tv.w : 0.0f;
+			n += snprintf(line + n, sizeof(line) - n, " %.1f,%.1f z %.0f w %.3g c %08X f %.2f uv %.3f,%.3f |", tv.x * iw, tv.y * iw,
+				tv.z * iw * 65535.0f, tv.w, (unsigned)tv.color, tv.fog, tv.u, tv.v);
+		}
+		if (n > 0 && n < (int)sizeof(line) - 1) {
+			line[n++] = '\n';
+			line[n] = '\0';
+			if (trace_len + (uint32_t)n < TRACE_BYTES) {
+				memcpy(trace_text + trace_len, line, (size_t)n + 1);
+				trace_len += (uint32_t)n;
+				trace_vertex_lines++;
 			}
 		}
 	}

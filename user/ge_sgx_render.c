@@ -1394,9 +1394,21 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	static uint32_t rframes = 0, last_trace = 0, big_traces = 0;
 	rframes++;
 	rtrace = 0;
-	// Asked (L + SELECT): the frame the walker traced (built on the CPU)
-	int asked = frame->asked && frame->ndraws;
+	/*
+		Asked (L + SELECT): the frame the walker traced, once (a frame can be
+		rendered again while no new one comes); the next one if the walker's
+		trace has not come in 2 s (a walker behind builds no frame)
+	*/
+	static uint32_t traced_seq = 0, asked_wait = 0;
+	int asked = 0;
+	if (frame->asked && frame->asked != traced_seq && frame->ndraws) {
+		traced_seq = frame->asked;
+		asked = 1;
+	} else if (ge_sgx_trace_render && frame->ndraws && ++asked_wait >= 120) {
+		asked = 1;
+	}
 	if (asked) {
+		asked_wait = 0;
 		ge_sgx_trace_render = 0;
 		histDump();
 	}

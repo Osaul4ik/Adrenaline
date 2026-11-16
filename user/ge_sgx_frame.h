@@ -161,7 +161,7 @@ typedef struct {
 	uint32_t prims_gpu;     // of them with the GPU transform
 	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
-	uint32_t asked; // the frame of an asked trace (L + SELECT): built with the CPU transform, traced by the renderer
+	uint32_t asked; // the frame of an asked trace (L + SELECT): its number, the renderer traces it too
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew
 	// Build profile (with a clock): state setup, texture lookups, vertices
