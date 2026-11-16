@@ -440,6 +440,39 @@ static void scanList(uint32_t start, uint32_t end, ListScan *s, int log_calls) {
 
 static ListScan scan_done;
 static uint32_t scan_done_count = 0, scan_start = 0, scan_end = 0;
+// The list's words when the walker was done, to list what changed by the flip
+#define SCAN_COPY_WORDS 16384
+static uint32_t scan_copy[SCAN_COPY_WORDS];
+static uint32_t scan_copy_n = 0;
+
+static void noteListDone(void) {
+	if (!walker.trace || walker.done_count == scan_done_count)
+		return;
+	scan_done_count = walker.done_count;
+	scan_start = walker.done_start;
+	scan_end = walker.done_end + 4;
+	scanList(scan_start, scan_end, &scan_done, 0);
+	scan_copy_n = 0;
+	uint32_t bytes = scan_end - scan_start;
+	const uint32_t *p = (scan_end > scan_start && bytes <= SCAN_COPY_WORDS * 4) ? (const uint32_t *)geSgxPspPtr(scan_start, bytes) : NULL;
+	if (p) {
+		scan_copy_n = bytes / 4;
+		memcpy(scan_copy, p, bytes);
+	}
+}
+
+static void scanDiff(void) {
+	const uint32_t *p = scan_copy_n ? (const uint32_t *)geSgxPspPtr(scan_start, scan_copy_n * 4) : NULL;
+	uint32_t k, diffs = 0;
+	for (k = 0; p && k < scan_copy_n; k++) {
+		if (p[k] != scan_copy[k]) {
+			if (diffs < 40)
+				GeSgxLog("GeSgx T: list scan: changed at %X: %08X -> %08X\n", (unsigned)(scan_start + k * 4), (unsigned)scan_copy[k], (unsigned)p[k]);
+			diffs++;
+		}
+	}
+	GeSgxLog("GeSgx T: list scan: %u words changed\n", (unsigned)diffs);
+}
 
 static void acquireSlot(void) {
 	int i;
@@ -1109,32 +1142,17 @@ static int GeSgxThread(SceSize args, void *argp) {
 				case GE_SGX_EVENT_LIST:
 					geSgxWalkerList(&walker, (int)e->a, e->b, e->c, (int)e->d);
 					geSgxWalkerRun(&walker);
-					if (walker.trace && walker.done_count != scan_done_count) {
-						scan_done_count = walker.done_count;
-						scan_start = walker.done_start;
-						scan_end = walker.done_end + 4;
-						scanList(scan_start, scan_end, &scan_done, 0);
-					}
+					noteListDone();
 					break;
 				case GE_SGX_EVENT_STALL:
 					geSgxWalkerStall(&walker, (int)e->a, e->b);
 					geSgxWalkerRun(&walker);
-					if (walker.trace && walker.done_count != scan_done_count) {
-						scan_done_count = walker.done_count;
-						scan_start = walker.done_start;
-						scan_end = walker.done_end + 4;
-						scanList(scan_start, scan_end, &scan_done, 0);
-					}
+					noteListDone();
 					break;
 				case GE_SGX_EVENT_DEQUEUE:
 					geSgxWalkerDequeue(&walker, (int)e->a);
 					geSgxWalkerRun(&walker);
-					if (walker.trace && walker.done_count != scan_done_count) {
-						scan_done_count = walker.done_count;
-						scan_start = walker.done_start;
-						scan_end = walker.done_end + 4;
-						scanList(scan_start, scan_end, &scan_done, 0);
-					}
+					noteListDone();
 					break;
 				case GE_SGX_EVENT_FLIP: {
 					if (walker.trace && scan_end) {
@@ -1146,6 +1164,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 							(unsigned)scan_done.words, (unsigned)scan_done.prims, (unsigned)scan_done.calls, (unsigned)scan_done.jumps,
 							(unsigned)scan_done.signals, (unsigned)scan_done.nops, (unsigned)scan_done.sum, (unsigned)now.prims, (unsigned)now.calls,
 							(unsigned)now.jumps, (unsigned)now.signals, (unsigned)now.nops, (unsigned)now.sum);
+						scanDiff();
 						scan_end = 0;
 					}
 					geSgxBuildTraceNote(&walker, "flip: %X (%d lists queued)", (unsigned)e->a, walker.count);
