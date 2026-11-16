@@ -17,2097 +17,445 @@
 */
 
 /*
-	SGX renderer: draw records from the GE state (see ge_sgx_frame.h).
+	SGX renderer: Cg shaders and their compiler. See ge_sgx_cg.h.
 
-	Vertices are decoded and transformed on the CPU (through mode: scaled
-	pixels; 3D: morphing, skinning, the matrices, lighting, texture
-	coordinate generation and fog), into 960x544 pixels times the clip w.
-	Every primitive becomes an indexed triangle, line or point list, so
-	primitives of one state share a draw. Register meanings follow PPSSPP
-	(GPU/ge_constants.h, GPU/GPUState.h).
+	The compiler's functions are looked up by NID once the module is loaded
+	(taiGetModuleExportFunc): an import of SceShaccCg would stop the module
+	or app from loading where libshacccg.suprx is missing.
 */
 
-#include <math.h>
-#include <stdarg.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#include <psp2/kernel/modulemgr.h>
+#include <psp2/shacccg.h>
+#include <taihen.h>
+
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "ge_sgx_walk.h"
-#include "ge_sgx_texconv.h"
-#include "ge_sgx_gpu.h"
+#include "ge_sgx_cg.h"
 
-#define GE_CMD_TEXTUREMAPENABLE 0x1Eu
-#define GE_CMD_ALPHABLENDENABLE 0x21u
-#define GE_CMD_ALPHATESTENABLE  0x22u
-#define GE_CMD_MATERIALAMBIENT  0x55u
-#define GE_CMD_MATERIALALPHA    0x58u
-#define GE_CMD_FRAMEBUFPTR      0x9Cu
-#define GE_CMD_FRAMEBUFWIDTH    0x9Du
-#define GE_CMD_TEXADDR0         0xA0u
-#define GE_CMD_TEXBUFWIDTH0     0xA8u
-#define GE_CMD_CLUTADDR         0xB0u
-#define GE_CMD_CLUTADDRUPPER    0xB1u
-#define GE_CMD_TRANSFERSRC      0xB2u
-#define GE_CMD_TRANSFERSRCW     0xB3u
-#define GE_CMD_TRANSFERDST      0xB4u
-#define GE_CMD_TRANSFERDSTW     0xB5u
-#define GE_CMD_TEXSIZE0         0xB8u
-#define GE_CMD_TEXMODE          0xC2u
-#define GE_CMD_TEXFORMAT        0xC3u
-#define GE_CMD_CLUTFORMAT       0xC5u
-#define GE_CMD_TEXFILTER        0xC6u
-#define GE_CMD_TEXWRAP          0xC7u
-#define GE_CMD_TEXFUNC          0xC9u
-#define GE_CMD_TEXENVCOLOR      0xCAu
-#define GE_CMD_CLEARMODE        0xD3u
-#define GE_CMD_SCISSOR1         0xD4u
-#define GE_CMD_SCISSOR2         0xD5u
-#define GE_CMD_ALPHATEST        0xDBu
-#define GE_CMD_BLENDMODE        0xDFu
-#define GE_CMD_BLENDFIXEDA      0xE0u
-#define GE_CMD_BLENDFIXEDB      0xE1u
-#define GE_CMD_TRANSFERSIZE     0xEEu
-#define GE_CMD_FRAMEBUFPIXFMT   0xD2u
-#define GE_CMD_TRANSFERSTART    0xEAu
-#define GE_CMD_TRANSFERSRCPOS   0xEBu
-#define GE_CMD_TRANSFERDSTPOS   0xECu
-#define GE_CMD_VERTEXTYPE       0x12u
-#define GE_CMD_LIGHTINGENABLE   0x17u
-#define GE_CMD_LIGHTENABLE0     0x18u
-#define GE_CMD_FOGENABLE        0x1Fu
-#define GE_CMD_ZTESTENABLE      0x23u
-#define GE_CMD_MORPHWEIGHT0     0x2Cu
-#define GE_CMD_VIEWPORTXSCALE   0x42u
-#define GE_CMD_VIEWPORTYSCALE   0x43u
-#define GE_CMD_VIEWPORTZSCALE   0x44u
-#define GE_CMD_VIEWPORTXCENTER  0x45u
-#define GE_CMD_VIEWPORTYCENTER  0x46u
-#define GE_CMD_VIEWPORTZCENTER  0x47u
-#define GE_CMD_TEXSCALEU        0x48u
-#define GE_CMD_TEXSCALEV        0x49u
-#define GE_CMD_TEXOFFSETU       0x4Au
-#define GE_CMD_TEXOFFSETV       0x4Bu
-#define GE_CMD_OFFSETX          0x4Cu
-#define GE_CMD_OFFSETY          0x4Du
-#define GE_CMD_REVERSENORMAL    0x51u
-#define GE_CMD_MATERIALUPDATE   0x53u
-#define GE_CMD_MATERIALEMISSIVE 0x54u
-#define GE_CMD_MATERIALDIFFUSE  0x56u
-#define GE_CMD_MATERIALSPECULAR 0x57u
-#define GE_CMD_MATERIALSPECULARCOEF 0x5Bu
-#define GE_CMD_AMBIENTCOLOR     0x5Cu
-#define GE_CMD_AMBIENTALPHA     0x5Du
-#define GE_CMD_LIGHTTYPE0       0x5Fu
-#define GE_CMD_LX0              0x63u
-#define GE_CMD_LDX0             0x6Fu
-#define GE_CMD_LKA0             0x7Bu
-#define GE_CMD_LKS0             0x87u
-#define GE_CMD_LKO0             0x8Bu
-#define GE_CMD_LAC0             0x8Fu
-#define GE_CMD_LDC0             0x90u
-#define GE_CMD_LSC0             0x91u
-#define GE_CMD_TEXMAPMODE       0xC0u
-#define GE_CMD_TEXSHADELS       0xC1u
-#define GE_CMD_FOG1             0xCDu
-#define GE_CMD_FOG2             0xCEu
-#define GE_CMD_FOGCOLOR         0xCFu
-#define GE_CMD_ZTEST            0xDEu
-#define GE_CMD_ZWRITEDISABLE    0xE7u
-#define GE_CMD_STENCILTESTENABLE 0x24u
-#define GE_CMD_STENCILTEST      0xDCu
-#define GE_CMD_STENCILOP        0xDDu
-#define GE_CMD_MASKRGB          0xE8u
-#define GE_CMD_MASKALPHA        0xE9u
+#define SHACCCG_LIB_NID 0xA05BBEBB
 
-#define GE_VTYPE_THROUGH (1u << 23)
+static struct {
+	SceUID modid;
+	int (* InitializeCompileOptions)(SceShaccCgCompileOptions *options);
+	const SceShaccCgCompileOutput *(* CompileProgram)(const SceShaccCgCompileOptions *options, const SceShaccCgCallbackList *callbacks, int unk);
+	int (* SetDefaultAllocator)(void *(*malloc_cb)(unsigned int), void (*free_cb)(void *));
+	void (* InitializeCallbackList)(SceShaccCgCallbackList *callbacks, SceShaccCgCallbackDefaults defaults);
+	void (* DestroyCompileOutput)(const SceShaccCgCompileOutput *output);
+	void (* ReleaseCompiler)(void);
+} cg;
 
-enum {
-	GE_PRIM_POINTS,
-	GE_PRIM_LINES,
-	GE_PRIM_LINE_STRIP,
-	GE_PRIM_TRIANGLES,
-	GE_PRIM_TRIANGLE_STRIP,
-	GE_PRIM_TRIANGLE_FAN,
-	GE_PRIM_RECTANGLES,
-};
+static SceShaccCgSourceFile source_file;
 
-static inline uint32_t reg(const GeSgxWalker *w, uint32_t cmd) {
-	return w->regs[cmd] & 0x00FFFFFF;
-}
+// The GPU transform (see ge_sgx_cg.h): PPSSPP's transform and lighting in a vertex shader
+static int vertexSource(uint32_t key, char *buf, int size) {
+	int tc = key & GE_SGX_VS_TC, col = key & GE_SGX_VS_COLOR, nrm = key & GE_SGX_VS_NORMAL;
+	int col16 = key & GE_SGX_VS_COLOR16;
+	int w4 = key & (GE_SGX_VS_W4 | GE_SGX_VS_W8), w8 = key & GE_SGX_VS_W8, lit = key & GE_SGX_VS_LIGHT;
+	int n = 0;
 
-static uint32_t expand(uint32_t v, int bits) {
-	v &= (1u << bits) - 1;
-	return (v << (8 - bits)) | (v >> (2 * bits - 8));
-}
+#define S(...) do { n += snprintf(buf + n, size > n ? size - n : 0, __VA_ARGS__); } while (0)
+	S("void main(\n	float3 aPosition,\n");
+	if (tc) S("	float2 aTexcoord,\n");
+	if (col) S("	float4 aColor,\n");
+	if (col16) S("	float aColor,\n"); // the 16 bit value
+	if (nrm) S("	float3 aNormal,\n");
+	if (w4) S("	float4 aWeight0,\n");
+	if (w8) S("	float4 aWeight1,\n");
+	S("	uniform float4 uC[%d] : BUFFER[0],\n	uniform float4 uO[%d] : BUFFER[1],\n", GE_SGX_UC_COUNT, GE_SGX_UO_COUNT);
+	S("	out float4 vPosition : POSITION,\n	out float2 vTexcoord : TEXCOORD0,\n	out float vFog : TEXCOORD1,\n	out float4 vColor : COLOR)\n{\n");
 
-uint32_t geSgxDecodeColor16(uint32_t fmt, uint32_t c) {
-	uint32_t r, g, b, a;
-	switch (fmt) {
-		case 0: // 565
-			r = expand(c, 5);
-			g = expand(c >> 5, 6);
-			b = expand(c >> 11, 5);
-			a = 0xFF;
-			break;
-		case 1: // 5551
-			r = expand(c, 5);
-			g = expand(c >> 5, 5);
-			b = expand(c >> 10, 5);
-			a = (c & 0x8000) ? 0xFF : 0;
-			break;
-		default: // 4444
-			r = (c & 0xF) * 0x11;
-			g = ((c >> 4) & 0xF) * 0x11;
-			b = ((c >> 8) & 0xF) * 0x11;
-			a = ((c >> 12) & 0xF) * 0x11;
-			break;
-	}
-	return (a << 24) | (b << 16) | (g << 8) | r;
-}
-
-uint32_t geSgxHash(const void *data, uint32_t size) {
-	// FNV-1a
-	const uint8_t *p = (const uint8_t *)data;
-	uint32_t h = 2166136261u;
-	uint32_t i;
-	for (i = 0; i < size; i++) {
-		h ^= p[i];
-		h *= 16777619u;
-	}
-	return h;
-}
-
-static void readClut(GeSgxWalker *w);
-
-// The current primitive's timing (geSgxBuildPrim): its clock, NULL when it is not timed
-static uint32_t (* time_clk)(void) = NULL;
-static uint32_t time_every = 1;
-
-static void traceLine(GeSgxWalker *w, const char *fmt, ...);
-
-static int32_t drawTexture(GeSgxWalker *w) {
-	if (!w->texture_fn)
-		return -1;
-
-	GeSgxTexDesc d;
-	memset(&d, 0, sizeof(d));
-	uint32_t bufw = reg(w, GE_CMD_TEXBUFWIDTH0);
-	d.addr = (reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((bufw << 8) & 0x0F000000u);
-	uint32_t size = reg(w, GE_CMD_TEXSIZE0);
-	d.w = (uint16_t)(1u << (size & 0xF));
-	d.h = (uint16_t)(1u << ((size >> 8) & 0xF));
-	d.format = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
-	d.bufw = (uint16_t)geSgxTexBufw(d.format, bufw);
-	d.swizzle = (uint8_t)(reg(w, GE_CMD_TEXMODE) & 1);
-	if (d.format >= 4 && d.format <= 7) {
-		uint32_t tc = time_clk ? time_clk() : 0;
-		readClut(w);
-		if (time_clk)
-			w->frame->us_clut += (time_clk() - tc) * time_every;
-		d.clut_format = reg(w, GE_CMD_CLUTFORMAT);
-		d.clut = w->clut;
-		d.clut_bytes = w->clut_bytes;
-		d.clut_hash = w->clut_hash;
-	}
-	int32_t id = w->texture_fn(w->texture_user, &d);
-
-	// Traced frame: every texture with what its data starts with (and its palette)
-	if (w->trace) {
-		uint32_t data[2] = { 0, 0 };
-		geSgxRead(w, d.addr & 0x0FFFFFFFu, data, 8);
-		const uint32_t *pal = (const uint32_t *)w->clut;
-		uint32_t c16 = (d.clut_format & 3) != 3;
-		traceLine(w, "texture id %d: %X fmt %u %ux%u bufw %u swizzle %u mode %X levels %u texlevel %X | clut fmt %X bytes %u, %s %08X %08X | data %08X %08X",
-			(int)id, (unsigned)d.addr, (unsigned)d.format, (unsigned)d.w, (unsigned)d.h, (unsigned)d.bufw, (unsigned)d.swizzle,
-			(unsigned)reg(w, GE_CMD_TEXMODE), (unsigned)(((reg(w, GE_CMD_TEXMODE) >> 16) & 7) + 1), (unsigned)reg(w, 0xC8u),
-			(unsigned)d.clut_format, (unsigned)d.clut_bytes, c16 ? "16 bit" : "32 bit",
-			d.clut_bytes >= 8 ? (unsigned)pal[0] : 0u, d.clut_bytes >= 8 ? (unsigned)pal[1] : 0u, (unsigned)data[0], (unsigned)data[1]);
-
-		/*
-			Asked for (L + SELECT): each texture's PSP data and palette as they
-			are, once a frame, to check the conversion against them
-			(tex_<addr>_f<format>_<w>x<h>_b<bufw>_s<swizzle>_c<clut format>.raw,
-			the palette's bytes after the texels)
-		*/
-		static uint32_t dumped[96];
-		static uint32_t ndumped = 0;
-		static int dump_seen = 0;
-		if (w->dump != dump_seen) { // a new ask (or none): its own list
-			dump_seen = w->dump;
-			ndumped = 0;
+	// Model space, with the bones
+	S("	float3 p = aPosition * uO[%d].x;\n", GE_SGX_UO_SCALE);
+	if (nrm)
+		S("	float3 n = aNormal * uO[%d].y * uC[%d].w;\n", GE_SGX_UO_SCALE, GE_SGX_UC_FLAGS);
+	else
+		S("	float3 n = float3(0.0, 0.0, uC[%d].w);\n", GE_SGX_UC_FLAGS);
+	if (w4) {
+		S("	float4 w0 = aWeight0 * uO[%d].w * uO[%d];\n", GE_SGX_UO_SCALE, GE_SGX_UO_WMASK);
+		if (w8)
+			S("	float4 w1 = aWeight1 * uO[%d].w * uO[%d];\n", GE_SGX_UO_SCALE, GE_SGX_UO_WMASK + 1);
+		S("	float3 sp = float3(0.0, 0.0, 0.0), sn = float3(0.0, 0.0, 0.0);\n");
+		// Unrolled: constant indices only
+		int i;
+		for (i = 0; i < (w8 ? 8 : 4); i++) {
+			int b = GE_SGX_UO_BONES + i * 4;
+			const char *wt = i < 4 ? "w0" : "w1";
+			S("	sp += (uO[%d].xyz * p.x + uO[%d].xyz * p.y + uO[%d].xyz * p.z + uO[%d].xyz) * %s.%c;\n", b, b + 1, b + 2, b + 3, wt, "xyzw"[i & 3]);
+			S("	sn += (uO[%d].xyz * n.x + uO[%d].xyz * n.y + uO[%d].xyz * n.z) * %s.%c;\n", b, b + 1, b + 2, wt, "xyzw"[i & 3]);
 		}
-		uint32_t k;
-		for (k = 0; k < ndumped && dumped[k] != d.addr; k++)
-			;
-		if (w->dump && w->dump_fn && k == ndumped && ndumped < 96) {
-			dumped[ndumped++] = d.addr;
-			uint32_t bytes = geSgxTexRowBytes(d.format, d.bufw) * geSgxTexRows(&d);
-			static uint8_t raw[1024 * 1024 + 1024]; // a 512x512 8888 texture (a screen copy) is 1 MB
-			if (bytes && bytes <= 1024 * 1024 && geSgxRead(w, d.addr & 0x0FFFFFFFu, raw, bytes)) {
-				uint32_t cb = d.clut_bytes <= 1024 ? d.clut_bytes : 0;
-				if (cb)
-					memcpy(raw + bytes, w->clut, cb);
-				char name[96];
-				snprintf(name, sizeof(name), "tex_%X_f%u_%ux%u_b%u_s%u_c%X.raw", (unsigned)d.addr, (unsigned)d.format, (unsigned)d.w,
-					(unsigned)d.h, (unsigned)d.bufw, (unsigned)d.swizzle, (unsigned)d.clut_format);
-				w->dump_fn(name, raw, bytes + cb);
-			}
-		}
-	}
-	return id;
-}
-
-/*
-	Vertex pipeline (PPSSPP's software transform, GPU/Common/SoftwareTransformCommon.cpp
-	and TransformCommon.cpp): decode, morph, skinning, world/view/projection,
-	lighting, texture coordinate generation, fog, then the viewport into
-	960x544 pixels times w.
-*/
-
-typedef struct {
-	int through;
-	const GeSgxVertexLayout *l;
-	uint32_t vtype;
-
-	// Morph weights (morph targets > 1)
-	float morph[8];
-
-	// Through mode: texels to normalized
-	float tex_w, tex_h;
-
-	// 3D
-	int skinning;
-	float wv[12];   // view * world (no skinning)
-	float proj[16];
-	float mvp[16];  // proj * view * world, 4x4 column-major
-	const GeSgxMatrices *m;
-	float vp_x[2], vp_y[2], vp_z[2]; // pixel = c[0] * clip + c[1] * w
-	int zclamp_lo, zclamp_hi;        // depth clamped at 0 / at 1 (not where the near plane clips)
-	float offx, offy;                // the drawing offset (PSP pixels): range culling
-	float uscale, vscale, uoff, voff;
-	// A framebuffer's rendering as the texture: the texture's part of it (generated coordinates times these)
-	float fbk_u, fbk_v;
-	int uvgen, uvproj;
-	float envls[2][3];
-	int fog;
-	float fog1, fog2;
-
-	// Lighting
-	int lighting;
-	int matupdate;
-	int reverse_normal;
-	float mat_emissive[3], mat_ambient[4], mat_diffuse[3], mat_specular[3];
-	float global_ambient[4];
-	float spec_coef;
-	int nlights;
-	struct {
-		int type, comp;
-		float pos[3], dir[3], att[3];
-		float spot_exp, spot_cut;
-		float ambient[3], diffuse[3], specular[3];
-	} light[4];
-
-	uint32_t material_color; // without lighting and vertex colour
-} Xform;
-
-static void rgb(uint32_t c, float *out) {
-	out[0] = (c & 0xFF) * (1.0f / 255.0f);
-	out[1] = ((c >> 8) & 0xFF) * (1.0f / 255.0f);
-	out[2] = ((c >> 16) & 0xFF) * (1.0f / 255.0f);
-}
-
-static inline float freg(const GeSgxWalker *w, uint32_t cmd) {
-	return geSgxFloat24(w->regs[cmd]);
-}
-
-// out = a * b, 4x3 matrices (a after b)
-static void mul43(float *out, const float *a, const float *b) {
-	int j;
-	for (j = 0; j < 4; j++) {
-		const float *c = &b[j * 3];
-		out[j * 3 + 0] = a[0] * c[0] + a[3] * c[1] + a[6] * c[2];
-		out[j * 3 + 1] = a[1] * c[0] + a[4] * c[1] + a[7] * c[2];
-		out[j * 3 + 2] = a[2] * c[0] + a[5] * c[1] + a[8] * c[2];
-	}
-	out[9] += a[9];
-	out[10] += a[10];
-	out[11] += a[11];
-}
-
-static inline void xf43(float *out, const float *m, float x, float y, float z) {
-	out[0] = x * m[0] + y * m[3] + z * m[6] + m[9];
-	out[1] = x * m[1] + y * m[4] + z * m[7] + m[10];
-	out[2] = x * m[2] + y * m[5] + z * m[8] + m[11];
-}
-
-static inline void xf33(float *out, const float *m, float x, float y, float z) {
-	out[0] = x * m[0] + y * m[3] + z * m[6];
-	out[1] = x * m[1] + y * m[4] + z * m[7];
-	out[2] = x * m[2] + y * m[5] + z * m[8];
-}
-
-static inline float invLength(const float *v) {
-	float l2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-	return l2 > 0.0f ? 1.0f / sqrtf(l2) : 0.0f;
-}
-
-static void normalize3(float *v, float dz) {
-	float s = invLength(v);
-	if (s == 0.0f) {
-		v[0] = v[1] = 0.0f;
-		v[2] = dz;
-		return;
-	}
-	v[0] *= s;
-	v[1] *= s;
-	v[2] *= s;
-}
-
-static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
-	uint32_t vtype = reg(w, GE_CMD_VERTEXTYPE);
-	int i;
-
-	x->l = l;
-	x->vtype = vtype;
-	x->through = (vtype & GE_VTYPE_THROUGH) != 0;
-	for (i = 0; i < 8; i++)
-		x->morph[i] = freg(w, GE_CMD_MORPHWEIGHT0 + i);
-	if (l->morphs == 1)
-		x->morph[0] = 1.0f;
-
-	uint32_t mat = reg(w, GE_CMD_MATERIALAMBIENT) | ((reg(w, GE_CMD_MATERIALALPHA) & 0xFF) << 24);
-	x->material_color = mat;
-
-	if (x->through)
-		return;
-
-	const GeSgxMatrices *m = &w->mtx;
-	x->m = m;
-	x->skinning = l->wt_fmt != 0;
-	mul43(x->wv, m->view, m->world);
-	memcpy(x->proj, m->proj, sizeof(x->proj));
-	// The 4x3 wv as 4x4 (last row 0 0 0 1), times proj
-	for (i = 0; i < 4; i++) {
-		int r;
-		for (r = 0; r < 4; r++) {
-			const float *P = x->proj;
-			float v = P[r] * x->wv[i * 3] + P[4 + r] * x->wv[i * 3 + 1] + P[8 + r] * x->wv[i * 3 + 2];
-			if (i == 3)
-				v += P[12 + r];
-			x->mvp[i * 4 + r] = v;
-		}
+		S("	p = sp;\n	n = sn;\n");
 	}
 
-	// screen = center + scale * clip / w - offset, in PSP pixels; times w and the output scale
-	float offx = (reg(w, GE_CMD_OFFSETX) & 0xFFFF) * (1.0f / 16.0f);
-	float offy = (reg(w, GE_CMD_OFFSETY) & 0xFFFF) * (1.0f / 16.0f);
-	x->offx = offx;
-	x->offy = offy;
-	x->vp_x[0] = freg(w, GE_CMD_VIEWPORTXSCALE) * GE_SGX_SCALE;
-	x->vp_x[1] = (freg(w, GE_CMD_VIEWPORTXCENTER) - offx) * GE_SGX_SCALE;
-	x->vp_y[0] = freg(w, GE_CMD_VIEWPORTYSCALE) * GE_SGX_SCALE;
-	x->vp_y[1] = (freg(w, GE_CMD_VIEWPORTYCENTER) - offy) * GE_SGX_SCALE;
-	x->vp_z[0] = freg(w, GE_CMD_VIEWPORTZSCALE) * (1.0f / 65535.0f);
-	x->vp_z[1] = freg(w, GE_CMD_VIEWPORTZCENTER) * (1.0f / 65535.0f);
+	// World, view, projection, the PSP viewport (pixels times w), depth clamped like the PSP
+	S("	float3 wp = uO[0].xyz * p.x + uO[1].xyz * p.y + uO[2].xyz * p.z + uO[3].xyz;\n");
+	S("	float3 wn = uO[0].xyz * n.x + uO[1].xyz * n.y + uO[2].xyz * n.z;\n");
+	S("	float nl = dot(wn, wn);\n	wn = nl > 0.0 ? wn * rsqrt(nl) : float3(0.0, 0.0, 1.0);\n");
+	S("	float3 vp = uC[%d].xyz * wp.x + uC[%d].xyz * wp.y + uC[%d].xyz * wp.z + uC[%d].xyz;\n",
+		GE_SGX_UC_VIEW, GE_SGX_UC_VIEW + 1, GE_SGX_UC_VIEW + 2, GE_SGX_UC_VIEW + 3);
+	S("	float4 c = uC[0] * vp.x + uC[1] * vp.y + uC[2] * vp.z + uC[3];\n");
+	S("	float4 vpx = uC[%d], vpz = uC[%d];\n", GE_SGX_UC_VP, GE_SGX_UC_VPZ);
+	S("	float x = vpx.x * c.x + vpx.y * c.w;\n	float y = vpx.z * c.y + vpx.w * c.w;\n");
+	// The depth clamp's sides (uC[CULL].xy: 1 clamps; the near plane's side is clipped by the GPU instead)
+	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	float4 zc = uC[%d];\n	if (c.w > 0.0) {\n"
+	  "		if (zc.x > 0.5)\n			z = max(z, 0.0);\n		if (zc.y > 0.5)\n			z = min(z, c.w);\n	}\n", GE_SGX_UC_CULL);
+	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
 	/*
-		The GE clips at the near plane (clip z = -w) when its clip is on
-		(CLIPENABLE, 0x1C), else it clamps the depth; it clamps it at the far
-		side. The GPU clips at depth 0 and 1: the side the near plane maps to
-		(depth center - scale: 1 for the usual PSP viewport, 0 for others) is
-		left unclamped, so geometry before the near plane is clipped there
-		(exact for viewports over the whole depth range). Clamped, it was
-		drawn at the nearest depth over everything (The 3rd Birthday's
-		corridor rails hidden by the wall by the camera).
+		No range culling (PPSSPP's: a vertex off the 4096 screen space and
+		not before the near plane drops its primitive): the GE tests the
+		vertices after clipping at the near plane, a vertex shader cannot, and
+		big triangles crossing it (floors by the camera, in every game) were
+		dropped at the screen's edges.
 	*/
-	int clip = reg(w, 0x1Cu) & 1;
-	int near_hi = (x->vp_z[1] - x->vp_z[0]) > 0.5f;
-	x->zclamp_lo = !(clip && !near_hi);
-	x->zclamp_hi = !(clip && near_hi);
-
-	x->uscale = freg(w, GE_CMD_TEXSCALEU);
-	x->vscale = freg(w, GE_CMD_TEXSCALEV);
-	x->uoff = freg(w, GE_CMD_TEXOFFSETU);
-	x->voff = freg(w, GE_CMD_TEXOFFSETV);
-	uint32_t texmap = reg(w, GE_CMD_TEXMAPMODE);
-	x->uvgen = texmap & 3;
-	x->uvproj = (texmap >> 8) & 3;
-	if (x->uvgen == 2) {
-		uint32_t ls = reg(w, GE_CMD_TEXSHADELS);
-		for (i = 0; i < 2; i++) {
-			int n = (ls >> (i * 8)) & 3;
-			x->envls[i][0] = freg(w, GE_CMD_LX0 + n * 3);
-			x->envls[i][1] = freg(w, GE_CMD_LX0 + n * 3 + 1);
-			x->envls[i][2] = freg(w, GE_CMD_LX0 + n * 3 + 2);
-			normalize3(x->envls[i], 1.0f);
-		}
-	}
-
-	x->fog = (reg(w, GE_CMD_FOGENABLE) & 1) && !(reg(w, GE_CMD_CLEARMODE) & 1);
-	x->fog1 = freg(w, GE_CMD_FOG1);
-	x->fog2 = freg(w, GE_CMD_FOG2);
-	// The PSP takes infinities and NaNs as big numbers (PPSSPP's UpdateFogCoef): fog end = start
-	if (!(x->fog1 - x->fog1 == 0.0f))
-		x->fog1 = signbit(x->fog1) ? -65535.0f : 65535.0f;
-	if (!(x->fog2 - x->fog2 == 0.0f))
-		x->fog2 = signbit(x->fog2) ? -65535.0f : 65535.0f;
-
-	x->lighting = (reg(w, GE_CMD_LIGHTINGENABLE) & 1) && !(reg(w, GE_CMD_CLEARMODE) & 1);
-	if (!x->lighting)
-		return;
-
-	x->matupdate = l->color_fmt ? (int)(reg(w, GE_CMD_MATERIALUPDATE) & 7) : 0;
-	x->reverse_normal = reg(w, GE_CMD_REVERSENORMAL) & 1;
-	rgb(reg(w, GE_CMD_MATERIALEMISSIVE), x->mat_emissive);
-	rgb(reg(w, GE_CMD_MATERIALAMBIENT), x->mat_ambient);
-	x->mat_ambient[3] = (reg(w, GE_CMD_MATERIALALPHA) & 0xFF) * (1.0f / 255.0f);
-	rgb(reg(w, GE_CMD_MATERIALDIFFUSE), x->mat_diffuse);
-	rgb(reg(w, GE_CMD_MATERIALSPECULAR), x->mat_specular);
-	rgb(reg(w, GE_CMD_AMBIENTCOLOR), x->global_ambient);
-	x->global_ambient[3] = (reg(w, GE_CMD_AMBIENTALPHA) & 0xFF) * (1.0f / 255.0f);
-	x->spec_coef = freg(w, GE_CMD_MATERIALSPECULARCOEF);
-
-	x->nlights = 0;
-	for (i = 0; i < 4; i++) {
-		if (!(reg(w, GE_CMD_LIGHTENABLE0 + i) & 1))
-			continue;
-		int n = x->nlights++;
-		uint32_t t = reg(w, GE_CMD_LIGHTTYPE0 + i);
-		x->light[n].comp = t & 3;
-		x->light[n].type = (t >> 8) & 3;
-		int k;
-		for (k = 0; k < 3; k++) {
-			x->light[n].pos[k] = freg(w, GE_CMD_LX0 + i * 3 + k);
-			x->light[n].dir[k] = freg(w, GE_CMD_LDX0 + i * 3 + k);
-			x->light[n].att[k] = freg(w, GE_CMD_LKA0 + i * 3 + k);
-		}
-		if (x->light[n].type == 0)
-			normalize3(x->light[n].pos, 1.0f);
-		normalize3(x->light[n].dir, 1.0f);
-		x->light[n].spot_exp = freg(w, GE_CMD_LKS0 + i);
-		x->light[n].spot_cut = freg(w, GE_CMD_LKO0 + i);
-		rgb(reg(w, GE_CMD_LAC0 + i * 3), x->light[n].ambient);
-		rgb(reg(w, GE_CMD_LDC0 + i * 3), x->light[n].diffuse);
-		rgb(reg(w, GE_CMD_LSC0 + i * 3), x->light[n].specular);
-	}
-}
-
-static inline float clamp01(float v) {
-	return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-}
-
-/*
-	x^e for x in 0..1 (lighting exponents): 2^(e * log2 x) with short
-	polynomials (about 1e-4 relative), much cheaper than powf.
-*/
-static inline float fastPow(float x, float e) {
-	if (x <= 0.0f)
-		return e == 0.0f ? 1.0f : 0.0f;
-	if (e == 0.0f)
-		return 1.0f;
-	union { float f; int32_t i; } u = { x };
-	float lg = (float)((u.i >> 23) & 0xFF) - 127.0f;
-	u.i = (u.i & 0x007FFFFF) | 0x3F800000; // mantissa 1..2
-	float m = u.f;
-	if (m > 1.41421356f) { // around 1 for the series: m in 0.707..1.414
-		m *= 0.5f;
-		lg += 1.0f;
-	}
-	float t = (m - 1.0f) / (m + 1.0f), t2 = t * t;
-	lg += 2.88539008f * t * (1.0f + t2 * (0.33333333f + t2 * (0.2f + t2 * 0.14285714f)));
-	float p = e * lg;
-	if (p < -126.0f)
-		return 0.0f;
-	if (p > 0.0f)
-		p = 0.0f; // x <= 1, e >= 0
-	float fl = (float)(int32_t)p;
-	if (fl > p)
-		fl -= 1.0f;
-	float fr = p - fl; // 0..1
-	union { float f; int32_t i; } r;
-	r.f = 1.0f + fr * (0.69314718f + fr * (0.24022651f + fr * (0.05550411f + fr * (0.00961813f + fr * 0.00133336f))));
-	r.i += (int32_t)fl << 23;
-	return r.f;
-}
-
-// Colour of a lit vertex (PPSSPP Lighter::Light); specular is added to the primary colour
-static void light(const Xform *x, const float *in, const float *pos, const float *nrm, float *out) {
-	const float *amb = (x->matupdate & 1) ? in : x->mat_ambient;
-	const float *dif = (x->matupdate & 2) ? in : x->mat_diffuse;
-	const float *spc = (x->matupdate & 4) ? in : x->mat_specular;
-	float sum[4], spec[3] = { 0.0f, 0.0f, 0.0f };
-	int i, k;
-
-	for (k = 0; k < 3; k++)
-		sum[k] = x->global_ambient[k] * amb[k] + x->mat_emissive[k];
-	sum[3] = x->global_ambient[3] * amb[3];
-
-	for (i = 0; i < x->nlights; i++) {
-		const typeof(x->light[0]) *lt = &x->light[i];
-		float to[3];
-		float dist = 0.0f;
-		if (lt->type == 0) {
-			to[0] = lt->pos[0];
-			to[1] = lt->pos[1];
-			to[2] = lt->pos[2];
-			dist = 1.0f;
-		} else {
-			to[0] = lt->pos[0] - pos[0];
-			to[1] = lt->pos[1] - pos[1];
-			to[2] = lt->pos[2] - pos[2];
-			float s = invLength(to);
-			if (s > 0.0f) {
-				dist = 1.0f / s;
-				to[0] *= s;
-				to[1] *= s;
-				to[2] *= s;
-			}
-		}
-
-		float dot = to[0] * nrm[0] + to[1] * nrm[1] + to[2] * nrm[2];
-		if (dot < 0.0f)
-			dot = 0.0f;
-		if (lt->comp == 2)
-			dot = fastPow(dot, x->spec_coef);
-
-		float scale = 1.0f;
-		if (lt->type != 0) {
-			float d = lt->att[0] + lt->att[1] * dist + lt->att[2] * dist * dist;
-			scale = d > 0.0f ? clamp01(1.0f / d) : 1.0f;
-			if (lt->type >= 2) {
-				float angle = to[0] * lt->dir[0] + to[1] * lt->dir[1] + to[2] * lt->dir[2];
-				scale = angle >= lt->spot_cut ? scale * fastPow(angle, lt->spot_exp) : 0.0f;
-			}
-		}
-		if (scale == 0.0f)
-			continue;
-
-		for (k = 0; k < 3; k++)
-			sum[k] += (lt->ambient[k] * amb[k] + lt->diffuse[k] * dif[k] * dot) * scale;
-
-		if (lt->comp == 1) {
-			float h[3] = { to[0], to[1], to[2] + 1.0f }; // the PSP's viewer is (0, 0, 1)
-			normalize3(h, 1.0f);
-			float sd = h[0] * nrm[0] + h[1] * nrm[1] + h[2] * nrm[2];
-			if (sd > 0.0f) {
-				float p = fastPow(sd > 1.0f ? 1.0f : sd, x->spec_coef) * scale;
-				for (k = 0; k < 3; k++)
-					spec[k] += lt->specular[k] * spc[k] * p;
-			}
-		}
-	}
-
-	for (k = 0; k < 3; k++)
-		out[k] = clamp01(sum[k] + spec[k]);
-	out[3] = clamp01(sum[3]);
-}
-
-static inline float comp(const uint8_t *p, uint32_t fmt, int i, int is_signed) {
-	switch (fmt) {
-		case 1: return is_signed ? ((int8_t)p[i]) * (1.0f / 128.0f) : p[i] * (1.0f / 128.0f);
-		case 2: {
-			uint16_t v;
-			memcpy(&v, p + i * 2, 2);
-			return is_signed ? ((int16_t)v) * (1.0f / 32768.0f) : v * (1.0f / 32768.0f);
-		}
-		default: {
-			float f;
-			memcpy(&f, p + i * 4, 4);
-			return f;
-		}
-	}
-}
-
-static void decodeColor(const GeSgxVertexLayout *l, const uint8_t *p, float *c) {
-	uint32_t v;
-	if (l->color_fmt == 7) {
-		memcpy(&v, p + l->color_off, 4);
-	} else {
-		uint16_t s;
-		memcpy(&s, p + l->color_off, 2);
-		v = geSgxDecodeColor16(l->color_fmt - 4, s);
-	}
-	c[0] = (v & 0xFF) * (1.0f / 255.0f);
-	c[1] = ((v >> 8) & 0xFF) * (1.0f / 255.0f);
-	c[2] = ((v >> 16) & 0xFF) * (1.0f / 255.0f);
-	c[3] = (v >> 24) * (1.0f / 255.0f);
-}
-
-static inline uint32_t packColor(const float *c) {
-	return (uint32_t)(clamp01(c[0]) * 255.0f + 0.5f) | ((uint32_t)(clamp01(c[1]) * 255.0f + 0.5f) << 8) |
-		((uint32_t)(clamp01(c[2]) * 255.0f + 0.5f) << 16) | ((uint32_t)(clamp01(c[3]) * 255.0f + 0.5f) << 24);
-}
-
-#define MAX_VERTEX_BYTES 512
-
-/*
-	Vertex data of the current primitive: its whole range copied in one go
-	(one DMA for big ones), or vertex by vertex for scattered indices.
-*/
-#define BULK_BYTES (256 * 1024)
-static uint8_t bulk[BULK_BYTES];
-static uint32_t bulk_first, bulk_count;
-
-static int bulkLoad(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t first, uint32_t count) {
-	bulk_count = 0;
-	uint32_t bytes = count * l->size;
-	if (bytes > BULK_BYTES)
-		return 0;
-	uint32_t addr = w->vaddr + first * l->size;
-	if (!(w->bulk_fn && bytes >= 8 * 1024 && w->bulk_fn(addr, bulk, bytes)) && !geSgxRead(w, addr, bulk, bytes))
-		return 0;
-	bulk_first = first;
-	bulk_count = count;
-	return 1;
-}
-
-static const uint8_t *vertexData(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t index, uint8_t *tmp) {
-	if (index - bulk_first < bulk_count)
-		return bulk + (index - bulk_first) * l->size;
-	if (l->size > MAX_VERTEX_BYTES || !geSgxRead(w, w->vaddr + index * l->size, tmp, l->size))
-		return NULL;
-	return tmp;
-}
-
-// One vertex of the current primitive, ready for the GPU
-static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex *out) {
-	const GeSgxVertexLayout *l = x->l;
-	uint8_t tmp[MAX_VERTEX_BYTES];
-	const uint8_t *buf = vertexData(w, l, index, tmp);
-	if (!buf)
-		return 0;
-
-	if (x->through) {
-		// Pixels, an unsigned 16 bit depth, texels; no morphing
-		const uint8_t *p = buf + l->pos_off;
-		float px, py, pz;
-		switch (l->pos_fmt) {
-			case 1: px = (int8_t)p[0]; py = (int8_t)p[1]; pz = p[2] * (1.0f / 255.0f); break;
-			case 2: {
-				int16_t s[3];
-				memcpy(s, p, 6);
-				px = s[0]; py = s[1]; pz = (uint16_t)s[2] * (1.0f / 65535.0f);
-				break;
-			}
-			default: {
-				float f[3];
-				memcpy(f, p, 12);
-				px = f[0]; py = f[1]; pz = f[2] * (1.0f / 65535.0f);
-				break;
-			}
-		}
-		out->x = px * GE_SGX_SCALE;
-		out->y = py * GE_SGX_SCALE;
-		out->z = pz;
-		out->w = 1.0f;
-		if (l->tc_fmt) {
-			const uint8_t *t = buf + l->tc_off;
-			float u, v;
-			switch (l->tc_fmt) {
-				case 1: u = t[0]; v = t[1]; break;
-				case 2: {
-					uint16_t s[2];
-					memcpy(s, t, 4);
-					u = s[0]; v = s[1];
-					break;
-				}
-				default: memcpy(&u, t, 4); memcpy(&v, t + 4, 4); break;
-			}
-			out->u = u * x->tex_w;
-			out->v = v * x->tex_h;
-		} else {
-			out->u = out->v = 0.0f;
-		}
-		if (l->color_fmt) {
-			float c[4];
-			decodeColor(l, buf, c);
-			out->color = packColor(c);
-		} else {
-			out->color = x->material_color;
-		}
-		out->fog = 1.0f;
-		return 1;
-	}
-
-	// Morph targets blended by the morph weights
-	float pos[3] = { 0, 0, 0 }, nrm[3] = { 0, 0, 0 }, tc[2] = { 0, 0 }, col[4] = { 0, 0, 0, 0 };
-	float wts[8] = { 0 };
-	uint32_t k, j;
-	for (k = 0; k < l->morphs; k++) {
-		const uint8_t *p = buf + k * l->stride;
-		float mw = x->morph[k];
-		if (mw == 0.0f && l->morphs > 1)
-			continue;
-		for (j = 0; j < 3; j++)
-			pos[j] += comp(p + l->pos_off, l->pos_fmt, j, 1) * mw;
-		if (l->nrm_fmt) {
-			for (j = 0; j < 3; j++)
-				nrm[j] += comp(p + l->nrm_off, l->nrm_fmt, j, 1) * mw;
-		}
-		if (l->tc_fmt) {
-			tc[0] += comp(p + l->tc_off, l->tc_fmt, 0, 0) * mw;
-			tc[1] += comp(p + l->tc_off, l->tc_fmt, 1, 0) * mw;
-		}
-		if (l->color_fmt) {
-			float c[4];
-			decodeColor(l, p, c);
-			for (j = 0; j < 4; j++)
-				col[j] += c[j] * mw;
-		}
-		if (k == 0 && l->wt_fmt) {
-			for (j = 0; j < l->weights; j++)
-				wts[j] = comp(p, l->wt_fmt, j, 0);
-		}
-	}
-	if (!l->nrm_fmt) {
-		nrm[2] = 1.0f;
-	}
-	if (x->lighting && x->reverse_normal) {
-		nrm[0] = -nrm[0];
-		nrm[1] = -nrm[1];
-		nrm[2] = -nrm[2];
-	}
-
-	// Skinning: the bone matrices weighted, in model space
-	float mpos[3], mnrm[3];
-	if (x->skinning) {
-		mpos[0] = mpos[1] = mpos[2] = 0.0f;
-		mnrm[0] = mnrm[1] = mnrm[2] = 0.0f;
-		for (j = 0; j < l->weights; j++) {
-			float wt = wts[j];
-			if (wt == 0.0f)
-				continue;
-			float t[3];
-			const float *b = &x->m->bone[j * 12];
-			xf43(t, b, pos[0], pos[1], pos[2]);
-			mpos[0] += t[0] * wt; mpos[1] += t[1] * wt; mpos[2] += t[2] * wt;
-			xf33(t, b, nrm[0], nrm[1], nrm[2]);
-			mnrm[0] += t[0] * wt; mnrm[1] += t[1] * wt; mnrm[2] += t[2] * wt;
-		}
-	} else {
-		memcpy(mpos, pos, sizeof(mpos));
-		memcpy(mnrm, nrm, sizeof(mnrm));
-	}
-
-	float view[3] = { 0, 0, 0 };
-	float wpos[3], wnrm[3];
-	int need_world = x->lighting || x->uvgen == 2;
-	float cx, cy, cz, cw;
-	if (need_world) {
-		xf43(wpos, x->m->world, mpos[0], mpos[1], mpos[2]);
-		xf33(wnrm, x->m->world, mnrm[0], mnrm[1], mnrm[2]);
-		normalize3(wnrm, 1.0f);
-		xf43(view, x->m->view, wpos[0], wpos[1], wpos[2]);
-		const float *P = x->proj;
-		cx = view[0] * P[0] + view[1] * P[4] + view[2] * P[8] + P[12];
-		cy = view[0] * P[1] + view[1] * P[5] + view[2] * P[9] + P[13];
-		cz = view[0] * P[2] + view[1] * P[6] + view[2] * P[10] + P[14];
-		cw = view[0] * P[3] + view[1] * P[7] + view[2] * P[11] + P[15];
-	} else {
-		// One 4x4 transform; the view depth only for the fog
-		const float *M = x->mvp;
-		cx = mpos[0] * M[0] + mpos[1] * M[4] + mpos[2] * M[8] + M[12];
-		cy = mpos[0] * M[1] + mpos[1] * M[5] + mpos[2] * M[9] + M[13];
-		cz = mpos[0] * M[2] + mpos[1] * M[6] + mpos[2] * M[10] + M[14];
-		cw = mpos[0] * M[3] + mpos[1] * M[7] + mpos[2] * M[11] + M[15];
-		if (x->fog)
-			view[2] = mpos[0] * x->wv[2] + mpos[1] * x->wv[5] + mpos[2] * x->wv[8] + x->wv[11];
-	}
-
-	out->x = x->vp_x[0] * cx + x->vp_x[1] * cw;
-	out->y = x->vp_y[0] * cy + x->vp_y[1] * cw;
-	out->z = x->vp_z[0] * cz + x->vp_z[1] * cw;
-	out->w = cw;
-	// The PSP clamps the depth instead of clipping at the far plane (and only
-	// clips at the near one): keep z inside 0..w, the GPU then clips at w = 0
-	if (cw > 0.0f) {
-		if (out->z < 0.0f && x->zclamp_lo)
-			out->z = 0.0f;
-		else if (out->z > cw && x->zclamp_hi)
-			out->z = cw;
-	}
 
 	// Texture coordinates
-	switch (x->uvgen) {
-		case 1: { // texture matrix
-			float src[3];
-			switch (x->uvproj) {
-				case 0: memcpy(src, mpos, sizeof(src)); break;
-				case 1: src[0] = tc[0]; src[1] = tc[1]; src[2] = 0.0f; break;
-				case 2: memcpy(src, mnrm, sizeof(src)); normalize3(src, 1.0f); break;
-				default: memcpy(src, mnrm, sizeof(src)); break;
-			}
-			float uvw[3];
-			xf43(uvw, x->m->tgen, src[0], src[1], src[2]);
-			float q = (uvw[2] > 1e-6f || uvw[2] < -1e-6f) ? 1.0f / uvw[2] : 1.0f;
-			out->u = uvw[0] * q * x->fbk_u;
-			out->v = uvw[1] * q * x->fbk_v;
-			break;
-		}
-		case 2: // environment map
-			out->u = (1.0f + x->envls[0][0] * wnrm[0] + x->envls[0][1] * wnrm[1] + x->envls[0][2] * wnrm[2]) * 0.5f * x->fbk_u;
-			out->v = (1.0f + x->envls[1][0] * wnrm[0] + x->envls[1][1] * wnrm[1] + x->envls[1][2] * wnrm[2]) * 0.5f * x->fbk_v;
-			break;
-		default:
-			out->u = tc[0] * x->uscale + x->uoff;
-			out->v = tc[1] * x->vscale + x->voff;
-			break;
-	}
+	S("	float4 fl = uC[%d];\n", GE_SGX_UC_FLAGS);
+	S("	float2 t = %s;\n", tc ? "aTexcoord * uO[4].z" : "float2(0.0, 0.0)");
+	S("	if (fl.x < 0.5) {\n		vTexcoord = t * uO[%d].xy + uO[%d].zw;\n", GE_SGX_UO_UV, GE_SGX_UO_UV);
+	S("	} else if (fl.x < 1.5) {\n");
+	S("		float3 s = fl.y < 0.5 ? p : (fl.y < 1.5 ? float3(t, 0.0) : (fl.y < 2.5 ? normalize(n) : n));\n");
+	S("		float3 q = uC[%d].xyz * s.x + uC[%d].xyz * s.y + uC[%d].xyz * s.z + uC[%d].xyz;\n",
+		GE_SGX_UC_TGEN, GE_SGX_UC_TGEN + 1, GE_SGX_UC_TGEN + 2, GE_SGX_UC_TGEN + 3);
+	S("		vTexcoord = q.xy / (abs(q.z) > 0.000001 ? q.z : 1.0) * uO[%d].xy;\n", GE_SGX_UO_UV);
+	S("	} else {\n		vTexcoord = (float2(dot(uC[%d].xyz, wn), dot(uC[%d].xyz, wn)) + 1.0) * 0.5 * uO[%d].xy;\n	}\n",
+		GE_SGX_UC_ENVLS, GE_SGX_UC_ENVLS + 1, GE_SGX_UO_UV);
 
-	// Colour
-	float c[4];
-	if (l->color_fmt) {
-		memcpy(c, col, sizeof(c));
+	// Colour; 16 bit ones are decoded here (exact in float: integers below 65536)
+	if (col16) {
+		S("	float cv = aColor, cf = uC[%d].y;\n	float4 ic;\n", GE_SGX_UC_MATUPD);
+		S("	if (cf < 0.5)\n		ic = float4(fmod(cv, 32.0) / 31.0, fmod(floor(cv / 32.0), 64.0) / 63.0, floor(cv / 2048.0) / 31.0, 1.0);\n");
+		S("	else if (cf < 1.5)\n		ic = float4(fmod(cv, 32.0) / 31.0, fmod(floor(cv / 32.0), 32.0) / 31.0, fmod(floor(cv / 1024.0), 32.0) / 31.0, floor(cv / 32768.0));\n");
+		S("	else\n		ic = float4(fmod(cv, 16.0), fmod(floor(cv / 16.0), 16.0), fmod(floor(cv / 256.0), 16.0), floor(cv / 4096.0)) / 15.0;\n");
 	} else {
-		c[0] = (x->material_color & 0xFF) * (1.0f / 255.0f);
-		c[1] = ((x->material_color >> 8) & 0xFF) * (1.0f / 255.0f);
-		c[2] = ((x->material_color >> 16) & 0xFF) * (1.0f / 255.0f);
-		c[3] = (x->material_color >> 24) * (1.0f / 255.0f);
+		S("	float4 ic = %s;\n", col ? "aColor" : "uC[11]");
 	}
-	if (x->lighting) {
-		float lit[4];
-		light(x, c, wpos, wnrm, lit);
-		out->color = packColor(lit);
+	if (lit) {
+		S("	float3 ambC = lerp(uC[%d].rgb, ic.rgb, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
+		S("	float ambA = lerp(uC[%d].a, ic.a, uC[%d].w);\n", GE_SGX_UC_MATAMB, GE_SGX_UC_MATDIF);
+		S("	float3 difC = lerp(uC[%d].rgb, ic.rgb, uC[%d].w);\n", GE_SGX_UC_MATDIF, GE_SGX_UC_MATSPC);
+		S("	float3 spcC = lerp(uC[%d].rgb, ic.rgb, uC[%d].x);\n", GE_SGX_UC_MATSPC, GE_SGX_UC_MATUPD);
+		S("	float sexp = uC[%d].w;\n", GE_SGX_UC_EMISSIVE);
+		S("	float3 sum = uC[%d].rgb * ambC + uC[%d].rgb;\n", GE_SGX_UC_AMBIENT, GE_SGX_UC_EMISSIVE);
+		S("	float3 spec = float3(0.0, 0.0, 0.0);\n");
+		int l;
+		for (l = 0; l < 4; l++) {
+			int o = GE_SGX_UC_LIGHT + l * GE_SGX_UC_LIGHT_SIZE;
+			S("	{\n		float4 L0 = uC[%d];\n", o);
+			S("		if (L0.w > -0.5) {\n");
+			S("			float3 to = L0.xyz;\n			float dist = 1.0;\n");
+			S("			if (L0.w > 0.5) {\n				to = L0.xyz - wp;\n				dist = length(to);\n				to = dist > 0.0 ? to / dist : to;\n			}\n");
+			S("			float4 L1 = uC[%d], L2 = uC[%d];\n", o + 1, o + 2);
+			S("			float d = max(dot(to, wn), 0.0);\n");
+			S("			if (L1.w > 1.5)\n				d = d > 0.0 ? pow(d, sexp) : 0.0;\n");
+			S("			float sc = 1.0;\n");
+			S("			if (L0.w > 0.5) {\n				float den = L2.x + L2.y * dist + L2.z * dist * dist;\n				sc = den > 0.0 ? saturate(1.0 / den) : 1.0;\n");
+			S("				if (L0.w > 1.5) {\n					float ang = dot(to, L1.xyz);\n					sc = ang >= uC[%d].x ? sc * (ang > 0.0 ? pow(ang, L2.w) : 0.0) : 0.0;\n				}\n			}\n", o + 3);
+			S("			sum += (uC[%d].rgb * ambC + uC[%d].rgb * difC * d) * sc;\n", o + 4, o + 5);
+			S("			if (L1.w > 0.5 && L1.w < 1.5) {\n				float3 h = normalize(to + float3(0.0, 0.0, 1.0));\n				float sd = dot(h, wn);\n");
+			S("				if (sd > 0.0)\n					spec += uC[%d].rgb * spcC * (pow(sd, sexp) * sc);\n			}\n", o + 6);
+			S("		}\n	}\n");
+		}
+		S("	vColor = float4(saturate(sum + spec), saturate(uC[%d].a * ambA));\n", GE_SGX_UC_AMBIENT);
 	} else {
-		out->color = l->color_fmt ? packColor(c) : x->material_color;
+		S("	vColor = ic;\n");
 	}
 
-	// Fog from the view space depth
-	if (x->fog) {
-		float f = (view[2] + x->fog1) * x->fog2;
-		out->fog = (f == f) ? clamp01(f) : 1.0f;
-	} else {
-		out->fog = 1.0f;
-	}
-	return 1;
+	// Fog from the view depth
+	S("	vFog = fl.z > 0.5 ? saturate((vp.z + vpz.z) * vpz.w) : 1.0;\n}\n");
+#undef S
+	return n;
 }
 
-static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
-	memset(d, 0, sizeof(*d));
-	d->ztest = 1;
-	d->sfunc = 0xFF;
-
-	uint32_t mrgb = reg(w, GE_CMD_MASKRGB);
-	if ((mrgb & 0xFF) == 0xFF)
-		d->cmask |= 1;
-	if (((mrgb >> 8) & 0xFF) == 0xFF)
-		d->cmask |= 2;
-	if (((mrgb >> 16) & 0xFF) == 0xFF)
-		d->cmask |= 4;
-
-	uint32_t clear = reg(w, GE_CMD_CLEARMODE);
-	if (clear & 1) {
-		d->flags = GE_SGX_DRAW_CLEAR;
-		if (clear & 0x100)
-			d->flags |= GE_SGX_DRAW_WRITE_COLOR;
-		if (clear & 0x200) {
-			// The PSP's stencil is the framebuffer alpha: cleared to the vertex alpha
-			d->flags |= GE_SGX_DRAW_WRITE_ALPHA;
-			d->sfunc = 1; // always
-			d->sops = 2 | (2 << 4) | (2 << 8); // replace
-			d->smask = 0xFF;
-			d->swmask = 0xFF;
-		}
-		if (clear & 0x400)
-			d->flags |= GE_SGX_DRAW_WRITE_DEPTH;
-	} else {
-		if (reg(w, GE_CMD_STENCILTESTENABLE) & 1) {
-			uint32_t st = reg(w, GE_CMD_STENCILTEST), op = reg(w, GE_CMD_STENCILOP);
-			d->sfunc = (uint8_t)(st & 7);
-			d->sref = (uint8_t)((st >> 8) & 0xFF);
-			d->smask = (uint8_t)((st >> 16) & 0xFF);
-			d->sops = (uint16_t)((op & 7) | (((op >> 8) & 7) << 4) | (((op >> 16) & 7) << 8));
-			d->swmask = (uint8_t)(~reg(w, GE_CMD_MASKALPHA) & 0xFF);
-		}
-		if (reg(w, GE_CMD_TEXTUREMAPENABLE) & 1)
-			d->flags |= GE_SGX_DRAW_TEXTURED;
-		if (reg(w, GE_CMD_ALPHABLENDENABLE) & 1)
-			d->flags |= GE_SGX_DRAW_BLEND;
-		if (reg(w, GE_CMD_ALPHATESTENABLE) & 1)
-			d->flags |= GE_SGX_DRAW_ALPHATEST;
-		uint32_t tfunc = reg(w, GE_CMD_TEXFUNC);
-		d->tfunc = (uint8_t)(tfunc & 7);
-		if (d->tfunc > 4)
-			d->tfunc = 0;
-		if (tfunc & 0x100)
-			d->flags |= GE_SGX_DRAW_TCC;
-		if (tfunc & 0x10000)
-			d->flags |= GE_SGX_DRAW_DOUBLE;
-		uint32_t at = reg(w, GE_CMD_ALPHATEST);
-		d->atest_func = (uint8_t)(at & 7);
-		d->atest_ref = (uint8_t)((at >> 8) & 0xFF);
-		d->blend = reg(w, GE_CMD_BLENDMODE);
-		d->fix_a = reg(w, GE_CMD_BLENDFIXEDA);
-		d->fix_b = reg(w, GE_CMD_BLENDFIXEDB);
-		d->env = reg(w, GE_CMD_TEXENVCOLOR);
-		if (d->flags & GE_SGX_DRAW_TEXTURED) {
-			uint32_t wrap = reg(w, GE_CMD_TEXWRAP), filter = reg(w, GE_CMD_TEXFILTER);
-			if (wrap & 1)
-				d->tex_mode |= GE_SGX_TEX_CLAMP_U;
-			if (wrap & 0x100)
-				d->tex_mode |= GE_SGX_TEX_CLAMP_V;
-			if (filter & 1)
-				d->tex_mode |= GE_SGX_TEX_LINEAR_MIN;
-			if (filter & 0x100)
-				d->tex_mode |= GE_SGX_TEX_LINEAR_MAG;
-		}
-		// Depth: tested and written only with the test on (PPSSPP)
-		if (reg(w, GE_CMD_ZTESTENABLE) & 1) {
-			d->ztest = (uint8_t)(reg(w, GE_CMD_ZTEST) & 7);
-			if (!(reg(w, GE_CMD_ZWRITEDISABLE) & 1))
-				d->flags |= GE_SGX_DRAW_WRITE_DEPTH;
-		}
-		if (!(reg(w, GE_CMD_VERTEXTYPE) & GE_VTYPE_THROUGH) && (reg(w, GE_CMD_FOGENABLE) & 1)) {
-			d->flags |= GE_SGX_DRAW_FOG;
-			d->fog_color = reg(w, GE_CMD_FOGCOLOR);
-		}
+int geSgxCgSource(uint32_t key, char *buf, int size) {
+	if ((key & 0xF000u) == GE_SGX_VS_BASE)
+		return vertexSource(key, buf, size);
+	if (key == GE_SGX_SHADER_VERTEX) {
+		return snprintf(buf, size,
+			// Pixels times w to clip space (see GeSgxVertex)
+			"void main(\n"
+			"	float4 aPosition,\n"
+			"	float2 aTexcoord,\n"
+			"	float4 aColor,\n"
+			"	float aFog,\n"
+			"	out float4 vPosition : POSITION,\n"
+			"	out float2 vTexcoord : TEXCOORD0,\n"
+			"	out float vFog : TEXCOORD1,\n"
+			"	out float4 vColor : COLOR)\n"
+			"{\n"
+			"	float w = aPosition.w;\n"
+			"	vPosition = float4(aPosition.x * (2.0 / 960.0) - w, w - aPosition.y * (2.0 / 544.0), aPosition.z, w);\n"
+			"	vTexcoord = aTexcoord;\n"
+			"	vFog = aFog;\n"
+			"	vColor = aColor;\n"
+			"}\n");
 	}
 
-	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
-	d->scissor[0] = (int16_t)((s1 & 0x3FF) * GE_SGX_SCALE);
-	d->scissor[1] = (int16_t)(((s1 >> 10) & 0x3FF) * GE_SGX_SCALE);
-	d->scissor[2] = (int16_t)(((s2 & 0x3FF) + 1) * GE_SGX_SCALE);
-	d->scissor[3] = (int16_t)((((s2 >> 10) & 0x3FF) + 1) * GE_SGX_SCALE);
+	int clear = (key >> 10) & 1;
+	int fog = (key >> 11) & 1;
+	int textured = key & 1;
+	int tfunc = (key >> 1) & 7;
+	int tcc = (key >> 4) & 1;
+	int dbl = (key >> 5) & 1;
+	int atest = (key >> 6) & 1;
+	int afunc = (key >> 7) & 7;
+	int sc = (key >> 12) & 1; // exact scissor (the region clip is 32x32 tiles)
 
-	d->fb = (((reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_FRAMEBUFPTR)) & 0x001FFFFFu;
-	d->texture = -1;
-	// A framebuffer with alpha (5551, 4444, 8888: not 565), its stencil
-	if ((reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3) != 0)
-		d->flags |= GE_SGX_DRAW_FB_ALPHA;
+	int n = snprintf(buf, size,
+		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s) : COLOR\n"
+		"{\n"
+		"%s"
+		"	float4 v = vColor;\n"
+		"	float4 c = v;\n",
+		textured ? ", uniform sampler2D uTexture" : "",
+		(textured && tfunc == 2) ? ", uniform float4 uEnv" : "",
+		atest ? ", uniform float uAlphaRef" : "",
+		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "",
+		sc ? ", float4 wpos : WPOS, uniform float4 uScissor" : "",
+		// One discard at the end with the alpha test's (two made the compiler fail on the biggest programs)
+		sc ? "	bool inside = all(wpos.xy >= uScissor.xy) && all(wpos.xy < uScissor.zw);\n" : "");
+
+	if (!clear && textured) {
+		static const char *funcs[5] = {
+			// modulate
+			"	c.rgb = v.rgb * t.rgb;\n	c.a = %s;\n",
+			// decal
+			"	c.rgb = lerp(v.rgb, t.rgb, %s);\n	c.a = v.a;\n",
+			// blend
+			"	c.rgb = lerp(v.rgb, uEnv.rgb, t.rgb);\n	c.a = %s;\n",
+			// replace
+			"	c.rgb = t.rgb;\n	c.a = %s;\n",
+			// add
+			"	c.rgb = v.rgb + t.rgb;\n	c.a = %s;\n",
+		};
+		static const char *alphas[5][2] = {
+			{ "v.a", "v.a * t.a" }, // modulate
+			{ "1.0", "t.a" },       // decal: RGB texture is opaque
+			{ "v.a", "v.a * t.a" }, // blend
+			{ "v.a", "t.a" },       // replace
+			{ "v.a", "v.a * t.a" }, // add
+		};
+		if (tfunc > 4)
+			tfunc = 0;
+		n += snprintf(buf + n, size - n, "	float4 t = tex2D(uTexture, vTexcoord);\n");
+		n += snprintf(buf + n, size - n, funcs[tfunc], alphas[tfunc][tcc]);
+	}
+
+	if (dbl)
+		n += snprintf(buf + n, size - n, "	c.rgb = c.rgb * 2.0;\n");
+
+	// Fog after texturing, on the colour only
+	if (fog)
+		n += snprintf(buf + n, size - n, "	c.rgb = lerp(uFogColor.rgb, saturate(c.rgb), vFog);\n");
+
+	if (atest) {
+		static const char *tests[8] = {
+			"false",                                   // never
+			"true",                                    // always
+			"abs(c.a - uAlphaRef) < (0.5 / 255.0)",    // equal
+			"abs(c.a - uAlphaRef) >= (0.5 / 255.0)",   // not equal
+			"c.a < uAlphaRef - (0.5 / 255.0)",         // less
+			"c.a <= uAlphaRef + (0.5 / 255.0)",        // less or equal
+			"c.a > uAlphaRef + (0.5 / 255.0)",         // greater
+			"c.a >= uAlphaRef - (0.5 / 255.0)",        // greater or equal
+		};
+		n += snprintf(buf + n, size - n, sc ? "	if (!(inside && (%s)))\n		discard;\n" : "	if (!(%s))\n		discard;\n", tests[afunc]);
+	} else if (sc) {
+		n += snprintf(buf + n, size - n, "	if (!inside)\n		discard;\n");
+	}
+
+	n += snprintf(buf + n, size - n, "	return saturate(c);\n}\n");
+	return n;
 }
 
-// Same state as the previous draw: one draw for both
-static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
-	return a->prim == b->prim && a->flags == b->flags && a->tfunc == b->tfunc &&
-		a->atest_func == b->atest_func && a->atest_ref == b->atest_ref && a->tex_mode == b->tex_mode &&
-		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
-		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
-		a->fbtex == b->fbtex && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
-		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
-		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
-}
+int geSgxCgAllKeys(uint32_t *keys, int max) {
+	int n = 0;
+	uint32_t textured, tfunc, tcc, dbl, atest, fog;
 
-/*
-	Framebuffers: the ones drawn into are remembered with their size (the
-	biggest scissor), so a texture at one of their addresses can be taken
-	from its 960x544 rendering, and the draw thread sizes those renderings
-	by the same numbers (frame->fbs).
-*/
-static struct { uint32_t fb; uint16_t w, h; uint32_t used; } fbreg[GE_SGX_MAX_FBS];
-static uint32_t fbreg_clock = 0;
-
-static int fbFind(uint32_t fb) {
-	int i;
-	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
-		if (fbreg[i].used && fbreg[i].fb == fb)
-			return i;
-	}
-	return -1;
-}
-
-// The framebuffer at or below an address (0xFFFFFFFF: none), for the diagnostics
-static uint32_t fbNearest(uint32_t addr) {
-	uint32_t best = 0xFFFFFFFFu;
-	int i;
-	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
-		if (fbreg[i].used && fbreg[i].fb <= addr && (best == 0xFFFFFFFFu || fbreg[i].fb > best))
-			best = fbreg[i].fb;
-	}
-	return best;
-}
-
-static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
-	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
-	(void)s1;
-	uint32_t sw = (s2 & 0x3FF) + 1, sh = ((s2 >> 10) & 0x3FF) + 1;
-	uint32_t fbw = reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x7FF;
-	if (sw > fbw && fbw >= 16)
-		sw = fbw;
-	if (sw > 512)
-		sw = 512;
-	if (sh > 512)
-		sh = 512;
-	int i = fbFind(d->fb);
-	if (i < 0) {
-		int j, oldest = 0;
-		for (j = 0; j < GE_SGX_MAX_FBS; j++) {
-			if (!fbreg[j].used) {
-				oldest = j;
-				break;
-			}
-			if (fbreg[j].used < fbreg[oldest].used)
-				oldest = j;
-		}
-		i = oldest;
-		fbreg[i].fb = d->fb;
-		fbreg[i].w = fbreg[i].h = 0;
-	}
-	if (sw > fbreg[i].w)
-		fbreg[i].w = (uint16_t)sw;
-	if (sh > fbreg[i].h)
-		fbreg[i].h = (uint16_t)sh;
-	fbreg[i].used = ++fbreg_clock;
-
-	// This frame's list
-	uint32_t k;
-	for (k = 0; k < f->nfbs; k++) {
-		if (f->fbs[k].fb == d->fb)
-			break;
-	}
-	if (k == f->nfbs) {
-		if (f->nfbs >= GE_SGX_MAX_FBS)
-			return;
-		f->nfbs++;
-	}
-	f->fbs[k].fb = d->fb;
-	f->fbs[k].w = fbreg[i].w;
-	f->fbs[k].h = fbreg[i].h;
-}
-
-
-/*
-	Diagnostics: framebuffers drawn into, textures read from VRAM and VRAM
-	transfers, each one logged the first time it is seen, and everything of
-	the traced frame (walker trace set) in order.
-*/
-#define SEEN_MAX 160
-#define TRACE_LINES 900
-static uint32_t seen[SEEN_MAX];
-static uint32_t nseen = 0;
-static uint32_t trace_fb_key = 0, trace_tex_key = 0;
-
-// The traced frame's lines, written to the log only if it is a frame of the race
-#define TRACE_BYTES (224 * 1024)
-static char trace_text[TRACE_BYTES];
-static uint32_t trace_len = 0;
-
-/*
-	The depth and vertex lines in a buffer of their own (they filled the
-	trace's and the lists' and flips' lines after them were lost), put
-	after the others when the trace is written
-*/
-#define TRACE_RESERVE (128 * 1024)
-static char vtrace_text[TRACE_RESERVE];
-static uint32_t vtrace_len = 0;
-
-static void vtraceAdd(const char *line, uint32_t n) {
-	if (vtrace_len + n < TRACE_RESERVE) {
-		memcpy(vtrace_text + vtrace_len, line, n);
-		vtrace_len += n;
-	}
-}
-
-const char *geSgxBuildTraceText(uint32_t *len) {
-	// The main lines stop TRACE_RESERVE short of the end: room for these
-	if (vtrace_len && trace_len + vtrace_len < TRACE_BYTES) {
-		memcpy(trace_text + trace_len, vtrace_text, vtrace_len);
-		trace_len += vtrace_len;
-		trace_text[trace_len] = '\0';
-		vtrace_len = 0;
-	}
-	*len = trace_len;
-	return trace_text;
-}
-
-static uint32_t trace_depth_lines = 0, trace_vertex_lines = 0;
-
-void geSgxBuildTraceClear(GeSgxWalker *w) {
-	trace_len = 0;
-	vtrace_len = 0;
-	trace_depth_lines = 0;
-	trace_vertex_lines = 0;
-	w->trace_lines = 0;
-	trace_fb_key = trace_tex_key = 0;
-}
-
-static int seenFirst(uint32_t a, uint32_t b, uint32_t c) {
-	uint32_t k = (a * 0x9E3779B1u) ^ ((b + 0x7F4A7C15u) * 0x85EBCA77u) ^ ((c + 0x165667B1u) * 0xC2B2AE3Du);
-	uint32_t i;
-	if (!k)
-		k = 1;
-	for (i = 0; i < nseen; i++) {
-		if (seen[i] == k)
-			return 0;
-	}
-	if (nseen >= SEEN_MAX)
-		return 0;
-	seen[nseen++] = k;
-	return 1;
-}
-
-static void diag(GeSgxWalker *w, int traced, uint32_t a, uint32_t b, uint32_t c, const char *fmt, ...) {
-	if (!w->log_fn)
-		return;
-	int first = seenFirst(a, b, c);
-	int trace = w->trace && traced && w->trace_lines < TRACE_LINES;
-	if (!trace && !first)
-		return;
-	char line[200];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(line, sizeof(line), fmt, ap);
-	va_end(ap);
-	if (trace) {
-		w->trace_lines++;
-		int n = snprintf(trace_text + trace_len, TRACE_BYTES - trace_len, "GeSgx T: %s\n", line);
-		if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES)
-			trace_len += (uint32_t)n;
-		else
-			trace_text[trace_len] = '\0';
-	}
-	if (first)
-		w->log_fn("GeSgx seen: %s\n", line);
-}
-
-static void traceLine(GeSgxWalker *w, const char *fmt, ...);
-
-void geSgxBuildTraceNote(GeSgxWalker *w, const char *fmt, ...) {
-	if (!w->trace)
-		return;
-	char line[200];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(line, sizeof(line), fmt, ap);
-	va_end(ap);
-	traceLine(w, "%s", line);
-}
-
-// A line of the traced frame only
-static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
-	if (!w->trace || w->trace_lines >= TRACE_LINES)
-		return;
-	char line[240];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(line, sizeof(line), fmt, ap);
-	va_end(ap);
-	w->trace_lines++;
-	// The last TRACE_RESERVE bytes kept for the depth and vertex lines (vtrace_text, put there at the end)
-	if (trace_len + TRACE_RESERVE >= TRACE_BYTES)
-		return;
-	int n = snprintf(trace_text + trace_len, TRACE_BYTES - TRACE_RESERVE - trace_len, "GeSgx T: %s\n", line);
-	if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES - TRACE_RESERVE)
-		trace_len += (uint32_t)n;
-	else
-		trace_text[trace_len] = '\0';
-}
-
-// The current framebuffer and VRAM texture of a draw (state just built)
-static void diagDraw(GeSgxWalker *w, const GeSgxFrameData *f, const GeSgxDraw *d, uint32_t taddr, int rt) {
-	if (!w->log_fn)
-		return;
-	uint32_t fbw = reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x7FF, psm = reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3;
-	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
-	uint32_t fbkey = d->fb ^ (fbw << 21) ^ (psm << 30) ^ (s1 * 31u) ^ (s2 * 977u);
-	int traced = fbkey != trace_fb_key;
-	trace_fb_key = fbkey;
-	diag(w, traced, 1u | (psm << 4) | (fbw << 8), d->fb, s1 ^ (s2 << 1),
-		"fb %X fbw %u psm %u scissor %u,%u-%u,%u | draw %u",
-		(unsigned)d->fb, (unsigned)fbw, (unsigned)psm, (unsigned)(s1 & 0x3FF), (unsigned)((s1 >> 10) & 0x3FF),
-		(unsigned)(s2 & 0x3FF), (unsigned)((s2 >> 10) & 0x3FF), (unsigned)f->ndraws);
-	if ((d->flags & GE_SGX_DRAW_TEXTURED) && (taddr < 0x04000000u || taddr >= 0x04800000u)) {
-		// A screen sized texture in RAM (a copy of a rendering would be stale there: the renderings are Vita side only)
-		uint32_t rfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, rsize = reg(w, GE_CMD_TEXSIZE0);
-		uint32_t rw = 1u << (rsize & 0xF), rh = 1u << ((rsize >> 8) & 0xF);
-		if (rfmt <= 3 && rw >= 256 && rh >= 256)
-			diag(w, 1, 4u | (rfmt << 4) | (rsize << 8), taddr, d->fb,
-				"ram texture %X fmt %u %ux%u bufw %u (not in VRAM) | into fb %X, draw %u",
-				(unsigned)(taddr & 0x0FFFFFFFu), (unsigned)rfmt, (unsigned)rw, (unsigned)rh,
-				(unsigned)(reg(w, GE_CMD_TEXBUFWIDTH0) & 0x7FF), (unsigned)d->fb, (unsigned)f->ndraws);
-	}
-	if (!(d->flags & GE_SGX_DRAW_TEXTURED) || taddr < 0x04000000u || taddr >= 0x04800000u)
-		return;
-	uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, size = reg(w, GE_CMD_TEXSIZE0);
-	// Only the formats a framebuffer has (CLUT and compressed ones are plain textures kept in VRAM)
-	if (tfmt > 3)
-		return;
-	uint32_t bw = reg(w, GE_CMD_TEXBUFWIDTH0) & 0x7FF;
-	uint32_t tkey = taddr ^ (tfmt << 28) ^ (size * 131u) ^ (d->fb * 7u);
-	traced = tkey != trace_tex_key;
-	trace_tex_key = tkey;
-	diag(w, traced, 2u | (tfmt << 4) | (size << 8), taddr, rt >= 0 ? fbreg[rt].fb | ((uint32_t)fbreg[rt].w << 21) : 0xFFFFFFFFu,
-		"vram texture %X fmt %u %ux%u bufw %u -> %s %X (%ux%u) | into fb %X, draw %u",
-		(unsigned)(taddr & 0x001FFFFFu), (unsigned)tfmt, 1u << (size & 0xF), 1u << ((size >> 8) & 0xF), (unsigned)bw,
-		rt >= 0 ? "rendering of fb" : "no rendering, nearest fb", rt >= 0 ? (unsigned)fbreg[rt].fb : (unsigned)fbNearest(taddr & 0x001FFFFFu),
-		rt >= 0 ? (unsigned)fbreg[rt].w : 0u, rt >= 0 ? (unsigned)fbreg[rt].h : 0u, (unsigned)d->fb, (unsigned)f->ndraws);
-}
-
-// Indices of the primitive (up to 65535, 4 bytes each), read once
-static uint32_t prim_index[65536];
-
-/* ---- GPU transform ---- */
-
-// Biggest vertex range one primitive copies to the GPU (bigger: CPU transform)
-#define GPU_MAX_RANGE_BYTES (256 * 1024)
-
-// Vertex shapes the vertex programs read as they are
-static int gpuLayout(const GeSgxWalker *w, const GeSgxVertexLayout *l) {
-	if (!(l->pos_fmt && l->morphs == 1 && l->index_size <= 2))
-		return 0;
-	uint32_t attrs = reg(w, GE_CMD_VERTEXTYPE) & ((3u << 0) | (7u << 2) | (3u << 5) | (3u << 7) | (3u << 9) | (7u << 14));
-	int i;
-	for (i = 0; i < w->ngpu_bad; i++) {
-		if (w->gpu_bad[i] == attrs)
-			return 0;
-	}
-	return 1;
-}
-
-static uint32_t gpuVertexKey(const GeSgxVertexLayout *l, const Xform *x) {
-	uint32_t k = GE_SGX_VS_BASE;
-	if (l->tc_fmt)
-		k |= GE_SGX_VS_TC;
-	if (l->color_fmt == 7)
-		k |= GE_SGX_VS_COLOR;
-	else if (l->color_fmt)
-		k |= GE_SGX_VS_COLOR16;
-	if (l->nrm_fmt)
-		k |= GE_SGX_VS_NORMAL;
-	if (l->wt_fmt)
-		k |= l->weights > 4 ? GE_SGX_VS_W8 : GE_SGX_VS_W4;
-	if (x->lighting)
-		k |= GE_SGX_VS_LIGHT;
-	return k;
-}
-
-/*
-	The uniform buffers of the current state, built once per state and kept
-	in the frame's uniform arena; a block equal to the previous one is
-	shared (objects drawn one after the other with the same camera and lights).
-*/
-static int uni_valid = 0;
-static const GeSgxFrameData *uni_frame = NULL;
-static uint32_t gpu_vkey, gpu_ucommon, gpu_uobject;
-static float last_common[GE_SGX_UC_COUNT][4], last_object[GE_SGX_UO_COUNT][4];
-static int have_common, have_object;
-static uint32_t last_common_off, last_object_off;
-
-static void set4(float *d, float a, float b, float c, float e) {
-	d[0] = a; d[1] = b; d[2] = c; d[3] = e;
-}
-
-static void col4(float *d, const float *m, int j) {
-	set4(d, m[j * 3], m[j * 3 + 1], m[j * 3 + 2], j == 3 ? 1.0f : 0.0f);
-}
-
-static void rgb4(float *d, const float *c, float w) {
-	set4(d, c[0], c[1], c[2], w);
-}
-
-static float compScale(uint32_t fmt) {
-	return fmt == 1 ? 1.0f / 128.0f : fmt == 2 ? 1.0f / 32768.0f : 1.0f;
-}
-
-static int putBlock(GeSgxFrameData *f, const void *data, uint32_t bytes, uint32_t *off) {
-	uint32_t o = (f->nuniforms + 15u) & ~15u;
-	if (o + bytes > f->max_uniforms)
-		return 0;
-	memcpy(f->uniforms + o, data, bytes);
-	f->nuniforms = o + bytes;
-	*off = o;
-	return 1;
-}
-
-static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, const Xform *x) {
-	if (uni_frame != f) {
-		uni_frame = f;
-		uni_valid = 0;
-		have_common = have_object = 0;
-	}
-	if (uni_valid)
-		return 1;
-
-	const GeSgxMatrices *m = &w->mtx;
-	float c[GE_SGX_UC_COUNT][4], o[GE_SGX_UO_COUNT][4];
-	int i;
-	memset(c, 0, sizeof(c));
-	memset(o, 0, sizeof(o));
-
-	for (i = 0; i < 4; i++) {
-		set4(c[GE_SGX_UC_PROJ + i], m->proj[i * 4], m->proj[i * 4 + 1], m->proj[i * 4 + 2], m->proj[i * 4 + 3]);
-		col4(c[GE_SGX_UC_VIEW + i], m->view, i);
-		col4(c[GE_SGX_UC_TGEN + i], m->tgen, i);
-		col4(o[GE_SGX_UO_WORLD + i], m->world, i);
-	}
-	set4(c[GE_SGX_UC_VP], x->vp_x[0], x->vp_x[1], x->vp_y[0], x->vp_y[1]);
-	set4(c[GE_SGX_UC_VPZ], x->vp_z[0], x->vp_z[1], x->fog1, x->fog2);
-	// Range culling: the screen (offset included) from 0 to 4096, in the program's pixels (offset taken, scaled)
-	// The depth clamp's sides (the near plane's side is clipped instead)
-	set4(c[GE_SGX_UC_CULL], x->zclamp_lo ? 1.0f : 0.0f, x->zclamp_hi ? 1.0f : 0.0f, 0.0f, 0.0f);
-	set4(c[GE_SGX_UC_CULL + 1], 0.0f, 0.0f, 0.0f, 0.0f);
-	set4(c[GE_SGX_UC_FLAGS], (float)x->uvgen, (float)x->uvproj, x->fog ? 1.0f : 0.0f, (x->lighting && x->reverse_normal) ? -1.0f : 1.0f);
-	uint32_t mc = x->material_color;
-	set4(c[GE_SGX_UC_MATAMB], (mc & 0xFF) / 255.0f, ((mc >> 8) & 0xFF) / 255.0f, ((mc >> 16) & 0xFF) / 255.0f, (mc >> 24) / 255.0f);
-	for (i = 0; i < 2; i++)
-		rgb4(c[GE_SGX_UC_ENVLS + i], x->envls[i], 0.0f);
-	for (i = 0; i < 4; i++)
-		c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE][3] = -1.0f; // off
-	if (l->color_fmt >= 4 && l->color_fmt <= 6)
-		c[GE_SGX_UC_MATUPD][1] = (float)(l->color_fmt - 4);
-	if (x->lighting) {
-		rgb4(c[GE_SGX_UC_EMISSIVE], x->mat_emissive, x->spec_coef);
-		rgb4(c[GE_SGX_UC_MATDIF], x->mat_diffuse, (x->matupdate & 1) ? 1.0f : 0.0f);
-		rgb4(c[GE_SGX_UC_MATSPC], x->mat_specular, (x->matupdate & 2) ? 1.0f : 0.0f);
-		set4(c[GE_SGX_UC_AMBIENT], x->global_ambient[0], x->global_ambient[1], x->global_ambient[2], x->global_ambient[3]);
-		c[GE_SGX_UC_MATUPD][0] = (x->matupdate & 4) ? 1.0f : 0.0f;
-		for (i = 0; i < x->nlights; i++) {
-			float (*L)[4] = &c[GE_SGX_UC_LIGHT + i * GE_SGX_UC_LIGHT_SIZE];
-			rgb4(L[0], x->light[i].pos, (float)x->light[i].type);
-			rgb4(L[1], x->light[i].dir, (float)x->light[i].comp);
-			rgb4(L[2], x->light[i].att, x->light[i].spot_exp);
-			set4(L[3], x->light[i].spot_cut, 0.0f, 0.0f, 0.0f);
-			rgb4(L[4], x->light[i].ambient, 0.0f);
-			rgb4(L[5], x->light[i].diffuse, 0.0f);
-			rgb4(L[6], x->light[i].specular, 0.0f);
-		}
-	}
-
-	set4(o[GE_SGX_UO_SCALE], compScale(l->pos_fmt), compScale(l->nrm_fmt), compScale(l->tc_fmt), compScale(l->wt_fmt));
-	// Scale and offset of the coordinates as they are; the generated ones only scaled (to a framebuffer's part)
-	if (x->uvgen == 0)
-		set4(o[GE_SGX_UO_UV], x->uscale, x->vscale, x->uoff, x->voff);
-	else
-		set4(o[GE_SGX_UO_UV], x->fbk_u, x->fbk_v, 0.0f, 0.0f);
-	if (l->wt_fmt) {
-		for (i = 0; i < 8; i++)
-			o[GE_SGX_UO_WMASK + i / 4][i & 3] = (uint32_t)i < l->weights ? 1.0f : 0.0f;
-		for (i = 0; i < 8 * 4; i++)
-			col4(o[GE_SGX_UO_BONES + i], &m->bone[(i / 4) * 12], i & 3);
-	}
-
-	if (!(have_common && memcmp(c, last_common, sizeof(c)) == 0)) {
-		if (!putBlock(f, c, sizeof(c), &last_common_off))
-			return 0;
-		memcpy(last_common, c, sizeof(c));
-		have_common = 1;
-	}
-	if (!(have_object && memcmp(o, last_object, sizeof(o)) == 0)) {
-		if (!putBlock(f, o, sizeof(o), &last_object_off))
-			return 0;
-		memcpy(last_object, o, sizeof(o));
-		have_object = 1;
-	}
-	gpu_ucommon = last_common_off;
-	gpu_uobject = last_object_off;
-	gpu_vkey = gpuVertexKey(l, x);
-	uni_valid = 1;
-	return 1;
-}
-
-/*
-	The raw arena: vertex data copied from PSP memory. Primitives usually
-	use consecutive memory, so their ranges are collected into one pending
-	run and copied together (one DMA when big); ranges copied before in this
-	frame are found again. dst keeps the source's alignment modulo 16.
-*/
-#define RAW_DONE 16
-static GeSgxFrameData *raw_frame = NULL;
-static struct { uint32_t src, len, dst; } raw_done[RAW_DONE];
-static int raw_ndone = 0, raw_next = 0;
-static uint32_t pend_src, pend_len, pend_dst;
-
-static void rawFlush(GeSgxWalker *w) {
-	if (!pend_len || !raw_frame)
-		return;
-	uint8_t *dst = raw_frame->raw + pend_dst;
-	if (!(w->bulk_fn && pend_len >= 8 * 1024 && w->bulk_fn(pend_src, dst, pend_len)))
-		geSgxRead(w, pend_src, dst, pend_len);
-	raw_done[raw_next].src = pend_src;
-	raw_done[raw_next].len = pend_len;
-	raw_done[raw_next].dst = pend_dst;
-	raw_next = (raw_next + 1) % RAW_DONE;
-	if (raw_ndone < RAW_DONE)
-		raw_ndone++;
-	pend_len = 0;
-}
-
-static int rawCopy(GeSgxWalker *w, GeSgxFrameData *f, uint32_t src, uint32_t bytes, uint32_t *off) {
-	int i;
-	if (raw_frame != f) {
-		raw_frame = f;
-		raw_ndone = raw_next = 0;
-		pend_len = 0;
-	}
-	if (pend_len && src >= pend_src && src + bytes <= pend_src + pend_len) {
-		*off = pend_dst + (src - pend_src);
-		return 1;
-	}
-	// Continues the pending run (it ends the arena)
-	if (pend_len && src >= pend_src && src <= pend_src + pend_len && pend_dst + pend_len == f->nraw) {
-		uint32_t len = src + bytes - pend_src;
-		if (pend_dst + len > f->max_raw)
-			return 0;
-		pend_len = len;
-		f->nraw = pend_dst + len;
-		*off = pend_dst + (src - pend_src);
-		return 1;
-	}
-	for (i = 0; i < raw_ndone; i++) {
-		if (src >= raw_done[i].src && src + bytes <= raw_done[i].src + raw_done[i].len) {
-			*off = raw_done[i].dst + (src - raw_done[i].src);
-			return 1;
-		}
-	}
-	rawFlush(w);
-	uint32_t dst = ((f->nraw + 15u) & ~15u) + (src & 15u);
-	if (dst + bytes > f->max_raw)
-		return 0;
-	pend_src = src;
-	pend_len = bytes;
-	pend_dst = dst;
-	f->nraw = dst + bytes;
-	*off = dst;
-	return 1;
-}
-
-// Vertex data in PSP RAM the GPU has mapped: its offset there (4 byte aligned for the GPU)
-static int directVertices(const GeSgxWalker *w, const GeSgxFrameData *f, uint32_t addr, uint32_t bytes, uint32_t *off) {
-	if (!f->direct || !w->direct_size)
-		return 0;
-	addr &= 0x0FFFFFFFu; // uncached and kernel mirrors
-	if ((addr & 3) || addr < w->direct_start || addr - w->direct_start + bytes > w->direct_size)
-		return 0;
-	*off = addr - w->direct_start;
-	return 1;
-}
-
-/*
-	Scattered indices: each vertex they use once, appended to the raw
-	arena; prim_index becomes local. The stamp tells this primitive's
-	vertices from older ones without clearing the map.
-*/
-static uint16_t gather_map[65536];
-static uint32_t gather_stamp[65536];
-static uint32_t gather_cur = 0;
-
-static int rawGather(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, uint32_t count, uint32_t *off, uint32_t *nv) {
-	uint32_t size = l->size, dst = (f->nraw + 15u) & ~15u, n = 0, i;
-	if (dst + count * size > f->max_raw)
-		return 0;
-	if (++gather_cur == 0) {
-		memset(gather_stamp, 0, sizeof(gather_stamp));
-		gather_cur = 1;
-	}
-	for (i = 0; i < count; i++) {
-		uint32_t idx = prim_index[i];
-		if (idx > 0xFFFF)
-			return 0;
-		if (gather_stamp[idx] != gather_cur) {
-			gather_stamp[idx] = gather_cur;
-			gather_map[idx] = (uint16_t)n;
-			if (!geSgxRead(w, w->vaddr + idx * size, f->raw + dst + n * size, size))
-				return 0;
-			n++;
-		}
-		prim_index[i] = gather_map[idx];
-	}
-	f->nraw = dst + n * size;
-	*off = dst;
-	*nv = n;
-	return 1;
-}
-
-static int timedUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayout *l, const Xform *x, uint32_t (* clk)(void), uint32_t every) {
-	if (!clk)
-		return gpuUniforms(w, f, l, x);
-	uint32_t t0 = clk();
-	int ok = gpuUniforms(w, f, l, x);
-	f->us_vuni += (clk() - t0) * every;
-	return ok;
-}
-
-void geSgxBuildFinish(GeSgxWalker *w) {
-	if (raw_frame == w->frame)
-		rawFlush(w);
-	raw_frame = NULL;
-	uni_frame = NULL;
-}
-
-
-/*
-	Builds one PRIM. The vertices it uses are transformed once each into the
-	frame (an indexed primitive over a compact range: that range, otherwise
-	every referenced vertex in order), the topology becomes a triangle, line
-	or point list of indices relative to them, which lets consecutive
-	primitives of one state share a GXM draw.
-*/
-void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVertexLayout *l) {
-	GeSgxFrameData *f = w->frame;
-
-	if (count == 0 || !l->pos_fmt)
-		return;
-
-	/*
-		The draw state and the transform setup only change when a register,
-		matrix or CLUT did (lists draw many primitives in one state).
-	*/
-	static GeSgxDraw cached_d;
-	static Xform cached_x;
-	static const GeSgxWalker *cached_w = NULL;
-	static const GeSgxFrameData *cached_frame = NULL;
-	/*
-		Timing for the log: one primitive in clock_every, counted that many
-		times (a system call clock is 2.4 us; read 3-5 times for every
-		primitive it would take much of the walker's time, 12000 a frame).
-	*/
-	static uint32_t prims_seen = 0;
-	const uint32_t TIME_EVERY = w->clock_every > 1 ? w->clock_every : 1;
-	uint32_t (* clk)(void) = ((++prims_seen & (TIME_EVERY - 1)) == 0) ? w->clock_fn : NULL;
-	time_clk = clk;
-	time_every = TIME_EVERY;
-	uint32_t t0 = clk ? clk() : 0, t1;
-	if (w->state_dirty || cached_w != w || cached_frame != f) {
-		drawState(w, &cached_d);
-		xformInit(w, l, &cached_x);
-		fbNote(w, f, &cached_d);
-		cached_frame = f;
-		cached_x.tex_w = cached_x.tex_h = 1.0f;
-		cached_x.fbk_u = cached_x.fbk_v = 1.0f;
-		int rt = -1;
-		uint32_t taddr = 0;
-		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
-			// A framebuffer drawn before: its rendering, texel coordinates scaled from the texture to it
-			taddr = ((reg(w, GE_CMD_TEXADDR0) & 0x00FFFFF0u) | ((reg(w, GE_CMD_TEXBUFWIDTH0) << 8) & 0x0F000000u)) & 0x0FFFFFFFu;
-			uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF;
-			if (taddr >= 0x04000000u && taddr < 0x04800000u && tfmt <= 3)
-				rt = fbFind(taddr & 0x001FFFFFu);
-			if (rt >= 0 && (!fbreg[rt].w || !fbreg[rt].h))
-				rt = -1;
-		}
-		diagDraw(w, f, &cached_d, taddr, rt);
-		if (rt >= 0) {
-			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
-			float tw = (float)(1u << (size & 0xF)), th = (float)(1u << ((size >> 8) & 0xF));
-			float kx = tw / fbreg[rt].w, ky = th / fbreg[rt].h;
-			cached_d.texture = 0;
-			cached_d.fbtex = fbreg[rt].fb + 1;
-			cached_x.tex_w = 1.0f / fbreg[rt].w;
-			cached_x.tex_h = 1.0f / fbreg[rt].h;
-			cached_x.fbk_u = kx;
-			cached_x.fbk_v = ky;
-			cached_x.uscale *= kx;
-			cached_x.uoff *= kx;
-			cached_x.vscale *= ky;
-			cached_x.voff *= ky;
-		} else if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
-			if (clk) {
-				t1 = clk();
-				f->us_state += (t1 - t0) * TIME_EVERY;
-				t0 = t1;
-			}
-			cached_d.texture = drawTexture(w);
-			if (clk) {
-				t1 = clk();
-				f->us_texture += (t1 - t0) * TIME_EVERY;
-				t0 = t1;
-			}
-			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
-			cached_x.tex_w = 1.0f / (float)(1u << (size & 0xF));
-			cached_x.tex_h = 1.0f / (float)(1u << ((size >> 8) & 0xF));
-		}
-		cached_w = w;
-		w->state_dirty = 0;
-		uni_valid = 0;
-		f->state_builds++;
-	}
-	if (clk) {
-		t1 = clk();
-		f->us_state += (t1 - t0) * TIME_EVERY;
-		t0 = t1;
-	}
-	if ((cached_d.flags & GE_SGX_DRAW_TEXTURED) && cached_d.texture < 0) {
-		f->skipped_other++;
-		return;
-	}
-
-	GeSgxDraw d = cached_d;
-	const Xform *xp = &cached_x;
-
-	// Output indices per input vertex, at most
-	uint32_t nidx;
-	switch (type) {
-		case GE_PRIM_POINTS: d.prim = GE_SGX_DRAW_POINTS; nidx = count; break;
-		case GE_PRIM_LINES: d.prim = GE_SGX_DRAW_LINES; nidx = count; break;
-		case GE_PRIM_LINE_STRIP: d.prim = GE_SGX_DRAW_LINES; nidx = count * 2; break;
-		case GE_PRIM_TRIANGLES: d.prim = GE_SGX_DRAW_TRIANGLES; nidx = count; break;
-		case GE_PRIM_TRIANGLE_STRIP:
-		case GE_PRIM_TRIANGLE_FAN: d.prim = GE_SGX_DRAW_TRIANGLES; nidx = count * 3; break;
-		case GE_PRIM_RECTANGLES: d.prim = GE_SGX_DRAW_TRIANGLES; nidx = count * 3; break;
-		default:
-			f->skipped_other++;
-			return;
-	}
-	uint32_t nverts_max = type == GE_PRIM_RECTANGLES ? count * 2 : count;
-	if (nverts_max > GE_SGX_MAX_DRAW_VERTICES) {
-		f->skipped_other++;
-		return;
-	}
-
-	if (f->nvertices + nverts_max > f->max_vertices || f->nindices + nidx > f->max_indices || f->ndraws >= f->max_draws) {
-		f->skipped_other++;
-		return;
-	}
-
-	// Which vertex each primitive vertex is
-	uint32_t i;
-	uint32_t imin = 0, imax = count - 1;
-	if (l->index_size) {
-		uint32_t bytes = count * l->index_size;
-		static uint8_t raw[65536 * 4];
-		if (!geSgxRead(w, w->iaddr, raw, bytes)) {
-			f->skipped_other++;
-			return;
-		}
-		imin = 0xFFFFFFFFu;
-		imax = 0;
-		for (i = 0; i < count; i++) {
-			uint32_t v;
-			switch (l->index_size) {
-				case 1: v = raw[i]; break;
-				case 2: { uint16_t s; memcpy(&s, raw + i * 2, 2); v = s; break; }
-				default: memcpy(&v, raw + i * 4, 4); break;
-			}
-			prim_index[i] = v;
-			if (v < imin) imin = v;
-			if (v > imax) imax = v;
-		}
-	} else {
-		for (i = 0; i < count; i++)
-			prim_index[i] = i;
-	}
-	if (clk)
-		f->us_vindex += (clk() - t0) * TIME_EVERY;
-
-	uint32_t vstart = f->nvertices, istart = f->nindices;
-	GeSgxVertex *vout = &f->vertices[vstart];
-	uint16_t *iout = &f->indices[istart];
-	uint32_t nv = 0, ni = 0;
-	uint32_t t_vert = 0;
-
-	// The vertex data: the range of a non-indexed or compact indexed primitive at once
-	uint32_t range = imax - imin + 1;
-	int compact = l->index_size && range <= count;
-
-	/*
-		GPU transform: the vertex range is copied as it is into the raw arena,
-		the vertex program decodes and transforms it. Indices scattered over a
-		big vertex buffer: only the vertices they use are gathered. Sprites,
-		morphing and 32 bit indices stay on the CPU path.
-	*/
-	/*
-		Diagnostics (traced frames): the depth of the first vertex of a few
-		3D draws with the depth test and a scissor smaller than the screen
-		(the minimap, drawn behind a mask written into the depth buffer),
-		past the trace's line limit
-	*/
-	if (w->trace && !xp->through && trace_depth_lines < 12 && count && (reg(w, GE_CMD_ZTESTENABLE) & 1)) {
-		uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
-		if ((s1 & 0xFFFFF) != 0 || (s2 & 0x3FF) < 479 || ((s2 >> 10) & 0x3FF) < 271) {
-			GeSgxVertex tv;
-			bulk_count = 0;
-			if (vertexOut(w, xp, prim_index[0], &tv)) {
-				trace_depth_lines++;
-				char line[200];
-				int n = snprintf(line, sizeof(line), "GeSgx T: depth: draw %u, first vertex z %.1f w %.4f -> %.1f | viewport z %.1f %.1f | minz %u maxz %u\n",
-					(unsigned)f->ndraws, tv.z * 65535.0f, tv.w, tv.w != 0.0f ? tv.z / tv.w * 65535.0f : 0.0f,
-					xp->vp_z[0] * 65535.0f, xp->vp_z[1] * 65535.0f, (unsigned)(reg(w, 0xD6) & 0xFFFF), (unsigned)(reg(w, 0xD7) & 0xFFFF));
-				if (n > 0 && n < (int)sizeof(line)) {
-					vtraceAdd(line, (uint32_t)n);
+#define ADD(k) do { if (n < max) keys[n] = (k); n++; } while (0)
+	ADD(GE_SGX_SHADER_VERTEX);
+	// GPU transform: every attribute combination, with and without lighting
+	{
+		uint32_t v, wc, lit;
+		for (lit = 0; lit < 2; lit++)
+			for (wc = 0; wc < 3; wc++)
+				for (v = 0; v < 8; v++) {
+					uint32_t k = GE_SGX_VS_BASE | v | (wc == 1 ? GE_SGX_VS_W4 : wc == 2 ? GE_SGX_VS_W8 : 0) | (lit ? GE_SGX_VS_LIGHT : 0);
+					ADD(k);
+					if (v & GE_SGX_VS_COLOR)
+						ADD((k & ~GE_SGX_VS_COLOR) | GE_SGX_VS_COLOR16);
 				}
-			}
-		}
 	}
-
-	/*
-		Diagnostics (traced frames): the first three vertices of each 3D draw
-		as the CPU transform makes them (pixels, depth, w, colour, fog), the
-		GPU path's draws included: what the trace of the renderer cannot know
-		of them (The 3rd Birthday's HUD and fog, drawn but not seen)
-	*/
-	if (w->trace && !xp->through && trace_vertex_lines < 360 && count) {
-		char line[400];
-		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X |", (unsigned)f->ndraws, (unsigned)type,
-			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF));
-		uint32_t k;
-		bulk_count = 0;
-		for (k = 0; k < 3 && k < count && n > 0 && n < (int)sizeof(line) - 100; k++) {
-			GeSgxVertex tv;
-			if (!vertexOut(w, xp, prim_index[k], &tv)) {
-				n += snprintf(line + n, sizeof(line) - n, " -");
-				continue;
-			}
-			float iw = tv.w != 0.0f ? 1.0f / tv.w : 0.0f;
-			n += snprintf(line + n, sizeof(line) - n, " %.1f,%.1f z %.0f w %.3g c %08X f %.2f uv %.3f,%.3f |", tv.x * iw, tv.y * iw,
-				tv.z * iw * 65535.0f, tv.w, (unsigned)tv.color, tv.fog, tv.u, tv.v);
-		}
-		if (n > 0 && n < (int)sizeof(line) - 1) {
-			line[n++] = '\n';
-			line[n] = '\0';
-			{
-				vtraceAdd(line, (uint32_t)n);
-				trace_vertex_lines++;
-			}
-		}
-	}
-
-	int gpu = 0;
-	uint32_t raw_off = 0;
-	if (w->gpu_transform && f->raw && !xp->through) {
-		int why = -1;
-		if (type == GE_PRIM_RECTANGLES)
-			why = GE_SGX_CPU_SPRITES;
-		else if (!gpuLayout(w, l))
-			why = GE_SGX_CPU_LAYOUT;
-		else if (!timedUniforms(w, f, l, xp, clk, TIME_EVERY))
-			why = GE_SGX_CPU_FULL;
-		else if (range <= GE_SGX_MAX_DRAW_VERTICES && directVertices(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
-			// The GPU reads the PSP's memory: nothing to copy
-			gpu = 2;
-			for (i = 0; i < count; i++)
-				prim_index[i] -= imin;
-			nv = range;
-		} else if (range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size <= GPU_MAX_RANGE_BYTES &&
-		         (!l->index_size || range <= 2 * count + 16)) {
-			if (rawCopy(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
-				gpu = 1;
-				for (i = 0; i < count; i++)
-					prim_index[i] -= imin;
-				nv = range;
-			} else {
-				why = GE_SGX_CPU_FULL;
-			}
-		} else if (rawGather(w, f, l, count, &raw_off, &nv)) {
-			gpu = 1;
-		} else {
-			why = GE_SGX_CPU_FULL;
-		}
-		if (why >= 0)
-			f->cpu_reason[why]++;
-	}
-
-	bulk_count = 0;
-	if (gpu)
-		;
-	else if (!l->index_size)
-		bulkLoad(w, l, 0, count);
-	else if (compact)
-		bulkLoad(w, l, imin, range);
-
-	if (gpu) {
-		// Indices only (below)
-	} else if (type == GE_PRIM_RECTANGLES) {
-		// Sprites: two corners each, screen aligned (3D ones after the projection)
-		for (i = 0; i + 1 < count; i += 2) {
-			GeSgxVertex a, b;
-			if (!vertexOut(w, xp, prim_index[i], &a) || !vertexOut(w, xp, prim_index[i + 1], &b))
-				goto fail;
-			if (!xp->through) {
-				if (a.w <= 0.0f || b.w <= 0.0f)
-					continue;
-				float ia = 1.0f / a.w, ib = 1.0f / b.w;
-				a.x *= ia; a.y *= ia; a.z *= ia; a.w = 1.0f;
-				b.x *= ib; b.y *= ib; b.z *= ib; b.w = 1.0f;
-			}
-			// Corners: positions and texture coordinates of the two vertices,
-			// colour, depth and fog of the second
-			GeSgxVertex *c = &vout[nv];
-			c[0] = b; c[0].x = a.x; c[0].y = a.y; c[0].u = a.u; c[0].v = a.v;
-			c[1] = b; c[1].y = a.y; c[1].v = a.v;
-			c[2] = b; c[2].x = a.x; c[2].u = a.u;
-			c[3] = b;
-			iout[ni++] = (uint16_t)(nv + 0);
-			iout[ni++] = (uint16_t)(nv + 1);
-			iout[ni++] = (uint16_t)(nv + 2);
-			iout[ni++] = (uint16_t)(nv + 1);
-			iout[ni++] = (uint16_t)(nv + 3);
-			iout[ni++] = (uint16_t)(nv + 2);
-			nv += 4;
-		}
-	}
-	if (gpu || type != GE_PRIM_RECTANGLES) {
-		// Local vertex numbers: the compact index range, or one vertex per index
-		if (gpu) {
-			// prim_index is already local
-		} else if (compact) {
-			for (i = 0; i < range; i++) {
-				if (!vertexOut(w, xp, imin + i, &vout[i]))
-					goto fail;
-			}
-			nv = range;
-			for (i = 0; i < count; i++)
-				prim_index[i] -= imin;
-		} else {
-			for (i = 0; i < count; i++) {
-				if (!vertexOut(w, xp, prim_index[i], &vout[i]))
-					goto fail;
-				prim_index[i] = i;
-			}
-			nv = count;
-		}
-		const uint32_t *s = prim_index;
-		if (clk) {
-			t1 = clk();
-			t_vert = t1 - t0;
-			t0 = t1;
-		}
-
-		switch (type) {
-			case GE_PRIM_POINTS:
-				for (i = 0; i < count; i++)
-					iout[ni++] = (uint16_t)s[i];
-				break;
-			case GE_PRIM_LINES:
-				for (i = 0; i + 1 < count; i += 2) {
-					iout[ni++] = (uint16_t)s[i];
-					iout[ni++] = (uint16_t)s[i + 1];
-				}
-				break;
-			case GE_PRIM_LINE_STRIP:
-				for (i = 0; i + 1 < count; i++) {
-					iout[ni++] = (uint16_t)s[i];
-					iout[ni++] = (uint16_t)s[i + 1];
-				}
-				break;
-			case GE_PRIM_TRIANGLES:
-				for (i = 0; i + 2 < count; i += 3) {
-					iout[ni++] = (uint16_t)s[i];
-					iout[ni++] = (uint16_t)s[i + 1];
-					iout[ni++] = (uint16_t)s[i + 2];
-				}
-				break;
-			case GE_PRIM_TRIANGLE_STRIP:
-				for (i = 0; i + 2 < count; i++) {
-					uint32_t a = s[i], b = s[i + 1], c = s[i + 2];
-					if (a == b || b == c || a == c)
-						continue; // degenerate (strip joints)
-					if (i & 1) {
-						uint32_t t = a;
-						a = b;
-						b = t;
+	ADD(1u << 10); // clear
+	// alpha test: off (8), or one of the functions but ALWAYS (= off). Plain ints: with an
+	// int8_t -1 for "off" the app's build made keys like 0xFFFFFFC0 (and missed the real ones)
+	static const int atests[8] = { 8, 0, 2, 3, 4, 5, 6, 7 };
+	for (fog = 0; fog < 2; fog++)
+	for (textured = 0; textured < 2; textured++) {
+		for (tfunc = 0; tfunc < (textured ? 5u : 1u); tfunc++) {
+			for (tcc = 0; tcc < (textured ? 2u : 1u); tcc++) {
+				for (dbl = 0; dbl < 2; dbl++) {
+					for (atest = 0; atest < 8; atest++) {
+						uint32_t key = fog << 11;
+						if (textured)
+							key |= 1 | (tfunc << 1) | (tcc << 4);
+						if (dbl)
+							key |= 1 << 5;
+						if (atests[atest] < 8)
+							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
+						ADD(key);
+						ADD(key | (1u << 12)); // with the exact scissor
 					}
-					iout[ni++] = (uint16_t)a;
-					iout[ni++] = (uint16_t)b;
-					iout[ni++] = (uint16_t)c;
-				}
-				break;
-			case GE_PRIM_TRIANGLE_FAN:
-				for (i = 1; i + 1 < count; i++) {
-					iout[ni++] = (uint16_t)s[0];
-					iout[ni++] = (uint16_t)s[i];
-					iout[ni++] = (uint16_t)s[i + 1];
-				}
-				break;
-		}
-	}
-
-	if (ni == 0 || nv == 0)
-		return;
-
-	// A clear of the stencil: to the alpha of its (CPU built) vertices
-	if ((d.flags & GE_SGX_DRAW_CLEAR) && (d.flags & GE_SGX_DRAW_WRITE_ALPHA) && !gpu)
-		d.sref = (uint8_t)(vout[0].color >> 24);
-
-	if (!gpu) {
-		/*
-			Lines and points cover the PSP pixel at their coordinates: its
-			centre is half a pixel on (one 960x544 pixel). Without it a line at
-			y = 0 was half off the screen (Persona 2's bar over the town map
-			lost its top row) and lines of rows overlapped by one pixel.
-		*/
-		if (d.prim == GE_SGX_DRAW_POINTS) {
-			for (i = 0; i < nv; i++) {
-				vout[i].x += vout[i].w * (GE_SGX_SCALE * 0.5f);
-				vout[i].y += vout[i].w * (GE_SGX_SCALE * 0.5f);
-			}
-		} else if (d.prim == GE_SGX_DRAW_LINES) {
-			/*
-				A line across its minor axis only: along it, it runs from its
-				first pixel's edge (moved there too, the first 960x544 column of
-				Persona 2's rows was left out). Vertices shared by two lines (strips,
-				indices) move with the first.
-			*/
-			static uint8_t moved[GE_SGX_MAX_DRAW_VERTICES];
-			memset(moved, 0, nv);
-			for (i = 0; i + 1 < ni; i += 2) {
-				GeSgxVertex *a = &vout[iout[i]], *b = &vout[iout[i + 1]];
-				float dx = fabsf(b->x / b->w - a->x / a->w), dy = fabsf(b->y / b->w - a->y / a->w);
-				int k;
-				for (k = 0; k < 2; k++) {
-					uint16_t vi = iout[i + k];
-					if (vi >= nv || moved[vi])
-						continue;
-					moved[vi] = 1;
-					GeSgxVertex *v = &vout[vi];
-					if (dx >= dy)
-						v->y += v->w * (GE_SGX_SCALE * 0.5f);
-					else
-						v->x += v->w * (GE_SGX_SCALE * 0.5f);
 				}
 			}
 		}
-		f->nvertices = vstart + nv;
-		f->vertices_built += nv;
 	}
-	f->nindices = istart + ni;
-	if (clk) {
-		t1 = clk();
-		if (type == GE_PRIM_RECTANGLES)
-			t_vert += t1 - t0; // corners and indices together
-		else
-			f->us_indices += (t1 - t0) * TIME_EVERY;
-		f->us_vertices += t_vert * TIME_EVERY;
-	}
-	if (!xp->through)
-		f->draws_3d++;
-
-	if (gpu) {
-		f->prims_gpu++;
-		d.direct = gpu == 2;
-		d.gpu = 1;
-		d.vkey = (uint16_t)gpu_vkey;
-		d.vtype = reg(w, GE_CMD_VERTEXTYPE);
-		d.ucommon = gpu_ucommon;
-		d.uobject = gpu_uobject;
-
-		// The same vertex buffer as the previous draw: its indices continue from that base
-		if (f->ndraws > 0) {
-			GeSgxDraw *p = &f->draws[f->ndraws - 1];
-			if (p->gpu && p->direct == d.direct && p->first + p->count == istart && sameState(p, &d) && p->vtype == d.vtype &&
-			    p->ucommon == d.ucommon && p->uobject == d.uobject && raw_off >= p->base &&
-			    (raw_off - p->base) % l->size == 0 && (raw_off - p->base) / l->size + nv <= GE_SGX_MAX_DRAW_VERTICES) {
-				uint16_t delta = (uint16_t)((raw_off - p->base) / l->size);
-				if (delta) {
-					for (i = 0; i < ni; i++)
-						iout[i] = (uint16_t)(iout[i] + delta);
-				}
-				p->count += ni;
-				return;
-			}
-		}
-		d.base = raw_off;
-		d.first = istart;
-		d.count = ni;
-		f->draws[f->ndraws++] = d;
-		return;
-	}
-
-	// Lists of the same state follow each other: extend the previous draw
-	if (f->ndraws > 0) {
-		GeSgxDraw *p = &f->draws[f->ndraws - 1];
-		if (!p->gpu && p->first + p->count == istart && sameState(p, &d) && vstart + nv - p->base <= GE_SGX_MAX_DRAW_VERTICES) {
-			uint16_t delta = (uint16_t)(vstart - p->base);
-			if (delta) {
-				for (i = 0; i < ni; i++)
-					iout[i] = (uint16_t)(iout[i] + delta);
-			}
-			p->count += ni;
-			return;
-		}
-	}
-
-	d.base = vstart;
-	d.first = istart;
-	d.count = ni;
-	f->draws[f->ndraws++] = d;
-	return;
-
-fail:
-	f->skipped_other++;
+#undef ADD
+	return n;
 }
 
-void geSgxBuildLoadClut(GeSgxWalker *w, uint32_t data) {
-	uint32_t bytes = (data & 0x3F) * 32;
-	if (bytes > GE_SGX_CLUT_BYTES)
-		bytes = GE_SGX_CLUT_BYTES;
-	w->clut_addr = (reg(w, GE_CMD_CLUTADDR) & 0x00FFFFF0u) | ((reg(w, GE_CMD_CLUTADDRUPPER) << 8) & 0x0F000000u);
-	w->clut_load_bytes = bytes;
-	w->clut_read = 0;
+void geSgxCgPath(uint32_t key, char *path, int size) {
+	// The GPU transform's vertex programs have a version of their own (their uniforms changed with range culling)
+	int version = (key & 0xF000u) == GE_SGX_VS_BASE ? GE_SGX_CG_VS_VERSION : GE_SGX_CG_VERSION;
+	snprintf(path, size, GE_SGX_CG_DIR "/v%d_%04x.gxp", version, (unsigned)key);
 }
 
-// The CLUT of the last LOADCLUT, read the first time a draw uses it
-/*
-	Games load the same CLUTs again and again (each object; Need for Speed
-	Carbon has one per texture, hundreds a frame): within a frame one read and
-	hash per CLUT address is enough. A table by address, one entry per slot.
-*/
-#define CLUT_CACHE 256
-static struct {
-	const GeSgxWalker *w;
-	uint32_t addr, bytes, flips, hash;
-	uint8_t data[GE_SGX_CLUT_BYTES];
-} clut_cache[CLUT_CACHE];
+SceGxmProgram *geSgxCgLoadCached(uint32_t key) {
+	char path[96];
+	geSgxCgPath(key, path, sizeof(path));
 
-static void readClut(GeSgxWalker *w) {
-	if (w->clut_read)
-		return;
-	w->clut_read = 1;
-	int i = (int)(((w->clut_addr >> 4) ^ (w->clut_addr >> 12)) & (CLUT_CACHE - 1));
-	if (clut_cache[i].w == w && clut_cache[i].flips == w->flips && clut_cache[i].addr == w->clut_addr &&
-	    clut_cache[i].bytes == w->clut_load_bytes && w->clut_load_bytes) {
-		memcpy(w->clut, clut_cache[i].data, w->clut_load_bytes);
-		w->clut_bytes = w->clut_load_bytes;
-		w->clut_hash = clut_cache[i].hash;
-		return;
+	SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return NULL;
+
+	SceIoStat st;
+	int size = 0;
+	if (sceIoGetstatByFd(fd, &st) >= 0)
+		size = (int)st.st_size;
+
+	SceGxmProgram *program = NULL;
+	if (size > 0 && size < 256 * 1024) {
+		program = (SceGxmProgram *)malloc(size);
+		if (program && (sceIoRead(fd, program, size) != size || sceGxmProgramCheck(program) < 0)) {
+			free(program);
+			program = NULL;
+		}
 	}
-	if (w->clut_load_bytes == 0 || !geSgxRead(w, w->clut_addr, w->clut, w->clut_load_bytes)) {
-		w->clut_bytes = 0;
-		w->clut_hash = 0;
-		return;
-	}
-	w->clut_bytes = w->clut_load_bytes;
-	w->clut_hash = geSgxHash(w->clut, w->clut_bytes);
-	clut_cache[i].w = w;
-	clut_cache[i].addr = w->clut_addr;
-	clut_cache[i].bytes = w->clut_bytes;
-	clut_cache[i].flips = w->flips;
-	clut_cache[i].hash = w->clut_hash;
-	memcpy(clut_cache[i].data, w->clut, w->clut_bytes);
+	sceIoClose(fd);
+	return program;
 }
 
-void geSgxBuildTransfer(GeSgxWalker *w) {
-	uint32_t src = ((reg(w, GE_CMD_TRANSFERSRCW) & 0x00FF0000u) << 8) | reg(w, GE_CMD_TRANSFERSRC);
-	uint32_t dst = ((reg(w, GE_CMD_TRANSFERDSTW) & 0x00FF0000u) << 8) | reg(w, GE_CMD_TRANSFERDST);
-	uint32_t size = reg(w, GE_CMD_TRANSFERSIZE);
-	uint32_t tw = (size & 0x3FF) + 1, th = ((size >> 10) & 0x3FF) + 1;
-
-	src &= 0x0FFFFFFF;
-	dst &= 0x0FFFFFFF;
-
-	if ((src >= 0x04000000u && src < 0x04800000u) || (dst >= 0x04000000u && dst < 0x04800000u)) {
-		uint32_t sp = reg(w, GE_CMD_TRANSFERSRCPOS), dp = reg(w, GE_CMD_TRANSFERDSTPOS);
-		diag(w, 1, 3u | (size << 4), src, dst ^ (sp * 31u) ^ (dp * 977u),
-			"transfer %X bufw %u at %u,%u -> %X bufw %u at %u,%u, %ux%u, %u bytes per pixel | draw %u",
-			(unsigned)src, (unsigned)(reg(w, GE_CMD_TRANSFERSRCW) & 0x7FF), (unsigned)(sp & 0x3FF), (unsigned)((sp >> 10) & 0x3FF),
-			(unsigned)dst, (unsigned)(reg(w, GE_CMD_TRANSFERDSTW) & 0x7FF), (unsigned)(dp & 0x3FF), (unsigned)((dp >> 10) & 0x3FF),
-			(unsigned)tw, (unsigned)th, (reg(w, GE_CMD_TRANSFERSTART) & 1) ? 4u : 2u, w->frame ? (unsigned)w->frame->ndraws : 0u);
-	}
-
-	/*
-		Into VRAM (games bring textures this way, Need for Speed Carbon while it
-		races): done on the Vita side's copy of VRAM now, walked or not. The
-		PSP's GE does it when it gets to it, after the textures were read here;
-		the copy of VRAM at the flip would only bring it for the next frame.
-	*/
-	if (w->vram_copy_fn && dst >= 0x04000000u && dst < 0x04800000u) {
-		uint32_t bpp = (reg(w, GE_CMD_TRANSFERSTART) & 1) ? 4u : 2u;
-		uint32_t sstride = (reg(w, GE_CMD_TRANSFERSRCW) & 0x7F8u) * bpp, dstride = (reg(w, GE_CMD_TRANSFERDSTW) & 0x7F8u) * bpp;
-		uint32_t sp = reg(w, GE_CMD_TRANSFERSRCPOS), dp = reg(w, GE_CMD_TRANSFERDSTPOS);
-		uint32_t s0 = src + ((sp >> 10) & 0x3FF) * sstride + (sp & 0x3FF) * bpp;
-		uint32_t d0 = dst + ((dp >> 10) & 0x3FF) * dstride + (dp & 0x3FF) * bpp;
-		if (sstride && dstride)
-			w->vram_copy_fn(d0, s0, tw * bpp, th, dstride, sstride);
-		w->state_dirty = 1; // the texture of the next draw is looked up again
-	}
-
-	if (!w->frame)
+void geSgxCgSave(uint32_t key, const SceGxmProgram *program, uint32_t size) {
+	char path[96];
+	sceIoMkdir("ux0:data/adrenaline", 0777);
+	sceIoMkdir(GE_SGX_CG_DIR, 0777);
+	geSgxCgPath(key, path, sizeof(path));
+	SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	if (fd < 0)
 		return;
+	int ok = sceIoWrite(fd, program, size) == (int)size;
+	sceIoClose(fd);
+	if (!ok)
+		sceIoRemove(path);
+}
 
-	// A copy of (most of) a frame from one VRAM buffer into another
-	if (tw * th < 400 * 200 || src < 0x04000000 || src >= 0x04800000 || dst < 0x04000000 || dst >= 0x04800000)
-		return;
+static int findExport(uint32_t nid, void *func) {
+	uintptr_t addr = 0;
+	if (taiGetModuleExportFunc("SceShaccCg", SHACCCG_LIB_NID, nid, &addr) < 0 || !addr)
+		return 0;
+	*(uintptr_t *)func = addr;
+	return 1;
+}
 
-	if (w->naliases < GE_SGX_MAX_ALIASES) {
-		w->aliases[w->naliases].src = src & 0x001FFFFF;
-		w->aliases[w->naliases].dst = dst & 0x001FFFFF;
-		w->naliases++;
+int geSgxCgInit(SceUID (* load_fn)(const char *path), void *(* alloc)(unsigned int), void (* release)(void *)) {
+	static const char *paths[] = {
+		"ur0:data/libshacccg.suprx",
+		"ur0:data/external/libshacccg.suprx",
+	};
+
+	int i;
+	cg.modid = -1;
+	for (i = 0; i < 2 && cg.modid < 0; i++)
+		cg.modid = load_fn(paths[i]);
+	if (cg.modid < 0)
+		return cg.modid;
+
+	if (!findExport(0x3B58AFA0, &cg.InitializeCompileOptions) ||
+	    !findExport(0x66814F35, &cg.CompileProgram) ||
+	    !findExport(0x6F01D573, &cg.SetDefaultAllocator) ||
+	    !findExport(0xA8C2C1C8, &cg.InitializeCallbackList) ||
+	    !findExport(0xAA82EF0C, &cg.DestroyCompileOutput) ||
+	    !findExport(0x95F57A23, &cg.ReleaseCompiler)) {
+		sceKernelStopUnloadModule(cg.modid, 0, NULL, 0, NULL, NULL);
+		return -2;
 	}
+
+	cg.SetDefaultAllocator(alloc, release);
+	return 1;
+}
+
+void geSgxCgTerm(void) {
+	if (cg.ReleaseCompiler)
+		cg.ReleaseCompiler();
+	if (cg.modid >= 0)
+		sceKernelStopUnloadModule(cg.modid, 0, NULL, 0, NULL, NULL);
+	memset(&cg, 0, sizeof(cg));
+	cg.modid = -1;
+}
+
+static SceShaccCgSourceFile *openFile(const char *fileName, const SceShaccCgSourceLocation *includedFrom,
+	const SceShaccCgCompileOptions *compileOptions, const char **errorString) {
+	return &source_file;
+}
+
+SceGxmProgram *geSgxCgCompile(uint32_t key, uint32_t *size, void (* log)(uint32_t key, int line, const char *msg)) {
+	static char src[8192];
+	int len = geSgxCgSource(key, src, sizeof(src));
+	if (len <= 0 || len >= (int)sizeof(src) || !cg.CompileProgram)
+		return NULL;
+
+	source_file.fileName = "<built-in>";
+	source_file.text = src;
+	source_file.size = len;
+
+	SceShaccCgCallbackList callbacks;
+	cg.InitializeCallbackList(&callbacks, SCE_SHACCCG_TRIVIAL);
+	callbacks.openFile = openFile;
+
+	SceShaccCgCompileOptions options;
+	cg.InitializeCompileOptions(&options);
+	options.mainSourceFile = source_file.fileName;
+	options.targetProfile = geSgxCgIsVertex(key) ? SCE_SHACCCG_PROFILE_VP : SCE_SHACCCG_PROFILE_FP;
+	options.entryFunctionName = "main";
+	options.useFx = 1;
+	options.locale = SCE_SHACCCG_ENGLISH;
+	options.optimizationLevel = 3;
+
+	const SceShaccCgCompileOutput *out = cg.CompileProgram(&options, &callbacks, 0);
+	SceGxmProgram *program = NULL;
+
+	if (out && out->programData && out->programSize > 0) {
+		program = (SceGxmProgram *)malloc(out->programSize);
+		if (program) {
+			memcpy(program, out->programData, out->programSize);
+			if (sceGxmProgramCheck(program) < 0) {
+				free(program);
+				program = NULL;
+			} else {
+				*size = out->programSize;
+			}
+		}
+	} else if (out && log) {
+		int i;
+		for (i = 0; i < out->diagnosticCount && i < 4; i++) {
+			const SceShaccCgDiagnosticMessage *m = &out->diagnostics[i];
+			log(key, m->location ? (int)m->location->lineNumber : -1, m->message ? m->message : "?");
+		}
+	}
+
+	if (out)
+		cg.DestroyCompileOutput(out);
+	return program;
 }
