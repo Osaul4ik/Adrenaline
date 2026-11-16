@@ -402,6 +402,45 @@ static void toGpu(const void *gpu, const void *src, uint32_t bytes) {
 }
 
 // Walker thread: a slot to build the next frame in (NULL: none free)
+/*
+	Diagnostics (traced frames): a list's top level as it is when the walker
+	is done with it and again at the flip. A game whose signal handlers
+	write commands into the list as the PSP's GE reaches them (The 3rd
+	Birthday's HUD is in none of the draws walked) changes it in between.
+*/
+typedef struct { uint32_t words, prims, calls, jumps, signals, nops, sum; } ListScan;
+
+static void scanList(uint32_t start, uint32_t end, ListScan *s, int log_calls) {
+	memset(s, 0, sizeof(*s));
+	start &= 0x0FFFFFFC;
+	end &= 0x0FFFFFFC;
+	if (end <= start || end - start > 1024 * 1024)
+		return;
+	const uint32_t *p = (const uint32_t *)geSgxPspPtr(start, end - start);
+	if (!p)
+		return;
+	uint32_t i, n = (end - start) / 4, logged = 0;
+	for (i = 0; i < n; i++) {
+		uint32_t op = p[i], cmd = op >> 24;
+		s->words++;
+		s->sum = s->sum * 31u + op;
+		if (cmd == 0x04) s->prims++;
+		else if (cmd == 0x0A) {
+			s->calls++;
+			if (log_calls && logged < 24) {
+				logged++;
+				GeSgxLog("GeSgx T: list scan: call at %X to %06X\n", (unsigned)(start + i * 4), (unsigned)(op & 0xFFFFFF));
+			}
+		}
+		else if (cmd == 0x08) s->jumps++;
+		else if (cmd == 0x0E) s->signals++;
+		else if (op == 0) s->nops++;
+	}
+}
+
+static ListScan scan_done;
+static uint32_t scan_done_count = 0, scan_start = 0, scan_end = 0;
+
 static void acquireSlot(void) {
 	int i;
 	building = NULL;
@@ -1070,16 +1109,45 @@ static int GeSgxThread(SceSize args, void *argp) {
 				case GE_SGX_EVENT_LIST:
 					geSgxWalkerList(&walker, (int)e->a, e->b, e->c, (int)e->d);
 					geSgxWalkerRun(&walker);
+					if (walker.trace && walker.done_count != scan_done_count) {
+						scan_done_count = walker.done_count;
+						scan_start = walker.done_start;
+						scan_end = walker.done_end + 4;
+						scanList(scan_start, scan_end, &scan_done, 0);
+					}
 					break;
 				case GE_SGX_EVENT_STALL:
 					geSgxWalkerStall(&walker, (int)e->a, e->b);
 					geSgxWalkerRun(&walker);
+					if (walker.trace && walker.done_count != scan_done_count) {
+						scan_done_count = walker.done_count;
+						scan_start = walker.done_start;
+						scan_end = walker.done_end + 4;
+						scanList(scan_start, scan_end, &scan_done, 0);
+					}
 					break;
 				case GE_SGX_EVENT_DEQUEUE:
 					geSgxWalkerDequeue(&walker, (int)e->a);
 					geSgxWalkerRun(&walker);
+					if (walker.trace && walker.done_count != scan_done_count) {
+						scan_done_count = walker.done_count;
+						scan_start = walker.done_start;
+						scan_end = walker.done_end + 4;
+						scanList(scan_start, scan_end, &scan_done, 0);
+					}
 					break;
 				case GE_SGX_EVENT_FLIP: {
+					if (walker.trace && scan_end) {
+						ListScan now;
+						scanList(scan_start, scan_end, &now, 1);
+						GeSgxLog("GeSgx T: list scan %X-%X: walker's top level prims %u calls %u signals %u | when done %u words, prims %u calls %u jumps %u signals %u nops %u sum %08X | "
+							"at the flip prims %u calls %u jumps %u signals %u nops %u sum %08X\n", (unsigned)scan_start, (unsigned)scan_end,
+							(unsigned)walker.done_prims, (unsigned)walker.done_calls, (unsigned)walker.done_signals,
+							(unsigned)scan_done.words, (unsigned)scan_done.prims, (unsigned)scan_done.calls, (unsigned)scan_done.jumps,
+							(unsigned)scan_done.signals, (unsigned)scan_done.nops, (unsigned)scan_done.sum, (unsigned)now.prims, (unsigned)now.calls,
+							(unsigned)now.jumps, (unsigned)now.signals, (unsigned)now.nops, (unsigned)now.sum);
+						scan_end = 0;
+					}
 					geSgxBuildTraceNote(&walker, "flip: %X (%d lists queued)", (unsigned)e->a, walker.count);
 					for (int q = 0; q < walker.count && q < 4; q++)
 						geSgxBuildTraceNote(&walker, "flip: list qid %X from %X at %X, stall %X, depth %d", (unsigned)walker.lists[q].qid,

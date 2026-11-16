@@ -181,6 +181,10 @@ typedef struct {
 		int qid;
 		uint32_t start, pc, depth;
 	} last_bad;
+	// The last list walked to its end (diagnostics): first and END's address, a count of them
+	uint32_t done_start, done_end, done_count;
+	uint32_t top_prims, top_calls, top_signals; // the list's top level as walked (traced frames)
+	uint32_t done_prims, done_calls, done_signals;
 
 	GeSgxRect rects[GE_SGX_MAX_RECTS];
 	int nrects;

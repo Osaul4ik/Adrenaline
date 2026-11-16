@@ -579,6 +579,8 @@ special:
 					w->iaddr = relativeAddress(w, data);
 					break;
 				case GE_CMD_PRIM:
+					if (list->depth == 0)
+						w->top_prims++;
 					prim(w, data);
 					break;
 				case GE_CMD_BEZIER:
@@ -589,6 +591,8 @@ special:
 					pc = relativeAddress(w, data & 0x00FFFFFC);
 					break;
 				case GE_CMD_CALL:
+					if (list->depth == 0)
+						w->top_calls++;
 					if (!push(list, pc, w->offset)) {
 						list->pc = cmd_pc;
 						goto out;
@@ -605,6 +609,8 @@ special:
 					res = WALK_FINISHED;
 					goto out;
 				case GE_CMD_SIGNAL:
+					if (list->depth == 0)
+						w->top_signals++;
 					list->pc = cmd_pc;
 					if (!signal(w, list, data))
 						goto out;
@@ -749,6 +755,8 @@ void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int
 
 	GeSgxList *l = &w->lists[at];
 	memset(l, 0, sizeof(*l));
+	if (at == 0)
+		w->top_prims = w->top_calls = w->top_signals = 0;
 	l->qid = qid;
 	l->pc = normalize(list) & ~3u;
 	l->start = l->pc;
@@ -788,8 +796,15 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			w->last_bad.pc = l->pc;
 			w->last_bad.depth = (uint32_t)l->depth;
 		}
-		else
+		else {
 			w->stats.lists++;
+			w->done_start = w->lists[0].start;
+			w->done_end = w->lists[0].pc;
+			w->done_count++;
+			w->done_prims = w->top_prims;
+			w->done_calls = w->top_calls;
+			w->done_signals = w->top_signals;
+		}
 		removeList(w, 0);
 	}
 }
