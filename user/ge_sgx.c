@@ -456,19 +456,27 @@ static void publishSlot(uint32_t top) {
 
 	static uint32_t big_frames = 0, trace_tries = 0;
 	static int trace_asked = 0;
-	if (walker.trace && building && walker.frame) {
-		if (building->data.ndraws >= 1000 || (trace_asked && building->data.ndraws)) {
+	/*
+		An asked trace ends with the next frame walked, built or not (a walker
+		behind walks frames without building them: the trace never ended)
+	*/
+	int walked_only = !(building && walker.frame);
+	if (walker.trace && ((building && walker.frame) || trace_asked)) {
+		uint32_t nd = walked_only ? 0 : building->data.ndraws;
+		if (nd >= 1000 || (trace_asked && (nd || (walked_only && walker.trace_lines > 1)))) {
 			// The renderer traces the same frame (once: a frame can be rendered again)
 			static uint32_t asked_seq = 0;
-			if (trace_asked)
+			if (trace_asked && !walked_only)
 				building->data.asked = ++asked_seq;
+			if (walked_only)
+				GeSgxLog("GeSgx T: (the walker was behind: this frame was walked, not built)\n");
 			trace_asked = 0;
 			walker.dump = 0;
 			uint32_t len;
 			const char *text = geSgxBuildTraceText(&len);
 			GeSgxLog("GeSgx T: begin (%u lines)\n", (unsigned)walker.trace_lines);
 			GeSgxLogText(text, len);
-			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)building->data.ndraws, (unsigned)fb,
+			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)nd, (unsigned)fb,
 				(unsigned)walker.naliases);
 			walker.trace = 0;
 		} else if (++trace_tries >= 600) {

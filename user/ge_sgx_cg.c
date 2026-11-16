@@ -102,14 +102,12 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	if (c.w > 0.0)\n		z = clamp(z, 0.0, c.w);\n");
 	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
 	/*
-		Range culling (PPSSPP's): a vertex off the PSP's screen space (0 to
-		4096, offset included) and not before the near plane makes the GE
-		drop its whole primitive. Its position becomes NaN, which drops it
-		here too (a particle by the camera was a triangle across the screen).
+		No range culling (PPSSPP's: a vertex off the 4096 screen space and
+		not before the near plane drops its primitive): the GE tests the
+		vertices after clipping at the near plane, a vertex shader cannot, and
+		big triangles crossing it (floors by the camera, in every game) were
+		dropped at the screen's edges.
 	*/
-	S("	float4 cr = uC[%d];\n	float iw = 1.0 / c.w;\n", GE_SGX_UC_CULL);
-	S("	if (!(c.z < -c.w) && (x * iw < cr.x || y * iw < cr.y || x * iw >= cr.z || y * iw >= cr.w || c.w < -1.0))\n"
-	  "		vPosition = uC[%d].xxxx;\n", GE_SGX_UC_CULL + 1);
 
 	// Texture coordinates
 	S("	float4 fl = uC[%d];\n", GE_SGX_UC_FLAGS);
