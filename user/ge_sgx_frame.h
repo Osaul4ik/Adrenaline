@@ -75,6 +75,7 @@ enum GeSgxDrawFlags {
 	GE_SGX_DRAW_WRITE_ALPHA  = 1 << 7, // clear mode: alpha (stencil) is written
 	GE_SGX_DRAW_WRITE_DEPTH  = 1 << 8, // depth is written
 	GE_SGX_DRAW_FOG          = 1 << 9, // fog (the vertices carry the factor)
+	GE_SGX_DRAW_FB_ALPHA     = 1 << 10, // the framebuffer has alpha (not 565): clears write it
 };
 
 enum GeSgxTexModes {

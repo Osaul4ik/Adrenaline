@@ -221,7 +221,9 @@ static uint32_t blendKey(const GeSgxDraw *d) {
 		uint32_t mask = 0;
 		if (d->flags & GE_SGX_DRAW_WRITE_COLOR)
 			mask |= SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
-		if (d->flags & GE_SGX_DRAW_WRITE_ALPHA)
+		// Alpha: the PSP's stencil, kept in the rendering's alpha for the blending with the destination alpha
+		// (Persona 2's glows: INVDSTALPHA after a clear to alpha 0); 565 framebuffers keep alpha 1
+		if ((d->flags & GE_SGX_DRAW_WRITE_ALPHA) && (d->flags & GE_SGX_DRAW_FB_ALPHA))
 			mask |= SCE_GXM_COLOR_MASK_A;
 		return 0x80000000u | mask;
 	}
@@ -277,9 +279,9 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 		return NULL;
 
 	/*
-		Alpha is never written: the target keeps the alpha 1 of its clear, so
-		it shows opaque (the PSP keeps the stencil there, which only matters
-		for DSTALPHA blending; that is not emulated yet).
+		Alpha (the PSP's stencil) is written by clears of framebuffers that
+		have it (blendKey), as the PSP does with the stencil test off; draws
+		never write it. The rendering is shown opaque whatever its alpha.
 	*/
 	SceGxmBlendInfo info;
 	memset(&info, 0, sizeof(info));
@@ -289,7 +291,7 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ONE;
 	info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ZERO;
 	if (blend & 0x80000000u) {
-		info.colorMask = blend & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B);
+		info.colorMask = blend & SCE_GXM_COLOR_MASK_ALL; // a clear: alpha too when it writes the stencil
 	} else {
 		if (blend & 0x40000000u) {
 			info.colorFunc = blend & 0xF;
@@ -312,7 +314,7 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 		fragments were not discarded or not tested: the mask wrote no depth
 		around the circle and the map showed outside it.
 	*/
-	if (!(info.colorMask & (SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B))) {
+	if (info.colorMask == SCE_GXM_COLOR_MASK_NONE) {
 		info.colorMask = SCE_GXM_COLOR_MASK_R | SCE_GXM_COLOR_MASK_G | SCE_GXM_COLOR_MASK_B;
 		info.colorFunc = info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
 		info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ZERO;

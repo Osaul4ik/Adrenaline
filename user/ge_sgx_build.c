@@ -950,6 +950,9 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 
 	d->fb = (((reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_FRAMEBUFPTR)) & 0x001FFFFFu;
 	d->texture = -1;
+	// A framebuffer with alpha (5551, 4444, 8888: not 565), its stencil
+	if ((reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3) != 0)
+		d->flags |= GE_SGX_DRAW_FB_ALPHA;
 }
 
 // Same state as the previous draw: one draw for both
