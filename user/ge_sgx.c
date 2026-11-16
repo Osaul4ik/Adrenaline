@@ -1081,6 +1081,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 					break;
 				case GE_SGX_EVENT_FLIP: {
 					geSgxBuildTraceNote(&walker, "flip: %X (%d lists queued)", (unsigned)e->a, walker.count);
+					for (int q = 0; q < walker.count && q < 4; q++)
+						geSgxBuildTraceNote(&walker, "flip: list qid %X from %X at %X, stall %X, depth %d", (unsigned)walker.lists[q].qid,
+							(unsigned)walker.lists[q].start, (unsigned)walker.lists[q].pc, (unsigned)walker.lists[q].stall, walker.lists[q].depth);
 					int nrects = geSgxWalkerFlip(&walker, e->a, rects, GE_SGX_FRAME_RECTS, &frame_stats);
 					if (walker.texture_fn) {
 						if (building && walker.frame) {

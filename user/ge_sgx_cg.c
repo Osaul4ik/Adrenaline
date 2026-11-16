@@ -99,7 +99,9 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	S("	float4 c = uC[0] * vp.x + uC[1] * vp.y + uC[2] * vp.z + uC[3];\n");
 	S("	float4 vpx = uC[%d], vpz = uC[%d];\n", GE_SGX_UC_VP, GE_SGX_UC_VPZ);
 	S("	float x = vpx.x * c.x + vpx.y * c.w;\n	float y = vpx.z * c.y + vpx.w * c.w;\n");
-	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	if (c.w > 0.0)\n		z = clamp(z, 0.0, c.w);\n");
+	// The depth clamp's sides (uC[CULL].xy: 1 clamps; the near plane's side is clipped by the GPU instead)
+	S("	float z = vpz.x * c.z + vpz.y * c.w;\n	float4 zc = uC[%d];\n	if (c.w > 0.0) {\n"
+	  "		if (zc.x > 0.5)\n			z = max(z, 0.0);\n		if (zc.y > 0.5)\n			z = min(z, c.w);\n	}\n", GE_SGX_UC_CULL);
 	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
 	/*
 		No range culling (PPSSPP's: a vertex off the 4096 screen space and

@@ -282,6 +282,7 @@ typedef struct {
 	float mvp[16];  // proj * view * world, 4x4 column-major
 	const GeSgxMatrices *m;
 	float vp_x[2], vp_y[2], vp_z[2]; // pixel = c[0] * clip + c[1] * w
+	int zclamp_lo, zclamp_hi;        // depth clamped at 0 / at 1 (not where the near plane clips)
 	float offx, offy;                // the drawing offset (PSP pixels): range culling
 	float uscale, vscale, uoff, voff;
 	// A framebuffer's rendering as the texture: the texture's part of it (generated coordinates times these)
@@ -408,6 +409,20 @@ static void xformInit(GeSgxWalker *w, const GeSgxVertexLayout *l, Xform *x) {
 	x->vp_y[1] = (freg(w, GE_CMD_VIEWPORTYCENTER) - offy) * GE_SGX_SCALE;
 	x->vp_z[0] = freg(w, GE_CMD_VIEWPORTZSCALE) * (1.0f / 65535.0f);
 	x->vp_z[1] = freg(w, GE_CMD_VIEWPORTZCENTER) * (1.0f / 65535.0f);
+	/*
+		The GE clips at the near plane (clip z = -w) when its clip is on
+		(CLIPENABLE, 0x1C), else it clamps the depth; it clamps it at the far
+		side. The GPU clips at depth 0 and 1: the side the near plane maps to
+		(depth center - scale: 1 for the usual PSP viewport, 0 for others) is
+		left unclamped, so geometry before the near plane is clipped there
+		(exact for viewports over the whole depth range). Clamped, it was
+		drawn at the nearest depth over everything (The 3rd Birthday's
+		corridor rails hidden by the wall by the camera).
+	*/
+	int clip = reg(w, 0x1Cu) & 1;
+	int near_hi = (x->vp_z[1] - x->vp_z[0]) > 0.5f;
+	x->zclamp_lo = !(clip && !near_hi);
+	x->zclamp_hi = !(clip && near_hi);
 
 	x->uscale = freg(w, GE_CMD_TEXSCALEU);
 	x->vscale = freg(w, GE_CMD_TEXSCALEV);
@@ -805,9 +820,9 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 	// The PSP clamps the depth instead of clipping at the far plane (and only
 	// clips at the near one): keep z inside 0..w, the GPU then clips at w = 0
 	if (cw > 0.0f) {
-		if (out->z < 0.0f)
+		if (out->z < 0.0f && x->zclamp_lo)
 			out->z = 0.0f;
-		else if (out->z > cw)
+		else if (out->z > cw && x->zclamp_hi)
 			out->z = cw;
 	}
 
@@ -1061,20 +1076,43 @@ static uint32_t nseen = 0;
 static uint32_t trace_fb_key = 0, trace_tex_key = 0;
 
 // The traced frame's lines, written to the log only if it is a frame of the race
-#define TRACE_BYTES (160 * 1024)
+#define TRACE_BYTES (224 * 1024)
 static char trace_text[TRACE_BYTES];
 static uint32_t trace_len = 0;
 
+/*
+	The depth and vertex lines in a buffer of their own (they filled the
+	trace's and the lists' and flips' lines after them were lost), put
+	after the others when the trace is written
+*/
+#define TRACE_RESERVE (128 * 1024)
+static char vtrace_text[TRACE_RESERVE];
+static uint32_t vtrace_len = 0;
+
+static void vtraceAdd(const char *line, uint32_t n) {
+	if (vtrace_len + n < TRACE_RESERVE) {
+		memcpy(vtrace_text + vtrace_len, line, n);
+		vtrace_len += n;
+	}
+}
+
 const char *geSgxBuildTraceText(uint32_t *len) {
+	// The main lines stop TRACE_RESERVE short of the end: room for these
+	if (vtrace_len && trace_len + vtrace_len < TRACE_BYTES) {
+		memcpy(trace_text + trace_len, vtrace_text, vtrace_len);
+		trace_len += vtrace_len;
+		trace_text[trace_len] = '\0';
+		vtrace_len = 0;
+	}
 	*len = trace_len;
 	return trace_text;
 }
 
 static uint32_t trace_depth_lines = 0, trace_vertex_lines = 0;
-#define TRACE_RESERVE (64 * 1024)
 
 void geSgxBuildTraceClear(GeSgxWalker *w) {
 	trace_len = 0;
+	vtrace_len = 0;
 	trace_depth_lines = 0;
 	trace_vertex_lines = 0;
 	w->trace_lines = 0;
@@ -1143,7 +1181,7 @@ static void traceLine(GeSgxWalker *w, const char *fmt, ...) {
 	vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 	w->trace_lines++;
-	// The last 64 KB kept for the depth and vertex lines (below)
+	// The last TRACE_RESERVE bytes kept for the depth and vertex lines (vtrace_text, put there at the end)
 	if (trace_len + TRACE_RESERVE >= TRACE_BYTES)
 		return;
 	int n = snprintf(trace_text + trace_len, TRACE_BYTES - TRACE_RESERVE - trace_len, "GeSgx T: %s\n", line);
@@ -1283,9 +1321,9 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 	set4(c[GE_SGX_UC_VP], x->vp_x[0], x->vp_x[1], x->vp_y[0], x->vp_y[1]);
 	set4(c[GE_SGX_UC_VPZ], x->vp_z[0], x->vp_z[1], x->fog1, x->fog2);
 	// Range culling: the screen (offset included) from 0 to 4096, in the program's pixels (offset taken, scaled)
-	set4(c[GE_SGX_UC_CULL], -x->offx * GE_SGX_SCALE, -x->offy * GE_SGX_SCALE, (4096.0f - x->offx) * GE_SGX_SCALE,
-		(4096.0f - x->offy) * GE_SGX_SCALE);
-	set4(c[GE_SGX_UC_CULL + 1], NAN, 0.0f, 0.0f, 0.0f);
+	// The depth clamp's sides (the near plane's side is clipped instead)
+	set4(c[GE_SGX_UC_CULL], x->zclamp_lo ? 1.0f : 0.0f, x->zclamp_hi ? 1.0f : 0.0f, 0.0f, 0.0f);
+	set4(c[GE_SGX_UC_CULL + 1], 0.0f, 0.0f, 0.0f, 0.0f);
 	set4(c[GE_SGX_UC_FLAGS], (float)x->uvgen, (float)x->uvproj, x->fog ? 1.0f : 0.0f, (x->lighting && x->reverse_normal) ? -1.0f : 1.0f);
 	uint32_t mc = x->material_color;
 	set4(c[GE_SGX_UC_MATAMB], (mc & 0xFF) / 255.0f, ((mc >> 8) & 0xFF) / 255.0f, ((mc >> 16) & 0xFF) / 255.0f, (mc >> 24) / 255.0f);
@@ -1662,9 +1700,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 				int n = snprintf(line, sizeof(line), "GeSgx T: depth: draw %u, first vertex z %.1f w %.4f -> %.1f | viewport z %.1f %.1f | minz %u maxz %u\n",
 					(unsigned)f->ndraws, tv.z * 65535.0f, tv.w, tv.w != 0.0f ? tv.z / tv.w * 65535.0f : 0.0f,
 					xp->vp_z[0] * 65535.0f, xp->vp_z[1] * 65535.0f, (unsigned)(reg(w, 0xD6) & 0xFFFF), (unsigned)(reg(w, 0xD7) & 0xFFFF));
-				if (n > 0 && trace_len + (uint32_t)n < TRACE_BYTES) {
-					memcpy(trace_text + trace_len, line, (size_t)n + 1);
-					trace_len += (uint32_t)n;
+				if (n > 0 && n < (int)sizeof(line)) {
+					vtraceAdd(line, (uint32_t)n);
 				}
 			}
 		}
@@ -1695,9 +1732,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		if (n > 0 && n < (int)sizeof(line) - 1) {
 			line[n++] = '\n';
 			line[n] = '\0';
-			if (trace_len + (uint32_t)n < TRACE_BYTES) {
-				memcpy(trace_text + trace_len, line, (size_t)n + 1);
-				trace_len += (uint32_t)n;
+			{
+				vtraceAdd(line, (uint32_t)n);
 				trace_vertex_lines++;
 			}
 		}
