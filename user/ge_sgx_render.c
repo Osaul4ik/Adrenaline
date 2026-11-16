@@ -1562,7 +1562,18 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	return show ? show->tex : NULL;
 }
 
+/*
+	The shown rendering, seen as opaque: its alpha is the PSP's stencil
+	(cleared to 0 by most games with an 8888 framebuffer), and the screen's
+	textured draw blends with it (a black screen with alpha 0). A copy of
+	its texture with the alpha read as 1 (X8U8U8U8_1BGR).
+*/
 vita2d_texture *geSgxRenderShown(void) {
 	Target *t = shown_fb ? findTarget(shown_fb - 1) : NULL;
-	return t ? t->tex : NULL;
+	if (!t)
+		return NULL;
+	static vita2d_texture view;
+	view = *t->tex;
+	sceGxmTextureSetFormat(&view.gxm_tex, SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR);
+	return &view;
 }
