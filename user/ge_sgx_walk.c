@@ -765,6 +765,8 @@ void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int
 
 void geSgxWalkerStall(GeSgxWalker *w, int qid, uint32_t stall) {
 	int i = findList(w, qid);
+	if (i < 0)
+		geSgxBuildTraceNote(w, "list: stall %X for qid %X, a list not queued here", (unsigned)stall, (unsigned)qid);
 	if (i >= 0)
 		w->lists[i].stall = stall ? (normalize(stall) & ~3u) : 0;
 }
