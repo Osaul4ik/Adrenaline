@@ -229,7 +229,7 @@ static int32_t drawTexture(GeSgxWalker *w) {
 			(tex_<addr>_f<format>_<w>x<h>_b<bufw>_s<swizzle>_c<clut format>.raw,
 			the palette's bytes after the texels)
 		*/
-		static uint32_t dumped[48];
+		static uint32_t dumped[96];
 		static uint32_t ndumped = 0;
 		static int dump_seen = 0;
 		if (w->dump != dump_seen) { // a new ask (or none): its own list
@@ -239,11 +239,11 @@ static int32_t drawTexture(GeSgxWalker *w) {
 		uint32_t k;
 		for (k = 0; k < ndumped && dumped[k] != d.addr; k++)
 			;
-		if (w->dump && w->dump_fn && k == ndumped && ndumped < 48) {
+		if (w->dump && w->dump_fn && k == ndumped && ndumped < 96) {
 			dumped[ndumped++] = d.addr;
 			uint32_t bytes = geSgxTexRowBytes(d.format, d.bufw) * geSgxTexRows(&d);
-			static uint8_t raw[512 * 1024 + 1024];
-			if (bytes && bytes <= 512 * 1024 && geSgxRead(w, d.addr & 0x0FFFFFFFu, raw, bytes)) {
+			static uint8_t raw[1024 * 1024 + 1024]; // a 512x512 8888 texture (a screen copy) is 1 MB
+			if (bytes && bytes <= 1024 * 1024 && geSgxRead(w, d.addr & 0x0FFFFFFFu, raw, bytes)) {
 				uint32_t cb = d.clut_bytes <= 1024 ? d.clut_bytes : 0;
 				if (cb)
 					memcpy(raw + bytes, w->clut, cb);
@@ -1204,6 +1204,16 @@ static void diagDraw(GeSgxWalker *w, const GeSgxFrameData *f, const GeSgxDraw *d
 		"fb %X fbw %u psm %u scissor %u,%u-%u,%u | draw %u",
 		(unsigned)d->fb, (unsigned)fbw, (unsigned)psm, (unsigned)(s1 & 0x3FF), (unsigned)((s1 >> 10) & 0x3FF),
 		(unsigned)(s2 & 0x3FF), (unsigned)((s2 >> 10) & 0x3FF), (unsigned)f->ndraws);
+	if ((d->flags & GE_SGX_DRAW_TEXTURED) && (taddr < 0x04000000u || taddr >= 0x04800000u)) {
+		// A screen sized texture in RAM (a copy of a rendering would be stale there: the renderings are Vita side only)
+		uint32_t rfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, rsize = reg(w, GE_CMD_TEXSIZE0);
+		uint32_t rw = 1u << (rsize & 0xF), rh = 1u << ((rsize >> 8) & 0xF);
+		if (rfmt <= 3 && rw >= 256 && rh >= 256)
+			diag(w, 1, 4u | (rfmt << 4) | (rsize << 8), taddr, d->fb,
+				"ram texture %X fmt %u %ux%u bufw %u (not in VRAM) | into fb %X, draw %u",
+				(unsigned)(taddr & 0x0FFFFFFFu), (unsigned)rfmt, (unsigned)rw, (unsigned)rh,
+				(unsigned)(reg(w, GE_CMD_TEXBUFWIDTH0) & 0x7FF), (unsigned)d->fb, (unsigned)f->ndraws);
+	}
 	if (!(d->flags & GE_SGX_DRAW_TEXTURED) || taddr < 0x04000000u || taddr >= 0x04800000u)
 		return;
 	uint32_t tfmt = reg(w, GE_CMD_TEXFORMAT) & 0xF, size = reg(w, GE_CMD_TEXSIZE0);
