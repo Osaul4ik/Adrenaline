@@ -445,6 +445,8 @@ static uint32_t scan_done_count = 0, scan_start = 0, scan_end = 0;
 static uint32_t scan_copy[SCAN_COPY_WORDS];
 static uint32_t scan_copy_n = 0;
 
+static void subsNote(void);
+
 static void noteListDone(void) {
 	if (!walker.trace || walker.done_count == scan_done_count)
 		return;
@@ -458,10 +460,74 @@ static void noteListDone(void) {
 	if (p) {
 		scan_copy_n = bytes / 4;
 		memcpy(scan_copy, p, bytes);
+		subsNote();
 	}
 }
 
+/*
+	The sublists the list calls (its top level's CALLs), each one's first
+	256 words hashed when the walker is done and at the flip: a sublist the
+	game fills as the GE reaches a signal before it (its handler) changes
+*/
+#define SCAN_SUBS 96
+static uint32_t sub_addr[SCAN_SUBS], sub_hash[SCAN_SUBS], sub_words[SCAN_SUBS], sub_first[SCAN_SUBS][4], sub_n = 0;
+
+static uint32_t subHash(uint32_t addr, uint32_t *words_out) {
+	const uint32_t *p = (const uint32_t *)geSgxPspPtr(addr, 1024);
+	if (!p)
+		return 0;
+	uint32_t h = 0, i;
+	for (i = 0; i < 256; i++) {
+		h = h * 31u + p[i];
+		if ((p[i] >> 24) == 0x0B) // RET: the sublist's end
+			break;
+	}
+	if (words_out)
+		*words_out = i + 1;
+	return h;
+}
+
+static void subsNote(void) {
+	uint32_t k;
+	sub_n = 0;
+	for (k = 0; k < scan_copy_n && sub_n < SCAN_SUBS; k++) {
+		uint32_t op = scan_copy[k];
+		if ((op >> 24) != 0x0A)
+			continue;
+		uint32_t base = 0x08000000u; // BASE assumed at 08 (the top level's own region)
+		uint32_t a = base | (op & 0x00FFFFFCu);
+		uint32_t j;
+		for (j = 0; j < sub_n && sub_addr[j] != a; j++)
+			;
+		if (j < sub_n)
+			continue;
+		sub_addr[sub_n] = a;
+		sub_hash[sub_n] = subHash(a, &sub_words[sub_n]);
+		const uint32_t *q = (const uint32_t *)geSgxPspPtr(a, 16);
+		for (j = 0; j < 4; j++)
+			sub_first[sub_n][j] = q ? q[j] : 0;
+		sub_n++;
+	}
+}
+
+static void subsDiff(void) {
+	uint32_t k, changed = 0;
+	for (k = 0; k < sub_n; k++) {
+		uint32_t words = 0, h = subHash(sub_addr[k], &words);
+		if (h != sub_hash[k]) {
+			changed++;
+			const uint32_t *p = (const uint32_t *)geSgxPspPtr(sub_addr[k], 32);
+			GeSgxLog("GeSgx T: list scan: sublist %X changed (%u words, %u when walked: %08X %08X %08X %08X): %08X %08X %08X %08X %08X %08X %08X %08X\n",
+				(unsigned)sub_addr[k], (unsigned)words, (unsigned)sub_words[k], (unsigned)sub_first[k][0], (unsigned)sub_first[k][1],
+				(unsigned)sub_first[k][2], (unsigned)sub_first[k][3], p ? (unsigned)p[0] : 0u, p ? (unsigned)p[1] : 0u, p ? (unsigned)p[2] : 0u, p ? (unsigned)p[3] : 0u,
+				p ? (unsigned)p[4] : 0u, p ? (unsigned)p[5] : 0u, p ? (unsigned)p[6] : 0u, p ? (unsigned)p[7] : 0u);
+		}
+	}
+	GeSgxLog("GeSgx T: list scan: %u of %u sublists changed\n", (unsigned)changed, (unsigned)sub_n);
+}
+
 static void scanDiff(void) {
+	subsDiff();
 	const uint32_t *p = scan_copy_n ? (const uint32_t *)geSgxPspPtr(scan_start, scan_copy_n * 4) : NULL;
 	uint32_t k, diffs = 0;
 	for (k = 0; p && k < scan_copy_n; k++) {
