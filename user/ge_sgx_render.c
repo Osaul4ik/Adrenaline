@@ -1038,6 +1038,7 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 		}
 		sceGxmSetFragmentTexture(ctx, 0, &tex);
 		sceGxmSetVertexStream(ctx, 0, snap_quad->v);
+		sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
 		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, snap_quad->ix, 6);
 		sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 	}
@@ -1057,6 +1058,9 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	int last_zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS, last_zwrite = 0;
 	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
 	sceGxmSetFrontPointLineWidth(ctx, GE_SGX_SCALE);
+	// Lines and points are drawn only in their polygon mode (in fill mode GXM draws nothing of them)
+	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+	SceGxmPolygonMode last_poly = SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
 	sceGxmSetVertexProgram(ctx, vertex_program);
 	const SceGxmVertexProgram *last_vp = vertex_program;
 	stencilOff(ctx);
@@ -1232,6 +1236,12 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		} else {
 			sceGxmSetVertexStream(ctx, 0, &frame->vertices_gpu[d->base]);
 		}
+		SceGxmPolygonMode poly = d->prim == GE_SGX_DRAW_LINES ? SCE_GXM_POLYGON_MODE_LINE :
+			d->prim == GE_SGX_DRAW_POINTS ? SCE_GXM_POLYGON_MODE_POINT : SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
+		if (poly != last_poly) {
+			sceGxmSetFrontPolygonMode(ctx, poly);
+			last_poly = poly;
+		}
 		sceGxmDraw(ctx, primitive(d->prim), SCE_GXM_INDEX_FORMAT_U16, &frame->indices_gpu[d->first], d->count);
 
 		stats->draws++;
@@ -1246,6 +1256,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	stencilOff(ctx);
 	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 	sceGxmSetFrontPointLineWidth(ctx, 1);
+	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
 }
 
 /*
