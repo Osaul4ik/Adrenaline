@@ -603,8 +603,8 @@ static void testBuildOther(void) {
 		CHECK(fidx[4] == 0 && fidx[5] == 1 && fidx[6] == 2 && fidx[7] == 0 && fidx[8] == 2 && fidx[9] == 3 && fidx[13] == 5 && fidx[15] == 7,
 		      "fan/3d indices %u %u %u .. %u %u", fidx[4], fidx[5], fidx[6], fidx[13], fidx[15]);
 	}
-	/* lines: (0,0)-(10,5), (10,5)-(20,10) scaled */
-	CHECK(feq(fverts[1].x, 20) && feq(fverts[1].y, 10) && feq(fverts[2].x, 40) && feq(fverts[2].z, 1.0f), "line 2 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[2].x, fverts[2].z);
+	/* lines: (0,0)-(10,5), (10,5)-(20,10) scaled, to the PSP pixels' centres (half a pixel, 1 at 2x) */
+	CHECK(feq(fverts[1].x, 21) && feq(fverts[1].y, 11) && feq(fverts[2].x, 41) && feq(fverts[2].z, 1.0f), "line 2 %f %f %f %f", fverts[1].x, fverts[1].y, fverts[2].x, fverts[2].z);
 	CHECK(fverts[0].color == 0xFFFF0000u, "565 blue %08x", fverts[0].color);
 }
 
@@ -763,7 +763,7 @@ static void testLightingSkinning(void) {
 
 	CHECK(frame.ndraws == 1 && frame.nvertices == 1 && fdraws[0].prim == GE_SGX_DRAW_POINTS, "point draws %u verts %u", frame.ndraws, frame.nvertices);
 	GeSgxVertex *a = &fverts[0];
-	CHECK(feq(a->w, 2) && feq(a->x / a->w, 600), "skinned %f w %f", a->x / a->w, a->w);
+	CHECK(feq(a->w, 2) && feq(a->x / a->w, 601), "skinned %f w %f", a->x / a->w, a->w);
 	uint32_t r = a->color & 0xFF, al = a->color >> 24;
 	CHECK(r == 255 && ((a->color >> 8) & 0xFF) == r && al == 255, "lit colour %08x", a->color);
 }

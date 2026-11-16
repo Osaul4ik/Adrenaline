@@ -1808,6 +1808,18 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		d.sref = (uint8_t)(vout[0].color >> 24);
 
 	if (!gpu) {
+		/*
+			Lines and points cover the PSP pixel at their coordinates: its
+			centre is half a pixel on (one 960x544 pixel). Without it a line at
+			y = 0 was half off the screen (Persona 2's bar over the town map
+			lost its top row) and lines of rows overlapped by one pixel.
+		*/
+		if (d.prim == GE_SGX_DRAW_LINES || d.prim == GE_SGX_DRAW_POINTS) {
+			for (i = 0; i < nv; i++) {
+				vout[i].x += vout[i].w * (GE_SGX_SCALE * 0.5f);
+				vout[i].y += vout[i].w * (GE_SGX_SCALE * 0.5f);
+			}
+		}
 		f->nvertices = vstart + nv;
 		f->vertices_built += nv;
 	}

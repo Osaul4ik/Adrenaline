@@ -727,6 +727,7 @@ static struct {
 	float z0, z1; // depth range of the first draw's vertices (CPU vertices; -1: GPU)
 	float x0, y0, x1, y1; // and their pixels (x/w, y/w)
 	uint32_t aref, color, tfmt; // alpha test reference; first CPU vertex colour; texture format
+	uint32_t colors[3];         // the next three vertices' colours
 	uint32_t tsize, topaque;    // texture: w | h << 16; texels with alpha > 0 (palette textures)
 	int active;
 } run;
@@ -736,7 +737,7 @@ static void runFlush(void) {
 		return;
 	run.active = 0;
 	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
-		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
+		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X %08X %08X %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
@@ -744,7 +745,7 @@ static void runFlush(void) {
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
 		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f), (int)run.x0, (int)run.y0, (int)run.x1, (int)run.y1,
-		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.tfmt, (unsigned)(run.tsize & 0xFFFF), (unsigned)(run.tsize >> 16),
+		(unsigned)run.aref, (unsigned)run.color, (unsigned)run.colors[0], (unsigned)run.colors[1], (unsigned)run.colors[2], (unsigned)run.tfmt, (unsigned)(run.tsize & 0xFFFF), (unsigned)(run.tsize >> 16),
 		(unsigned)run.topaque);
 }
 
@@ -798,6 +799,7 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.x0 = run.y0 = run.x1 = run.y1 = 0.0f;
 		run.aref = d->atest_ref;
 		run.color = 0;
+		run.colors[0] = run.colors[1] = run.colors[2] = 0;
 		run.tfmt = 0;
 		run.tsize = run.topaque = 0;
 		if ((d->flags & GE_SGX_DRAW_TEXTURED) && !d->fbtex) {
@@ -816,8 +818,12 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 				}
 			}
 		}
-		if (!d->gpu && frame && d->count)
+		if (!d->gpu && frame && d->count) {
+			uint32_t k;
 			run.color = frame->vertices[d->base + frame->indices[d->first]].color;
+			for (k = 1; k < 4 && k < d->count; k++)
+				run.colors[k - 1] = frame->vertices[d->base + frame->indices[d->first + k]].color;
+		}
 		if (!d->gpu && frame && d->count) {
 			uint32_t k;
 			run.x0 = run.y0 = 1e9f;

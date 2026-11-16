@@ -86,6 +86,8 @@ extern volatile uint32_t ge_sgx_gpu_done_seq;
 
 // PSP memory in our address space (uncached), NULL if the range is not PSP RAM/VRAM
 const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size);
+// Bytes of PSP memory from addr to the end of its RAM or VRAM (0: neither)
+uint32_t geSgxPspSpan(uint32_t addr);
 
 // Kermit command from systemctrl: start reading the ring (1) or not (0)
 int GeSgxStart(uint32_t ring_addr);

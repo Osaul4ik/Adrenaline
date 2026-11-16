@@ -157,6 +157,15 @@ static const void *blockFn(void *user, uint32_t block) {
 	return dst;
 }
 
+uint32_t geSgxPspSpan(uint32_t addr) {
+	addr &= 0x0FFFFFFF;
+	if (addr >= RAM_START && addr < RAM_START + PSP_RAM_SIZE)
+		return RAM_START + PSP_RAM_SIZE - addr;
+	if (addr >= VRAM_START && addr < VRAM_START + 0x00800000u)
+		return VRAM_SIZE - (addr & (VRAM_SIZE - 1));
+	return 0;
+}
+
 const uint8_t *geSgxPspPtr(uint32_t addr, uint32_t size) {
 	addr &= 0x0FFFFFFF;
 	if (!ram_map || !vram_map)

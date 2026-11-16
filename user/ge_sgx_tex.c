@@ -181,8 +181,17 @@ static int sameKey(const GeSgxTexDesc *a, const GeSgxTexDesc *b) {
 		a->clut_format == b->clut_format && a->clut_hash == b->clut_hash;
 }
 
+/*
+	The texture's bytes in PSP memory, up to the end of it: The 3rd
+	Birthday's title picture is a 512x512 8888 texture at 154400 in VRAM
+	(another at 178000), past its end from row 343 (the game uses only the
+	rows in it).
+	The rows past the end read as 0 (transparent).
+*/
 static uint32_t sourceBytes(const GeSgxTexDesc *d) {
-	return geSgxTexRowBytes(d->format, d->bufw) * geSgxTexRows(d);
+	uint32_t size = geSgxTexRowBytes(d->format, d->bufw) * geSgxTexRows(d);
+	uint32_t span = geSgxPspSpan(d->addr);
+	return size < span ? size : span;
 }
 
 /*
@@ -284,12 +293,13 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	uint32_t rowbytes = geSgxTexRowBytes(d->format, d->bufw);
 	uint32_t rows = geSgxTexRows(d);
 	uint32_t size = rowbytes * rows;
+	uint32_t have = sourceBytes(d); // up to the end of RAM or VRAM; the rest reads as 0
 	// A buffer narrower than the texture (480 wide pictures in 512 textures) is fine:
 	// the texels past it are not used
 	if (!rowbytes || !d->bufw || size > STAGING_BYTES || d->w > 512 || d->h > 512)
 		return failed(d, "size");
 
-	const uint8_t *src = geSgxPspPtr(d->addr, size);
+	const uint8_t *src = have ? geSgxPspPtr(d->addr, have) : NULL;
 	if (!src)
 		return failed(d, "address");
 
@@ -334,10 +344,12 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	SceUInt64 t0 = sceKernelGetProcessTimeWide();
 
 	// PSP memory is uncached: one DMA for big textures, bursts for small ones
-	if (size >= 16 * 1024)
-		sceDmacMemcpy(staging[0], src, size);
+	if (have >= 16 * 1024)
+		sceDmacMemcpy(staging[0], src, have);
 	else
-		memcpy(staging[0], src, size);
+		memcpy(staging[0], src, have);
+	if (have < size)
+		memset(staging[0] + have, 0, size - have);
 
 	const uint8_t *linear = staging[0];
 	if (d->swizzle && d->format < GE_TFMT_DXT1) {
