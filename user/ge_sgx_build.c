@@ -992,8 +992,9 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 	from its 960x544 rendering, and the draw thread sizes those renderings
 	by the same numbers (frame->fbs).
 */
-static struct { uint32_t fb; uint16_t w, h; uint32_t used; } fbreg[GE_SGX_MAX_FBS];
+static struct { uint32_t fb; uint16_t w, h; uint32_t used, drawn; } fbreg[GE_SGX_MAX_FBS];
 static uint32_t fbreg_clock = 0;
+static uint32_t fbreg_frame = 0; // frames built (fbreg[].drawn: the last one drawing into it)
 
 static int fbFind(uint32_t fb) {
 	int i;
@@ -1046,6 +1047,7 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	if (sh > fbreg[i].h)
 		fbreg[i].h = (uint16_t)sh;
 	fbreg[i].used = ++fbreg_clock;
+	fbreg[i].drawn = fbreg_frame;
 
 	// This frame's list
 	uint32_t k;
@@ -1546,6 +1548,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	time_every = TIME_EVERY;
 	uint32_t t0 = clk ? clk() : 0, t1;
 	if (w->state_dirty || cached_w != w || cached_frame != f) {
+		if (cached_frame != f)
+			fbreg_frame++;
 		drawState(w, &cached_d);
 		xformInit(w, l, &cached_x);
 		fbNote(w, f, &cached_d);
@@ -1561,6 +1565,13 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			if (taddr >= 0x04000000u && taddr < 0x04800000u && tfmt <= 3)
 				rt = fbFind(taddr & 0x001FFFFFu);
 			if (rt >= 0 && (!fbreg[rt].w || !fbreg[rt].h))
+				rt = -1;
+			/*
+				Not drawn into by the GE for 30 frames: its picture is written by
+				the CPU (Prince of Persia Revelations' videos, copied from 88000
+				by the GE), read from VRAM as a texture, not its old rendering
+			*/
+			if (rt >= 0 && fbreg_frame - fbreg[rt].drawn >= 30)
 				rt = -1;
 		}
 		diagDraw(w, f, &cached_d, taddr, rt);

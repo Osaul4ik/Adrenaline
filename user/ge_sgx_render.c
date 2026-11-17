@@ -1515,32 +1515,6 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			show = findTarget(aliases[a].src);
 	}
 	/*
-		A flipped framebuffer not drawn since before the newest screen-sized
-		rendering: its picture came from elsewhere (a copy, the CPU), and its
-		rendering is an old one, maybe from when the game used it for
-		something else. Valkyria Chronicles 2 flips a third framebuffer
-		(15C000) it also composes its title's logo and menu in: shown as it
-		was, those came up enlarged over the screen for a frame. The newest
-		screen-sized rendering is shown instead.
-	*/
-	if (show && show->scene_frame != rframes + 1) {
-		Target *newest = NULL;
-		uint32_t k2;
-		for (k2 = 0; k2 < GE_SGX_MAX_FBS; k2++) {
-			Target *c = &targets[k2];
-			if (c->tex && c->w == show->w && c->h == show->h && c->scene_frame &&
-			    (int32_t)(c->scene_frame - show->scene_frame) > 0 && (!newest || (int32_t)(c->scene_frame - newest->scene_frame) > 0))
-				newest = c;
-		}
-		if (newest) {
-			static uint32_t stale_logs = 0;
-			if (stale_logs++ < 20)
-				GeSgxLog("GeSgx render: frame %u flips fb %X, last drawn %u frames ago: shown fb %X's newer rendering\n",
-					(unsigned)rframes, (unsigned)fb, (unsigned)(rframes + 1 - show->scene_frame), (unsigned)newest->fb);
-			show = newest;
-		}
-	}
-	/*
 		Frames without draws for half a second: the game writes the picture
 		itself (CPU, transfers, a video), so the renderings hold older ones; the
 		PSP picture is what it shows. A few empty frames are not that: frames
@@ -1549,7 +1523,14 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	*/
 	static uint32_t empty_frames = 0;
 	empty_frames = frame->ndraws ? 0 : empty_frames + 1;
-	if (empty_frames >= 30) {
+	/*
+		The same for a flipped framebuffer not drawn into for half a second
+		while others are: Prince of Persia Revelations' videos, written by the
+		CPU into 88000 and flipped there while the GE copies it elsewhere (its
+		rendering held an old black picture).
+	*/
+	int stale = show && show->scene_frame && (uint32_t)(rframes + 1 - show->scene_frame) >= 30;
+	if (empty_frames >= 30 || stale) {
 		show = NULL;
 		shown_fb = 0;
 	}
