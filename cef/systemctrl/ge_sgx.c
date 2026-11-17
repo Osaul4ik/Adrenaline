@@ -514,11 +514,9 @@ static void waitForVitaSignal(void) {
 
 static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int arg3) {
 	/*
-		Signal callbacks (even) and finish callbacks (odd): c = 1 for a
-		finish. A finish is reported only after signals of that list: the
-		Vita side walks what came after the last one before the game's
-		finish handler runs (a list without signals is walked at the
-		game's wait for the GE, without a wait in the interrupt)
+		Signal callbacks (even) and finish callbacks (odd, c = 1): reported
+		with the copy of the commands the GE did since the signal before
+		(or the list's start), taken before the game's handler runs
 	*/
 	if (intr == PSP_GE_INTR && ring) {
 		u32 intr_flags = interruptsOff();
