@@ -46,6 +46,7 @@
 #include "ge_sgx_tex.h"
 #include "ge_sgx_render.h"
 #include "../ge_sgx_shared.h"
+#include "ge_sgx_texconv.h"
 
 // Test: every 3D draw transformed on the CPU (the GPU transform's vertex programs not used)
 #define GE_SGX_TEST_CPU_TRANSFORM 0
@@ -622,7 +623,56 @@ static void acquireSlot(void) {
 }
 
 // Walker thread, at a display flip of fb
-static void publishSlot(uint32_t top) {
+/*
+	Asked (L + SELECT): the PSP's own picture of the traced frame, as its GE
+	drew it into VRAM (psp_<ask>_<fb>.bmp, 480x272): what the game should
+	look like, to compare with this renderer's dump of the same frame
+*/
+static void dumpPspPicture(uint32_t fb, uint32_t fbw, uint32_t psm) {
+	static uint32_t asks = 0;
+	static uint8_t bmp[54 + 480 * 272 * 4];
+	if (fb >= VRAM_SIZE || fbw == 0 || fbw > 1024 || psm > 3)
+		return;
+	uint32_t bpp = psm == 3 ? 4 : 2;
+	const uint8_t *src = geSgxPspPtr(VRAM_START + fb, fbw * 272 * bpp);
+	if (!src)
+		return;
+	memset(bmp, 0, 54);
+	uint32_t size = sizeof(bmp), v;
+	bmp[0] = 'B'; bmp[1] = 'M';
+	memcpy(bmp + 2, &size, 4);
+	v = 54; memcpy(bmp + 10, &v, 4);
+	v = 40; memcpy(bmp + 14, &v, 4);
+	int32_t iw = 480, ih = -272;
+	memcpy(bmp + 18, &iw, 4);
+	memcpy(bmp + 22, &ih, 4);
+	uint16_t s16 = 1; memcpy(bmp + 26, &s16, 2);
+	s16 = 32; memcpy(bmp + 28, &s16, 2);
+	uint32_t x, y;
+	for (y = 0; y < 272; y++) {
+		uint8_t *o = bmp + 54 + y * 480 * 4;
+		for (x = 0; x < 480; x++) {
+			uint32_t c; // 0xAABBGGRR
+			if (bpp == 4) {
+				memcpy(&c, src + (y * fbw + x) * 4, 4);
+			} else {
+				uint16_t s;
+				memcpy(&s, src + (y * fbw + x) * 2, 2);
+				c = geSgxDecodeColor16(psm, s);
+			}
+			o[x * 4 + 0] = (uint8_t)(c >> 16);
+			o[x * 4 + 1] = (uint8_t)(c >> 8);
+			o[x * 4 + 2] = (uint8_t)c;
+			o[x * 4 + 3] = 0xFF;
+		}
+	}
+	char name[64];
+	snprintf(name, sizeof(name), "psp_%u_%X.bmp", (unsigned)++asks, (unsigned)fb);
+	dumpWrite(name, bmp, sizeof(bmp));
+	GeSgxLog("GeSgx: the PSP's picture of the traced frame: %s (fb %X width %u format %u)\n", name, (unsigned)fb, (unsigned)fbw, (unsigned)psm);
+}
+
+static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
 
@@ -661,6 +711,8 @@ static void publishSlot(uint32_t top) {
 			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)nd, (unsigned)fb,
 				(unsigned)walker.naliases);
 			dumpFlush();
+			if (fb != 0xFFFFFFFFu)
+				dumpPspPicture(fb, fbw, psm);
 			walker.trace = 0;
 		} else if (++trace_tries >= 600) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
@@ -1351,7 +1403,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 							built_us[6] += building->data.us_clut / clock_ticks_per_us;
 							built_frames++;
 						}
-						publishSlot(e->a);
+						publishSlot(e->a, e->b, e->c);
 
 						/*
 							Behind: the next frame is already queued (another flip waits in
