@@ -1,0 +1,16 @@
+diff --git a/libvita2d/source/vita2d_pgf.c b/libvita2d/source/vita2d_pgf.c
+index c735deb..ed8b3bc 100644
+--- a/libvita2d/source/vita2d_pgf.c
++++ b/libvita2d/source/vita2d_pgf.c
+@@ -130,9 +130,10 @@ vita2d_pgf *vita2d_load_system_pgf(int numFonts, const vita2d_system_pgf_config
+ cleanup:
+ 	tmp = font->font_handle_list;
+ 	while (tmp) {
++		vita2d_pgf_font_handle *next = tmp->next;
+ 		sceFontClose(tmp->font_handle);
+ 		free(tmp);
+-		tmp = tmp->next;
++		tmp = next;
+ 	}
+ 	sceFontDoneLib(font->lib_handle);
+ 	free(font);
