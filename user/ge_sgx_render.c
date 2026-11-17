@@ -619,8 +619,12 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	if (depth) {
 		void *old = NULL;
 		sceKernelGetMemBlockBase(tex->depth_UID, &old);
+		/*
+			Linear: a depth view reads it as a linear texture (read as a tiled
+			one, the GPU crashed: Prince of Persia Revelations' menu)
+		*/
 		sceGxmDepthStencilSurfaceInit(&tex->gxm_sfd, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
-			SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, (w + 31) & ~31, depth, NULL);
+			SCE_GXM_DEPTH_STENCIL_SURFACE_LINEAR, (w + 31) & ~31, depth, NULL);
 		if (old)
 			sceGxmUnmapMemory(old);
 		sceKernelFreeMemBlock(tex->depth_UID);
@@ -1098,14 +1102,9 @@ static uint32_t lut_slot = 0;
 static SceGxmFragmentProgram *dview_program = NULL;
 static int dview_unit_depth = 0, dview_unit_lut = 1, dview_failed = 0;
 
-// The rendering's depth buffer, a tiled S8D24 surface of 32 aligned width and height
+// The rendering's depth buffer, a linear S8D24 surface of 32 aligned width (in the pool; vita2d's is tiled: none)
 static void *targetDepth(const Target *t) {
-	if (!t->own_depth)
-		return t->pool_depth;
-	void *base = NULL;
-	if (t->tex->depth_UID < 0 || sceKernelGetMemBlockBase(t->tex->depth_UID, &base) < 0)
-		return NULL;
-	return base;
+	return t->own_depth ? NULL : t->pool_depth;
 }
 
 static int dviewProgram(void) {
@@ -1155,15 +1154,15 @@ static int depthView(SceGxmContext *ctx, const Target *src, const uint32_t *pale
 	void *depth = targetDepth(src);
 	if (!depth)
 		return -1;
-	int dw = (src->w + 31) & ~31, dh = (src->h + 31) & ~31;
+	int dw = (src->w + 31) & ~31;
 
-	// The depth as a texture; the quad's texture coordinates over the rendering's part of it
+	// The depth as a linear texture of its stride; the quad's texture coordinates over the rendering's part of it
 	SceGxmTexture zt, lt;
-	if (sceGxmTextureInitTiled(&zt, depth, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, dw, dh, 0) < 0)
+	if (sceGxmTextureInitLinearStrided(&zt, depth, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, src->w, src->h, (uint32_t)dw * 4) < 0)
 		return -1;
 	sceGxmTextureSetMinFilter(&zt, SCE_GXM_TEXTURE_FILTER_POINT);
 	sceGxmTextureSetMagFilter(&zt, SCE_GXM_TEXTURE_FILTER_POINT);
-	quadInit(dview_quad, src->w, src->h, (float)src->w / dw, (float)src->h / dh);
+	quadInit(dview_quad, src->w, src->h, 1.0f, 1.0f);
 	uint32_t *slot = lut_mem + (lut_slot++ % LUT_SLOTS) * 256;
 	memcpy(slot, palette, 256 * 4);
 	if (sceGxmTextureInitLinear(&lt, slot, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, 256, 1, 0) < 0)
