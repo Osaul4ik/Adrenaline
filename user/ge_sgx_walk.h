@@ -61,6 +61,7 @@ typedef struct {
 	uint32_t bbox_visible; // BOUNDINGBOX results
 	uint32_t bbox_hidden;
 	uint32_t hw_regs;     // registers taken from the GE (geSgxWalkerHardwareReg)
+	uint32_t held;        // lists held after a handler signal
 } GeSgxStats;
 
 typedef struct {
@@ -78,6 +79,7 @@ typedef struct {
 	int started;
 	int depth;
 	uint8_t bbox; // result of the last BOUNDINGBOX (BJUMP jumps when 0)
+	uint8_t held; // stopped after a handler signal until the flip (geSgxWalkerRelease)
 	uint32_t stack[GE_SGX_MAX_STACK][2]; // return address, offset
 } GeSgxList;
 
@@ -212,6 +214,7 @@ typedef struct {
 	uint32_t clock_every;
 	// Optional log for diagnostics; while trace is set, the frame is traced into it
 	void (* log_fn)(const char *fmt, ...);
+	int releasing; // geSgxWalkerRelease running: handler signals do not hold
 	int trace;
 	uint32_t trace_lines;
 	// A register, matrix or CLUT changed since the last primitive built
@@ -271,6 +274,7 @@ static inline uint32_t geSgxReg(const GeSgxWalker *w, uint32_t cmd) {
 void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user);
 void geSgxWalkerReset(GeSgxWalker *w);
 void geSgxWalkerResync(GeSgxWalker *w);
+void geSgxWalkerRelease(GeSgxWalker *w);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 
 // Ring events, in the order the PSP side reported them

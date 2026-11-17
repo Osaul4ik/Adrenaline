@@ -82,6 +82,8 @@
 #define GE_VTYPE_THROUGH (1u << 23)
 
 // Signal behaviours that move the list
+#define GE_SIGNAL_HANDLER_SUSPEND 0x01u
+#define GE_SIGNAL_HANDLER_PAUSE   0x03u
 #define GE_SIGNAL_JUMP  0x10u
 #define GE_SIGNAL_CALL  0x11u
 #define GE_SIGNAL_RET   0x12u
@@ -622,8 +624,24 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 			if (!pop(w, list))
 				list->pc = next;
 			return 1;
+		case GE_SIGNAL_HANDLER_SUSPEND:
+		case GE_SIGNAL_HANDLER_PAUSE:
+			/*
+				The GE stops here and the game's signal handler runs; it writes
+				what comes after the signal (The 3rd Birthday: the view matrix
+				of its HUD, fog and particles, and their draws; read before, the
+				last frame's matrices put them off the screen). The list waits
+				for the flip, when the GE is done with it (geSgxWalkerRelease).
+			*/
+			list->pc = next;
+			if (w->releasing)
+				return 1;
+			list->held = 1;
+			w->stats.held++;
+			geSgxBuildTraceNote(w, "list: qid %X held after the handler signal until the flip", (unsigned)list->qid);
+			return 2;
 		default:
-			// Handler signals and the rest: the list goes on after the END
+			// Signals the game's handler gets while the GE goes on, and the rest: the list goes on after the END
 			list->pc = next;
 			return 1;
 	}
@@ -688,6 +706,8 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 	uint32_t commands = 0;
 	int res = WALK_BAD;
 
+	if (list->held)
+		return WALK_STALLED;
 	list->started = 1;
 
 	while (commands < GE_SGX_MAX_COMMANDS) {
@@ -789,8 +809,15 @@ special:
 					if (list->depth == 0)
 						w->top_signals++;
 					list->pc = cmd_pc;
-					if (!signal(w, list, data))
-						goto out;
+					{
+						int sres = signal(w, list, data);
+						if (!sres)
+							goto out;
+						if (sres == 2) {
+							res = WALK_STALLED;
+							goto out;
+						}
+					}
 					pc = list->pc;
 					break;
 				case GE_CMD_OFFSETADDR:
@@ -952,6 +979,23 @@ void geSgxWalkerResync(GeSgxWalker *w) {
 	w->dump = dump;
 	w->trace_lines = trace_lines;
 	geSgxBuildTraceNote(w, "resync: events lost, the lists start over (the GE state kept)");
+}
+
+// The flip: the lists held after handler signals go on (the GE is done with them, their memory is final)
+void geSgxWalkerRelease(GeSgxWalker *w) {
+	int i, any = 0;
+	for (i = 0; i < w->count; i++) {
+		if (w->lists[i].held) {
+			w->lists[i].held = 0;
+			any = 1;
+		}
+	}
+	if (!any)
+		return;
+	geSgxBuildTraceNote(w, "list: the held lists go on at the flip");
+	w->releasing = 1;
+	geSgxWalkerRun(w);
+	w->releasing = 0;
 }
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {

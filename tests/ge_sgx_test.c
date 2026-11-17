@@ -257,8 +257,10 @@ static void testSignals(void) {
 	L m = { 0x08800000 };
 	emit(&m, C(0x0E, (0x11u << 16) | 0x0885)); // CALL 0x08850000
 	emit(&m, C(0x0C, 0x0000));
-	emit(&m, C(0x0E, (0x01u << 16) | 0x0001)); // handler signal: continue after END
+	emit(&m, C(0x0E, (0x01u << 16) | 0x0001)); // handler signal (suspend): held until the flip
 	emit(&m, C(0x0C, 0x0000));
+	uint32_t patched = m.pos;
+	emit(&m, C(0x00, 0));                      // written by the handler (below)
 	emit(&m, C(0x0E, (0x10u << 16) | 0x0884)); // JUMP 0x08840000
 	emit(&m, C(0x0C, 0x0000));
 	emit(&m, C(0x9C, 0x999999));               // skipped
@@ -275,9 +277,15 @@ static void testSignals(void) {
 
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
+	CHECK(w->count == 1 && w->lists[0].held && geSgxReg(w, 0x9D) == 0x77 && geSgxReg(w, 0x9C) == 0, "held after the handler signal: count %d fbp %x", w->count, geSgxReg(w, 0x9C));
+	// the game's handler writes what follows the signal; the flip goes on from there
+	w32(patched, C(0x9F, 0x123));
+	geSgxWalkerStall(w, 1, 0);
+	CHECK(w->count == 1, "still held after a stall update");
+	geSgxWalkerRelease(w);
 	CHECK(w->count == 0 && w->stats.bad == 0, "count %d bad %u", w->count, w->stats.bad);
-	CHECK(geSgxReg(w, 0x9D) == 0x77 && geSgxReg(w, 0x9C) == 0x22000, "fbw %x fbp %x", geSgxReg(w, 0x9D), geSgxReg(w, 0x9C));
-	CHECK(w->stats.signals == 4, "signals %u", w->stats.signals);
+	CHECK(geSgxReg(w, 0x9D) == 0x77 && geSgxReg(w, 0x9C) == 0x22000 && geSgxReg(w, 0x9F) == 0x123, "fbw %x fbp %x zbw %x", geSgxReg(w, 0x9D), geSgxReg(w, 0x9C), geSgxReg(w, 0x9F));
+	CHECK(w->stats.signals == 4 && w->stats.held == 1, "signals %u held %u", w->stats.signals, w->stats.held);
 
 	// RJUMP: relative to the SIGNAL
 	reset();

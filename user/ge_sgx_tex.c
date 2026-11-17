@@ -203,11 +203,18 @@ static uint32_t sourceBytes(const GeSgxTexDesc *d) {
 	another word of its step (not always the first), and both ends
 */
 #define FULL_HASH_BYTES 2048
-static uint32_t sampleHash(const uint8_t *src, uint32_t size) {
+/*
+	Linear (not swizzled) textures up to 64 KB are hashed whole: games write
+	text into them with the CPU, a glyph at a time (Black Rock Shooter's
+	menus: 128x128 and 256x32 CLUT4 glyph caches; the 64 samples missed the
+	new glyphs and the old ones were drawn: wrong letters)
+*/
+#define FULL_HASH_LINEAR_BYTES (64 * 1024)
+static uint32_t textureHash(const GeSgxTexDesc *d, const uint8_t *src, uint32_t size) {
 	uint32_t h = 2166136261u ^ size;
 	uint32_t i, v;
 
-	if (size <= FULL_HASH_BYTES) {
+	if (size <= FULL_HASH_BYTES || (!d->swizzle && size <= FULL_HASH_LINEAR_BYTES)) {
 		for (i = 0; i + 4 <= size; i += 4) {
 			memcpy(&v, src + i, 4);
 			h = (h ^ v) * 16777619u;
@@ -497,7 +504,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 		// First use in this frame: still the same memory contents?
 		uint32_t size = sourceBytes(d);
 		const uint8_t *src = geSgxPspPtr(d->addr, size);
-		uint32_t sample = src ? sampleHash(src, size) : 0;
+		uint32_t sample = src ? textureHash(d, src, size) : 0;
 		stats.checks++;
 		if (src && sample == e->sample) {
 			e->last_checked = cur_frame;
@@ -515,7 +522,7 @@ int32_t geSgxTexLookup(void *user, const GeSgxTexDesc *d) {
 		return lookupFailed(d);
 	}
 
-	int32_t handle = upload(d, sampleHash(src, size));
+	int32_t handle = upload(d, textureHash(d, src, size));
 	if (handle < 0)
 		return lookupFailed(d);
 	last_hit = handle;

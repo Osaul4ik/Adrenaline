@@ -238,14 +238,57 @@ static void clockInit(GeSgxWalker *w) {
 }
 
 // Diagnostics: a file of the asked trace's dump (the walker's textures)
-static void dumpFn(const char *name, const void *data, uint32_t bytes) {
+static void dumpWrite(const char *name, const void *data, uint32_t bytes) {
 	char path[128];
 	sceIoMkdir("ux0:data/adrenaline/sgx_dump", 0777);
-	snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%s", name);
+	snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%.64s", name);
 	SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
 	if (fd >= 0) {
 		sceIoWrite(fd, data, bytes);
 		sceIoClose(fd);
+	}
+}
+
+/*
+	The textures of an asked trace are kept in memory and written when the
+	trace ends: written while the lists were walked, the walk took hundreds
+	of ms an event, the ring overflowed and the traced frame was lost (The
+	3rd Birthday's, twice)
+*/
+#define DUMP_BUF_BYTES (1024 * 1024)
+#define DUMP_ITEMS 48
+static SceUID dump_mem = -1;
+static uint8_t *dump_buf = NULL;
+static uint32_t dump_used = 0, dump_n = 0;
+static struct { char name[64]; uint32_t off, len; } dump_items[DUMP_ITEMS];
+
+static void dumpFn(const char *name, const void *data, uint32_t bytes) {
+	if (!dump_buf && dump_mem < 0) {
+		dump_mem = sceKernelAllocMemBlock("SceGeSgxDump", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, DUMP_BUF_BYTES, NULL);
+		if (dump_mem >= 0)
+			sceKernelGetMemBlockBase(dump_mem, (void **)&dump_buf);
+	}
+	if (!dump_buf || dump_n >= DUMP_ITEMS || dump_used + bytes > DUMP_BUF_BYTES)
+		return; // dropped (written at once, they lost the frame)
+	memcpy(dump_buf + dump_used, data, bytes);
+	strncpy(dump_items[dump_n].name, name, sizeof(dump_items[0].name) - 1);
+	dump_items[dump_n].name[sizeof(dump_items[0].name) - 1] = '\0';
+	dump_items[dump_n].off = dump_used;
+	dump_items[dump_n].len = bytes;
+	dump_n++;
+	dump_used += bytes;
+}
+
+static void dumpFlush(void) {
+	uint32_t i;
+	for (i = 0; i < dump_n; i++)
+		dumpWrite(dump_items[i].name, dump_buf + dump_items[i].off, dump_items[i].len);
+	dump_n = 0;
+	dump_used = 0;
+	if (dump_mem >= 0) {
+		sceKernelFreeMemBlock(dump_mem);
+		dump_mem = -1;
+		dump_buf = NULL;
 	}
 }
 
@@ -617,11 +660,13 @@ static void publishSlot(uint32_t top) {
 			GeSgxLogText(text, len);
 			GeSgxLog("GeSgx T: end, %u draws, shown fb %X, %u aliases\n", (unsigned)nd, (unsigned)fb,
 				(unsigned)walker.naliases);
+			dumpFlush();
 			walker.trace = 0;
 		} else if (++trace_tries >= 600) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
 			walker.trace = 0;
 			walker.dump = 0;
+			dumpFlush();
 		}
 		geSgxBuildTraceClear(&walker);
 	}
@@ -1231,6 +1276,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 					noteListDone();
 					break;
 				case GE_SGX_EVENT_FLIP: {
+					// The lists held after handler signals: walked now, into this frame
+					geSgxWalkerRelease(&walker);
 					if (walker.trace && scan_end) {
 						ListScan now;
 						scanList(scan_start, scan_end, &now, 1);
@@ -1342,12 +1389,12 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u bbox %u/%u hw regs %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
-					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs,
+					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
