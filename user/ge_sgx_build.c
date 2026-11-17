@@ -1528,7 +1528,17 @@ static int rawCopy(GeSgxWalker *w, GeSgxFrameData *f, uint32_t src, uint32_t byt
 	return 1;
 }
 
-// Vertex data in PSP RAM the GPU has mapped: its offset there (4 byte aligned for the GPU)
+/*
+	Vertex data in PSP RAM the GPU has mapped: its offset there (4 byte
+	aligned for the GPU). The GPU reads it when the frame is rendered, a
+	frame or more after the GE read it: vertices the game writes anew every
+	frame were by then the next frame's (Black Rock Shooter's menus and
+	text: quads from the next frame's text, letters in pieces; The 3rd
+	Birthday's particles, fog and HUD). The small ones, which games build
+	every frame, are copied when walked, as the GE read them; only big
+	ones (models, written once) are read in place.
+*/
+#define DIRECT_MIN_BYTES (32 * 1024)
 static int directVertices(const GeSgxWalker *w, const GeSgxFrameData *f, uint32_t addr, uint32_t bytes, uint32_t *off) {
 	if (!f->direct || !w->direct_size)
 		return 0;
@@ -1898,7 +1908,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			why = GE_SGX_CPU_LAYOUT;
 		else if (!timedUniforms(w, f, l, xp, clk, TIME_EVERY))
 			why = GE_SGX_CPU_FULL;
-		else if (range <= GE_SGX_MAX_DRAW_VERTICES && directVertices(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
+		else if (range <= GE_SGX_MAX_DRAW_VERTICES && range * l->size >= DIRECT_MIN_BYTES &&
+		         directVertices(w, f, w->vaddr + imin * l->size, range * l->size, &raw_off)) {
 			// The GPU reads the PSP's memory: nothing to copy
 			gpu = 2;
 			for (i = 0; i < count; i++)

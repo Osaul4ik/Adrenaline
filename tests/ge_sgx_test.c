@@ -1015,9 +1015,37 @@ static void testGpuDirect(void) {
 	geSgxWalkerRun(w);
 	geSgxBuildFinish(w);
 
-	CHECK(frame.ndraws == 2 && fdraws[0].direct && fdraws[0].base == 0x900000 - (RAM_BASE & 0xFFFFFF) + (0x08000000 - RAM_BASE) && fdraws[0].count == 9 && fidx[6] == 4,
-	      "direct draws %u direct %u base %X count %u idx %u", frame.ndraws, fdraws[0].direct, fdraws[0].base, fdraws[0].count, fidx[6]);
-	CHECK(frame.ndraws == 2 && !fdraws[1].direct && fdraws[1].gpu && frame.nraw > 0, "unaligned copied: direct %u raw %u", fdraws[1].direct, frame.nraw);
+	/* small vertex data (games rewrite it every frame): copied when walked */
+	CHECK(frame.ndraws >= 1 && !fdraws[0].direct && fdraws[0].gpu && frame.nraw > 0, "small vertices copied: draws %u direct %u gpu %u raw %u",
+	      frame.ndraws, fdraws[0].direct, fdraws[0].gpu, frame.nraw);
+
+	/* big (an indexed range of 2000 vertices of 20 bytes, 40 KB): read where it is */
+	resetFrame();
+	frame.raw = fraw;
+	frame.max_raw = sizeof(fraw);
+	frame.uniforms = funi;
+	frame.max_uniforms = sizeof(funi);
+	frame.direct = ram;
+	w->gpu_transform = 1;
+	w->direct_start = RAM_BASE;
+	w->direct_size = RAM_SIZE;
+	w32(0x08910000, 0);
+	w16(0x08910000, 0);
+	w16(0x08910002, 1999);
+	w16(0x08910004, 1000);
+	L b = { 0x08800000 };
+	setup3D(&b);
+	emit(&b, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF | (2u << 11))); // 16 bit indices
+	emit(&b, C(0x10, 0x080000));
+	emit(&b, C(0x01, 0x900000));
+	emit(&b, C(0x02, 0x910000));
+	emit(&b, C(0x04, (3u << 16) | 3));
+	emit(&b, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	geSgxBuildFinish(w);
+	CHECK(frame.ndraws == 1 && fdraws[0].direct && fdraws[0].base == 0x900000 - (RAM_BASE & 0xFFFFFF) + (0x08000000 - RAM_BASE),
+	      "big vertices direct: draws %u direct %u base %X", frame.ndraws, frame.ndraws ? fdraws[0].direct : 0, frame.ndraws ? fdraws[0].base : 0);
 	w->gpu_transform = 0;
 	w->direct_size = 0;
 }
