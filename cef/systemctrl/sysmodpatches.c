@@ -39,10 +39,6 @@ u32 FindPowerFunction(u32 nid) {
 	return FindProc("scePower_Service", "scePower", nid);
 }
 
-static u32 FindPowerDriverFunction(u32 nid) {
-	return FindProc("scePower_Service", "scePower_driver", nid);
-}
-
 typedef struct PartitionData {
 	u32 unk[5];
 	u32 size;

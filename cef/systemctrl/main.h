@@ -92,6 +92,7 @@ int scePowerGetBatteryTemp661();
 int scePowerGetBatteryVolt661();
 
 int sceChkregCheckRegion661();
+int sceDisplaySetFrameBuf661(void *topaddr, int bufferwidth, int pixelformat, int sync);
 int sceChkregGetPsCode661(u8 *pscode);
 
 int ReadFile(char *file, void *buf, int size);

@@ -33,8 +33,9 @@ int removePath(const char *path) {
 			if (res > 0) {
 				if (dir.d_name[0] != '.') {
 					char new_path[128];
-					sprintf(new_path, "%s/%s", path, dir.d_name);
-					removePath(new_path);
+					// A path too long for it is skipped, not cut into another one's
+					if (snprintf(new_path, sizeof(new_path), "%s/%s", path, dir.d_name) < (int)sizeof(new_path))
+						removePath(new_path);
 				}
 			}
 		} while (res > 0);
