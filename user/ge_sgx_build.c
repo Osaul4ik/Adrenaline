@@ -789,7 +789,7 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 	}
 
 	float view[3] = { 0, 0, 0 };
-	float wpos[3], wnrm[3];
+	float wpos[3] = { 0.0f, 0.0f, 0.0f }, wnrm[3] = { 0.0f, 0.0f, 0.0f }; // set where used (the compiler cannot tell)
 	int need_world = x->lighting || x->uvgen == 2;
 	float cx, cy, cz, cw;
 	if (need_world) {

@@ -39,7 +39,9 @@ static void buildPspemuMsfsPath(char *out_path, const char *in_path) {
   if (strncmp(in_path, "__ADRENALINE__", 14) == 0) {
     snprintf(out_path, MAX_PATH_LENGTH, "ux0:app/" ADRENALINE_TITLEID "/%s", in_path+14);
   } else {
-    snprintf(out_path, MAX_PATH_LENGTH, "%s/%s", getPspemuMemoryStickLocation(), in_path);
+    // A path too long for out_path is cut there (as before; checked so the compiler knows it is meant)
+    if (snprintf(out_path, MAX_PATH_LENGTH, "%s/%s", getPspemuMemoryStickLocation(), in_path) >= MAX_PATH_LENGTH)
+      out_path[MAX_PATH_LENGTH - 1] = '\0';
   }
 }
 
@@ -481,7 +483,7 @@ static int ScePspemuMsfsExtraDread(ScePspemuMsfsDescriptor *descriptor, SceIoDir
 
     ScePspemuMsfsGetstat(descriptor->path, &dir->d_stat);
 
-    dir->d_stat.st_mode = (SCE_S_IFDIR | SCE_S_IRWXO | SCE_S_IRWXG | SCE_S_IRWXU);
+    dir->d_stat.st_mode = (SCE_S_IFDIR | SCE_S_IRWXS | SCE_S_IRWXG | SCE_S_IRWXU);
     dir->d_stat.st_attr = SCE_SO_IFDIR;
 
     return 1;
@@ -572,8 +574,10 @@ static int ScePspemuMsfsRename(const char *oldname, const char *newname) {
       return SCE_ERROR_ERRNO_EINVAL;
 
     *p = '\0';
-    snprintf(new_path, MAX_PATH_LENGTH, "%s/%s", old_path, newname);
+    int n = snprintf(new_path, MAX_PATH_LENGTH, "%s/%s", old_path, newname);
     *p = '/';
+    if (n >= MAX_PATH_LENGTH)
+      return SCE_ERROR_ERRNO_ENAMETOOLONG;
   }
 
   return sceIoRename(old_path, new_path);

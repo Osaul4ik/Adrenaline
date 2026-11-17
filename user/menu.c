@@ -544,19 +544,14 @@ int AdrenalineDraw(SceSize args, void *argp) {
   matrix4x4_multiply(mvp, projection, modelview);
 
   // f.lux shaders uniforms
-  SceGxmProgramParameter *vflux_color_param = sceGxmProgramFindParameterByName(gxm_program_vflux_f, "color");
-  SceGxmProgramParameter *vflux_wvp_param = sceGxmProgramFindParameterByName(gxm_program_vflux_v, "wvp");
+  const SceGxmProgramParameter *vflux_color_param = sceGxmProgramFindParameterByName(gxm_program_vflux_f, "color");
+  const SceGxmProgramParameter *vflux_wvp_param = sceGxmProgramFindParameterByName(gxm_program_vflux_v, "wvp");
 
   vita2d_shader *shader = opaque_shader;
 
   settings_semaid = sceKernelCreateSema("AdrenalineSettingsSemaphore", 0, 0, 1, NULL);
   if (settings_semaid < 0)
     return settings_semaid;
-
-  // FPS counting
-  SceUInt64 cur_micros = 0, delta_micros = 0, last_micros = 0;
-  uint32_t frames = 0;
-  float fps = 0.0f;
 
   // keep track of entering pops mode
   int lastPops = 0;
@@ -849,18 +844,6 @@ int AdrenalineDraw(SceSize args, void *argp) {
       sceGxmDraw(_vita2d_context, SCE_GXM_PRIMITIVE_TRIANGLE_FAN, SCE_GXM_INDEX_FORMAT_U16, flux_indices, 4);
     }
 
-    // Show FPS
-    // pgf_draw_textf(0.0f, 0.0f, WHITE, FONT_SIZE, "FPS: %.2f", fps);
-
-    // Calculate FPS
-    cur_micros = sceKernelGetProcessTimeWide();
-    if (cur_micros >= (last_micros + 1000000)) {
-      delta_micros = cur_micros - last_micros;
-      last_micros = cur_micros;
-      fps = (frames / (double)delta_micros) * 1000000.0f;
-      frames = 0;
-    }
-
     if (sgx_active) {
       prof_t = sceKernelGetProcessTimeWide();
       prof.build += prof_t - prof_t0;
@@ -870,7 +853,6 @@ int AdrenalineDraw(SceSize args, void *argp) {
     // End drawing
     vita2d_end_drawing();
     vita2d_swap_buffers();
-    frames++;
 
     if (sgx_active) {
       prof_t = sceKernelGetProcessTimeWide();

@@ -87,14 +87,11 @@ jobs:
           git clone --depth 1 https://github.com/vitasdk/vdpm /tmp/vdpm
           /tmp/vdpm/bootstrap-vitasdk.sh
           export PATH="$VITASDK/bin:$PATH"
-          # taihen for the user module, the rest for vita2d
-          # The channel's package database may lack them (2026.08, sequence 2026111687: "target not found"):
-          # then the packages' own archives, unpacked where vdpm puts them
-          if ! VDPM_NONINTERACTIVE=1 vdpm install taihen zlib libpng libjpeg-turbo freetype; then
-            for p in taihen zlib libpng libjpeg-turbo freetype; do
-              curl -fsSL "https://github.com/vitasdk/packages/releases/download/master/$p.tar.xz" | tar -xJ -C "$VITASDK/arm-vita-eabi"
-            done
-          fi
+          # taihen for the user module, the rest for vita2d: from the packages' own archives, unpacked
+          # where vdpm puts them (vdpm's 2026.08 channel database lacks them: "target not found")
+          for p in taihen zlib libpng libjpeg-turbo freetype; do
+            curl -fsSL "https://github.com/vitasdk/packages/releases/download/master/$p.tar.xz" | tar -xJ -C "$VITASDK/arm-vita-eabi"
+          done
           echo "VITASDK=$VITASDK" >> "$GITHUB_ENV"
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
 
@@ -103,7 +100,7 @@ jobs:
           git clone https://github.com/frangarcj/vita2dlib /tmp/vita2dlib
           git -C /tmp/vita2dlib checkout "${VITA2D_FORK_COMMIT}"
           make -C /tmp/vita2dlib/libvita2d -j"$(nproc)" \
-            CFLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wl,-q -Wall -O3 -Iinclude -I$VITASDK/arm-vita-eabi/include/freetype2"
+            CFLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-discarded-qualifiers -Wl,-q -Wall -O3 -Iinclude -I$VITASDK/arm-vita-eabi/include/freetype2"
           make -C /tmp/vita2dlib/libvita2d install
           curl -fsSL -o "$VITASDK/arm-vita-eabi/lib/libvitashaders.a" "${VITASHADERS_URL}"
           echo "${VITASHADERS_SHA256}  $VITASDK/arm-vita-eabi/lib/libvitashaders.a" | sha256sum -c -

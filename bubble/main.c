@@ -121,7 +121,7 @@ static int downloadFile(const char *src, const char *dst) {
 			value += read;
 
 			psvDebugScreenSetXY(x, y);
-			printf("%d%%", (value * 100) / (uint32_t)size);
+			printf("%u%%", size ? (unsigned)((uint64_t)value * 100 / size) : 0u);
 		}
 	}
 

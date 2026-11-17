@@ -314,7 +314,7 @@ void drawStates() {
       pgf_draw_text(250.0f, FONT_Y_LINE(2 + i * 5), WHITE, FONT_SIZE, states[base_pos + i].title);
 
       // Date & time
-      char date_string[16];
+      char date_string[24]; // getDateString writes up to 24
       getDateString(date_string, date_format, &states[base_pos + i].time);
 
       char time_string[24];
