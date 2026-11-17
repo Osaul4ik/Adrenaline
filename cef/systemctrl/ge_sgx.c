@@ -451,6 +451,80 @@ static u32 segmentStart(u32 after) {
 	return best;
 }
 
+/*
+	A copy record in the shadow: the event's seq, the number of pieces, then
+	each piece: its address, its words, the words. The commands the GE did
+	since the signal before, and the sublists they call (as deep as
+	SHADOW_CALL_DEPTH, each up to its RET, SHADOW_MAX_SUBLIST at most): The
+	3rd Birthday's camera, HUD and fog come from sublists its handler writes
+	anew, read later they were another frame's (the scene seen from another
+	angle).
+*/
+#define SHADOW_MAX_SUBLIST (4 * 1024)
+#define SHADOW_MAX_PIECES 96
+#define SHADOW_CALL_DEPTH 2
+#define SHADOW_MAX_RECORD 0xFFFF
+
+static u32 rec_off, rec_len, rec_pieces, rec_ok;
+static u32 piece_addr[SHADOW_MAX_PIECES];
+static u32 call_base, call_offset;
+
+static inline const volatile u32 *uncachedPtr(u32 addr) {
+	return (const volatile u32 *)((addr & 0x1FFFFFFF) | 0xA0000000); // uncached: as the GE read it
+}
+
+static int validRam(u32 addr, u32 bytes) {
+	addr &= 0x0FFFFFFF;
+	return addr >= 0x08000000 && addr + bytes <= 0x0A000000 && !(addr & 3);
+}
+
+// One piece: copies up to words (to a RET when sublist); its CALLs copied after it, depth permitting
+static void addPiece(u32 addr, u32 words, int sublist, int depth) {
+	u32 k;
+	addr &= 0x0FFFFFFC;
+	if (!rec_ok || rec_pieces >= SHADOW_MAX_PIECES || !validRam(addr, 4))
+		return;
+	for (k = 0; k < rec_pieces; k++) {
+		if (piece_addr[k] == addr)
+			return; // copied already
+	}
+	if (sublist) {
+		words = SHADOW_MAX_SUBLIST / 4;
+		if (!validRam(addr, words * 4))
+			words = (0x0A000000 - addr) / 4;
+	}
+	if (rec_len + 2 + words > SHADOW_MAX_RECORD || rec_off + rec_len + 2 + words > shadow_words) {
+		rec_ok = 0;
+		return;
+	}
+	const volatile u32 *src = uncachedPtr(addr);
+	u32 head = rec_off + rec_len, n = 0;
+	u32 calls[16], ncalls = 0;
+	while (n < words) {
+		u32 op = src[n];
+		shadow[head + 2 + n] = op;
+		n++;
+		u32 cmd = op >> 24, data = op & 0x00FFFFFF;
+		if (cmd == 0x10) {
+			call_base = data;
+		} else if (cmd == 0x13) {
+			call_offset = data << 8;
+		} else if (cmd == 0x0A && ncalls < 16) { // CALL
+			calls[ncalls++] = ((((call_base & 0x000F0000u) << 8) | (data & 0x00FFFFFC)) + call_offset) & 0x0FFFFFFC;
+		} else if (sublist && (cmd == 0x0B || cmd == 0x0C)) { // RET, END
+			break;
+		}
+	}
+	shadow[head] = addr;
+	shadow[head + 1] = n;
+	rec_len += 2 + n;
+	piece_addr[rec_pieces++] = addr;
+	if (depth < SHADOW_CALL_DEPTH) {
+		for (k = 0; k < ncalls; k++)
+			addPiece(calls[k], 0, 1, depth + 1);
+	}
+}
+
 // The copy for an event about to be pushed (its seq: ring->write); 0 if none
 static u32 captureSegment(u32 after) {
 	if (!shadow || !after)
@@ -460,20 +534,28 @@ static u32 captureSegment(u32 after) {
 	if (!start || start >= after)
 		return 0;
 	u32 words = (after - start) / 4;
-	if (words + 1 > shadow_words || words > 0xFFFF)
+	// Room for the commands and some sublists from here, else from the shadow's start (sublists past its end are left out)
+	u32 need = 2 + 2 + words + 2048;
+	if (need > shadow_words)
 		return 0;
-	if (shadow_pos + words + 1 > shadow_words)
+	if (shadow_pos + need > shadow_words)
 		shadow_pos = 0;
-	u32 off = shadow_pos;
-	if (off > 0xFFFF)
+	rec_off = shadow_pos;
+	if (rec_off > 0xFFFF)
 		return 0;
-	const volatile u32 *src = (const volatile u32 *)((start & 0x1FFFFFFF) | 0xA0000000); // uncached: as the GE read it
-	u32 i;
-	shadow[off] = ring->write;
-	for (i = 0; i < words; i++)
-		shadow[off + 1 + i] = src[i];
-	shadow_pos = off + 1 + words;
-	return (words << 16) | off;
+	rec_len = 2;
+	rec_pieces = 0;
+	rec_ok = 1;
+	call_base = _sceGeGetCmd ? (_sceGeGetCmd(0x10) & 0x00FFFFFF) : 0;
+	call_offset = _sceGeGetCmd ? ((_sceGeGetCmd(0x13) & 0x00FFFFFF) << 8) : 0;
+	addPiece(start, words, 0, 0);
+	if (!rec_pieces)
+		return 0;
+	rec_ok = 1;
+	shadow[rec_off] = ring->write;
+	shadow[rec_off + 1] = rec_pieces;
+	shadow_pos = rec_off + rec_len;
+	return (rec_len << 16) | rec_off;
 }
 
 #if GE_SGX_SIGNAL_WAIT
