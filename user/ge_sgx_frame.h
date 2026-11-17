@@ -129,6 +129,7 @@ typedef struct {
 	uint8_t gpu;
 	uint8_t direct;     // base is an offset in PSP RAM, which the GPU reads where it is
 	uint8_t fbfmt;      // the framebuffer's pixel format (FRAMEBUFPIXFMT: 0 565, 1 5551, 2 4444, 3 8888)
+	uint8_t texfmt;     // framebuffer texture (fbtex): the texture format it is read with (0: 5650, alpha 1)
 	uint16_t vkey;      // vertex program key (GE_SGX_VS_*)
 	uint32_t vtype;     // GE vertex type: the attribute formats and offsets
 	uint32_t ucommon;   // byte offsets of its uniform buffers in the uniform arena

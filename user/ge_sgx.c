@@ -135,6 +135,25 @@ static int initBlockCache(void) {
 	return 1;
 }
 
+/*
+	The commands the GE did between two signals, as the PSP copied them
+	before the game's handler wrote over them (GE_SGX_EVENT_SIGNAL's shadow):
+	put over the blocks the walker reads while it walks up to that signal
+*/
+static struct {
+	uint32_t addr, len; // PSP address (no cache bits), bytes
+	const uint8_t *data;
+} overlay;
+static uint32_t overlays_used = 0, overlays_stale = 0;
+
+static inline void applyOverlay(uint8_t *dst, uint32_t block) {
+	if (!overlay.len || overlay.addr >= block + GE_SGX_BLOCK_SIZE || overlay.addr + overlay.len <= block)
+		return;
+	uint32_t from = overlay.addr > block ? overlay.addr : block;
+	uint32_t to = overlay.addr + overlay.len < block + GE_SGX_BLOCK_SIZE ? overlay.addr + overlay.len : block + GE_SGX_BLOCK_SIZE;
+	memcpy(dst + (from - block), overlay.data + (from - overlay.addr), to - from);
+}
+
 static const void *blockFn(void *user, uint32_t block) {
 	const uint8_t *src;
 
@@ -155,6 +174,7 @@ static const void *blockFn(void *user, uint32_t block) {
 
 	if (block_tag[i] != (block | 1) || block_epoch[i] != epoch) {
 		memcpy(dst, src, GE_SGX_BLOCK_SIZE);
+		applyOverlay(dst, block);
 		block_tag[i] = block | 1;
 		block_epoch[i] = epoch;
 		block_copies++;
@@ -1192,6 +1212,7 @@ static void benchmarkMemory(void) {
 static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t seen_seq = 0;
 	uint32_t ring_addr = 0, session = 0, mask = 0, entries = 0;
+	uint32_t shadow_addr = 0, shadow_size = 0;
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
@@ -1301,6 +1322,13 @@ static int GeSgxThread(SceSize args, void *argp) {
 			slow_logs = 0;
 			session_start = sceKernelGetProcessTimeWide();
 			GeSgxLog("GeSgx: ring %08X, %u entries, session %u\n", (unsigned)ring_addr, (unsigned)entries, (unsigned)session);
+			{
+				const GeSgxRing *r0 = (const GeSgxRing *)ScePspemuConvertAddress(ring_addr, KERMIT_INPUT_MODE, RING_EVENTS_OFFSET);
+				shadow_addr = r0 ? r0->shadow : 0;
+				shadow_size = r0 ? r0->shadow_size : 0;
+				overlay.len = 0;
+				GeSgxLog("GeSgx: copies of the lists at the signals: %08X, %u KB\n", (unsigned)shadow_addr, (unsigned)(shadow_size / 1024));
+			}
 		}
 
 		if (!ring_addr) {
@@ -1414,11 +1442,35 @@ static int GeSgxThread(SceSize args, void *argp) {
 					// The GE at a signal, its handler about to run: the lists up to it (the PSP side waits for this)
 					if (!walker.hold_signals)
 						GeSgxLog("GeSgx: the GE's signal handlers reported: lists walked up to each signal before its handler runs\n");
+					{
+						/*
+							The commands since the signal before, as the GE read them
+							(the game's handler writes over them after): over the
+							memory while the walk gets to this signal
+						*/
+						uint32_t words = e->d >> 16, off = e->d & 0xFFFF;
+						if (words && shadow_addr && (off + 1 + words) * 4 <= shadow_size) {
+							const uint32_t *sh = (const uint32_t *)ScePspemuConvertAddress(shadow_addr + off * 4, KERMIT_INPUT_MODE, (1 + words) * 4);
+							if (sh && sh[0] == e->seq) {
+								overlay.addr = (e->b & 0x0FFFFFFCu) - words * 4;
+								overlay.len = words * 4;
+								overlay.data = (const uint8_t *)(sh + 1);
+								overlays_used++;
+								epoch++; // blocks read before are read again, with it
+							} else {
+								overlays_stale++;
+							}
+						}
+					}
 					if (e->c)
 						geSgxWalkerFinish(&walker);
 					else
 						geSgxWalkerSignal(&walker, e->b);
 					noteListDone();
+					if (overlay.len) {
+						overlay.len = 0;
+						epoch++;
+					}
 					// Read up to here: the PSP side waits for it in the GE's interrupt
 					writeAck(session, read + i + 1);
 					break;
@@ -1560,7 +1612,7 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
@@ -1568,7 +1620,7 @@ per_second:;
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs, (unsigned)frame_stats.hw_state, (unsigned)frame_stats.contexts, (unsigned)frame_stats.signal_events, (unsigned)frame_stats.unstalled,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
-					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped,
+					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped, (unsigned)overlays_used, (unsigned)overlays_stale,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
 					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024));
 			}

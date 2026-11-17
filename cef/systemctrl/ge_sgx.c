@@ -51,6 +51,11 @@ static int (* _sceGeRestoreContext)(const void *context);
 static int (* _sceKernelCallSubIntrHandler)(int intr, int sub, int arg2, int arg3);
 
 static volatile GeSgxRing *ring = NULL; // uncached
+
+// Lists queued lately: where the first signal's copy starts (GE_SGX_EVENT_SIGNAL)
+#define LIST_STARTS 8
+static u32 list_starts[LIST_STARTS];
+static u32 list_starts_n = 0;
 static u32 ring_mask = 0;
 static SceUID ring_blockid = -1;
 
@@ -156,8 +161,17 @@ static u32 listContext(const PspGeListArgs *arg) {
 	return (arg && arg->size >= 8 && arg->context) ? GE_SGX_LIST_CONTEXT : 0;
 }
 
+static void noteListStart(const void *list) {
+	u32 intr = interruptsOff();
+	list_starts[list_starts_n % LIST_STARTS] = (u32)list & 0x0FFFFFFC;
+	list_starts_n++;
+	interruptsRestore(intr);
+}
+
 static int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
 	int qid = _sceGeListEnQueue(list, stall, cbid, arg);
+	if (qid >= 0)
+		noteListStart(list);
 	if (qid >= 0)
 		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, listContext(arg));
 	return qid;
@@ -165,6 +179,8 @@ static int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspG
 
 static int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
 	int qid = _sceGeListEnQueueHead(list, stall, cbid, arg);
+	if (qid >= 0)
+		noteListStart(list);
 	if (qid >= 0)
 		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, GE_SGX_LIST_HEAD | listContext(arg));
 	return qid;
@@ -381,9 +397,86 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	that times out, or a frame's time used up, ends the waits until the
 	next flip; the lists are then read when the game waits for the GE.
 */
+#if GE_SGX_SIGNAL_WAIT
 static u32 signal_frame_us = 0;
-static int signals_since_finish = 0;
+#endif
 
+/*
+	The commands the GE did since the last signal, copied when the next one
+	(or the finish) comes, before the game's handler runs: the Vita side
+	walks them as the GE read them, without the PSP waiting for it (the
+	waits in the interrupt, 3 ms each, had to be given up most of the time:
+	the frame rate fell and most signals were read late anyway). A ring of
+	copies (the shadow), each a header word (the event's seq) and the words.
+*/
+#define SHADOW_MAX_SEGMENT (32 * 1024)
+static SceUID shadow_blockid = -1;
+static volatile u32 *shadow = NULL; // uncached
+static u32 shadow_words = 0, shadow_pos = 0;
+static u32 seg_after = 0;           // list address after the last signal (0: none since the list started)
+
+static void allocShadow(void) {
+	u32 size;
+	for (size = 128 * 1024; size >= 32 * 1024; size /= 2) {
+		SceUID id = sceKernelAllocPartitionMemory661(PSP_MEMORY_PARTITION_KERNEL, "GeSgxShadow", PSP_SMEM_High, size, NULL);
+		if (id < 0)
+			continue;
+		shadow_blockid = id;
+		shadow = (volatile u32 *)((u32)sceKernelGetBlockHeadAddr661(id) | 0x20000000);
+		shadow_words = size / 4;
+		shadow_pos = 0;
+		ring->shadow = (u32)shadow & ~0x20000000;
+		ring->shadow_size = size;
+		return;
+	}
+}
+
+static void freeShadow(void) {
+	if (shadow_blockid >= 0)
+		sceKernelFreePartitionMemory661(shadow_blockid);
+	shadow_blockid = -1;
+	shadow = NULL;
+}
+
+// The start of the segment that ends at after: the last signal's, else the start of the list it is in
+static u32 segmentStart(u32 after) {
+	if (seg_after && seg_after < after && after - seg_after <= SHADOW_MAX_SEGMENT)
+		return seg_after;
+	u32 best = 0, i;
+	for (i = 0; i < list_starts_n && i < LIST_STARTS; i++) {
+		u32 st = list_starts[i];
+		if (st <= after && after - st <= SHADOW_MAX_SEGMENT && st > best)
+			best = st;
+	}
+	return best;
+}
+
+// The copy for an event about to be pushed (its seq: ring->write); 0 if none
+static u32 captureSegment(u32 after) {
+	if (!shadow || !after)
+		return 0;
+	after &= 0x0FFFFFFC;
+	u32 start = segmentStart(after);
+	if (!start || start >= after)
+		return 0;
+	u32 words = (after - start) / 4;
+	if (words + 1 > shadow_words || words > 0xFFFF)
+		return 0;
+	if (shadow_pos + words + 1 > shadow_words)
+		shadow_pos = 0;
+	u32 off = shadow_pos;
+	if (off > 0xFFFF)
+		return 0;
+	const volatile u32 *src = (const volatile u32 *)((start & 0x1FFFFFFF) | 0xA0000000); // uncached: as the GE read it
+	u32 i;
+	shadow[off] = ring->write;
+	for (i = 0; i < words; i++)
+		shadow[off + 1 + i] = src[i];
+	shadow_pos = off + 1 + words;
+	return (words << 16) | off;
+}
+
+#if GE_SGX_SIGNAL_WAIT
 static void waitForVitaSignal(void) {
 	u32 target = ring->write;
 	if (shared->session != ring->session || !_sceKernelGetSystemTimeLow)
@@ -417,6 +510,7 @@ static void waitForVitaSignal(void) {
 	if (waited > ring->signal_max_us)
 		ring->signal_max_us = waited;
 }
+#endif
 
 static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int arg3) {
 	/*
@@ -427,15 +521,14 @@ static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int a
 		game's wait for the GE, without a wait in the interrupt)
 	*/
 	if (intr == PSP_GE_INTR && ring) {
-		if (!(sub & 1)) {
-			signals_since_finish = 1;
-			ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 0, 0);
-			waitForVitaSignal();
-		} else if (signals_since_finish) {
-			signals_since_finish = 0;
-			ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 1, 0);
-			waitForVitaSignal();
-		}
+		u32 intr_flags = interruptsOff();
+		u32 copy = captureSegment((u32)arg3);
+		ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, (u32)(sub & 1), copy);
+		interruptsRestore(intr_flags);
+		seg_after = (sub & 1) ? 0 : ((u32)arg3 & 0x0FFFFFFC);
+#if GE_SGX_SIGNAL_WAIT
+		waitForVitaSignal();
+#endif
 	}
 	return _sceKernelCallSubIntrHandler(intr, sub, arg2, arg3);
 }
@@ -546,7 +639,9 @@ static void pushRegs(void) {
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
 	copyVram();
 	pushRegs();
+#if GE_SGX_SIGNAL_WAIT
 	signal_frame_us = 0;
+#endif
 	ringPush(GE_SGX_EVENT_FLIP, (u32)topaddr, bufferwidth, pixelformat, sync);
 	return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -639,6 +734,7 @@ int GeSgxInit(void) {
 
 	ring->vram_copy_how = how;
 	strncpy((char *)ring->vram_copy_module, dmac_module, sizeof(ring->vram_copy_module) - 1);
+	allocShadow();
 	ring->magic = GE_SGX_MAGIC;
 	ring->version = GE_SGX_VERSION;
 	ring->session = shared->session + 1;
@@ -651,6 +747,7 @@ int GeSgxInit(void) {
 	int res = SendAdrenalineCmdArg(ADRENALINE_VITA_CMD_GE_SGX_START, (u32)ring & ~0x20000000);
 	log("GeSgx: start = %d, ring %08X, %d entries, session %d\n", res, (unsigned int)ring, (int)(ring_mask + 1), (int)ring->session);
 	if (res != 1) {
+		freeShadow();
 		freeRing();
 		return 0;
 	}
@@ -671,7 +768,8 @@ int GeSgxInit(void) {
 		sctrlHENPatchSyscall((u32)_sceGeSetCallback, sceGeSetCallbackPatched);
 	if (_sceGeRestoreContext)
 		sctrlHENPatchSyscall((u32)_sceGeRestoreContext, sceGeRestoreContextPatched);
-	signal_frame_us = 0;
+	seg_after = 0;
+	list_starts_n = 0;
 	if (_sceKernelCallSubIntrHandler && subintr_stub)
 		MAKE_JUMP(subintr_stub, sceKernelCallSubIntrHandlerPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);

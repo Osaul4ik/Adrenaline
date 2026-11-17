@@ -1437,6 +1437,14 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				continue;
 			}
 			tex = *t;
+			/*
+				A framebuffer read as a 5650 texture: alpha 1, whatever its
+				rendering's alpha holds (the PSP's texel has no alpha; Need for
+				Speed Carbon's blur copied its 565 screen with that alpha and
+				blended it in: alpha 0 left it black, the screen's edges dark)
+			*/
+			if (d->fbtex && !d->depthtex && d->texfmt == 0)
+				sceGxmTextureSetFormat(&tex, SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR);
 			sceGxmTextureSetUAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_U) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
 			sceGxmTextureSetVAddrMode(&tex, (d->tex_mode & GE_SGX_TEX_CLAMP_V) ? SCE_GXM_TEXTURE_ADDR_CLAMP : SCE_GXM_TEXTURE_ADDR_REPEAT);
 			sceGxmTextureSetMinFilter(&tex, (d->tex_mode & GE_SGX_TEX_LINEAR_MIN) ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);

@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 4 // the ring's layout: both sides from the same build
+#define GE_SGX_VERSION 5 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -83,7 +83,11 @@ enum GeSgxEventTypes {
 		driver's call of the game's signal callback, sceKernelCallSubIntrHandler):
 		a = the signal's 16 bits, b = the list address after its SIGNAL/END
 		(0: not given), c = 1 for the finish callback instead (the GE did
-		the list to its FINISH). The PSP side waits (GE_SGX_SIGNAL_TIMEOUT_US at most)
+		the list to its FINISH), d = the copy of the list's commands the GE
+		did since the signal before (shadow, at that time: the game's
+		handler writes over them after): words in the shadow at d & 0xFFFF
+		(a header word, the event's seq, then the commands), d >> 16 of them,
+		ending at b (0: no copy). The PSP side waits (GE_SGX_SIGNAL_TIMEOUT_US at most)
 		until the Vita side has walked the lists up to that signal, then lets
 		the handler run: what the handler writes for the commands after the
 		signal is read after it ran, as the GE reads it.
@@ -112,7 +116,9 @@ typedef struct {
 	unsigned int version;
 	unsigned int session;      // changes with every game start
 	unsigned int entries;      // GE_SGX_RING_ENTRIES
-	unsigned int reserved0[12];
+	unsigned int shadow;       // GE_SGX_EVENT_SIGNAL's copies of the lists: kernel address (0: none)
+	unsigned int shadow_size;  // its bytes
+	unsigned int reserved0[10];
 
 	// Written by the PSP side (own 64 byte line)
 	volatile unsigned int write; // events written so far
@@ -188,6 +194,12 @@ typedef struct {
 	reads) costs it once.
 */
 #define GE_SGX_SYNC_TIMEOUT_US 100000
+
+/*
+	The PSP side waits in signal handlers for the Vita side's walk (0: it
+	copies the commands instead, GE_SGX_EVENT_SIGNAL's d, and goes on)
+*/
+#define GE_SGX_SIGNAL_WAIT 0
 
 // Longest wait for the Vita side in a signal handler (the GE's interrupt: nothing else runs on the PSP meanwhile)
 #define GE_SGX_SIGNAL_TIMEOUT_US 3000

@@ -1030,7 +1030,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->atest_func == b->atest_func && a->atest_ref == b->atest_ref && a->tex_mode == b->tex_mode &&
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
-		a->fbtex == b->fbtex && a->depthtex == b->depthtex && a->lut == b->lut && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
+		a->fbtex == b->fbtex && a->texfmt == b->texfmt && a->depthtex == b->depthtex && a->lut == b->lut && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
 		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
@@ -1772,6 +1772,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			float kx = tw / fbreg[rt].w, ky = th / fbreg[rt].h;
 			cached_d.texture = 0;
 			cached_d.fbtex = fbreg[rt].fb + 1;
+			cached_d.texfmt = (uint8_t)(reg(w, GE_CMD_TEXFORMAT) & 0xF);
 			cached_x.tex_w = 1.0f / fbreg[rt].w;
 			cached_x.tex_h = 1.0f / fbreg[rt].h;
 			cached_x.fbk_u = kx;
