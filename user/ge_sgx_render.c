@@ -518,6 +518,8 @@ typedef struct {
 	void *pool_depth;
 	uint32_t pool_depth_bytes;
 	uint32_t scene_frame; // frame (rframes + 1) of its last scene
+	uint32_t nscenes;     // scenes in that frame
+	uint32_t max_scenes;  // scenes a frame its render target is made for
 	uint32_t used;  // frame it was last drawn or shown
 	uint32_t bytes;
 } Target;
@@ -594,6 +596,7 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		reflection, the blur's one before and after the copy), which GXM's
 		render target must be made for: one for up to 8
 	*/
+	uint32_t max_scenes = 1;
 	{
 		SceGxmRenderTargetParams params;
 		memset(&params, 0, sizeof(params));
@@ -607,6 +610,7 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 		if (err >= 0 && rtgt) {
 			sceGxmDestroyRenderTarget(tex->gxm_rtgt);
 			tex->gxm_rtgt = rtgt;
+			max_scenes = TARGET_SCENES;
 		} else if (target_failures++ < 8) {
 			GeSgxLog("GeSgx render: target %X: render target for %d scenes %08X (vita2d's kept)\n", (unsigned)fb, TARGET_SCENES, (unsigned)err);
 		}
@@ -644,6 +648,8 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	t->pool_depth = own_depth ? NULL : depth;
 	t->pool_depth_bytes = own_depth ? 0 : depth_bytes;
 	t->scene_frame = 0;
+	t->nscenes = 0;
+	t->max_scenes = max_scenes;
 	t->used = target_clock;
 	t->bytes = bytes;
 	target_bytes += bytes;
@@ -1578,6 +1584,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		framebuffer's rendering; a draw sampling that framebuffer starts a
 		scene of its own, after a copy of it
 	*/
+	static uint32_t scene_limit_logs = 0;
 	snap_fb = 0xFFFFFFFFu;
 	snap_count = 0;
 	dview_fb = 0xFFFFFFFFu;
@@ -1586,10 +1593,6 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	uint32_t i = 0;
 	while (i < frame->ndraws) {
 		uint32_t dfb = frame->draws[i].fb, j = i + 1;
-		while (j < frame->ndraws && frame->draws[j].fb == dfb && !(snap_count < MAX_SNAPSHOTS && selfSampling(&frame->draws[j], dfb)) &&
-		       !(dview_count < MAX_DEPTH_VIEWS && newDepthView(&frame->draws[j - 1], &frame->draws[j])))
-			j++;
-
 		uint32_t w = 480, h = 272, k;
 		for (k = 0; k < frame->nfbs; k++) {
 			if (frame->fbs[k].fb == dfb && frame->fbs[k].w && frame->fbs[k].h) {
@@ -1598,8 +1601,30 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			}
 		}
 		Target *t = getTarget(dfb, w * GE_SGX_SCALE, h * GE_SGX_SCALE);
-		if (!t) {
-			rtraceAdd("GeSgx R: scene: draws %u-%u into fb %X: no rendering (%ux%u)\n", (unsigned)i, (unsigned)(j - 1), (unsigned)dfb, (unsigned)w, (unsigned)h);
+		/*
+			Scenes of its render target in this frame: GXM's render target is
+			made for TARGET_SCENES a frame (vita2d's for one), one more and the
+			GPU crashed (Prince of Persia Revelations, once its whole lists
+			were walked: the fog's snapshots and depth views split the scene of
+			110000 more than 8 times). A run is split for a snapshot or a depth
+			view only while one more scene is left; past the last one, the
+			draws are not drawn.
+		*/
+		uint32_t used = t && t->scene_frame == rframes + 1 ? t->nscenes : 0;
+		int can_split = t && used + 1 < t->max_scenes;
+		while (j < frame->ndraws && frame->draws[j].fb == dfb &&
+		       !(can_split && snap_count < MAX_SNAPSHOTS && selfSampling(&frame->draws[j], dfb)) &&
+		       !(can_split && dview_count < MAX_DEPTH_VIEWS && newDepthView(&frame->draws[j - 1], &frame->draws[j])))
+			j++;
+
+		if (!t || used >= t->max_scenes) {
+			rtraceAdd("GeSgx R: scene: draws %u-%u into fb %X: %s (%ux%u)\n", (unsigned)i, (unsigned)(j - 1), (unsigned)dfb,
+				t ? "no scene left in its render target this frame" : "no rendering", (unsigned)w, (unsigned)h);
+			if (t && scene_limit_logs < 8) {
+				scene_limit_logs++;
+				GeSgxLog("GeSgx render: frame %u: fb %X used its %u scenes, draws %u-%u not drawn\n", (unsigned)rframes, (unsigned)dfb,
+					(unsigned)t->max_scenes, (unsigned)i, (unsigned)(j - 1));
+			}
 			stats->other_fb += j - i;
 			i = j;
 			continue;
@@ -1650,6 +1675,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		sceGxmDepthStencilSurfaceSetForceStoreMode(&t->tex->gxm_sfd,
 			again ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
 		t->scene_frame = rframes + 1;
+		t->nscenes = used + 1;
 		if (resumed || again)
 			rtraceAdd("GeSgx R:   depth and stencil%s%s\n", resumed ? " loaded" : "", again ? " stored" : "");
 		vita2d_start_drawing_advanced(t->tex, *scenes == 0 ? VITA_2D_RESET_POOL : 0);
