@@ -1162,7 +1162,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 			// Events are missing: start over from the next ones
 			last_lost = lost;
 			read = write;
-			geSgxWalkerReset(&walker);
+			geSgxWalkerResync(&walker);
 			rates.resyncs++;
 			writeAck(session, read);
 			continue;
@@ -1322,7 +1322,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		events += i;
 		if (gap) {
 			read = write;
-			geSgxWalkerReset(&walker);
+			geSgxWalkerResync(&walker);
 			rates.resyncs++;
 		}
 		writeAck(session, read);

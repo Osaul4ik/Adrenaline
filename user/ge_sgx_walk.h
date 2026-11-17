@@ -268,6 +268,7 @@ static inline uint32_t geSgxReg(const GeSgxWalker *w, uint32_t cmd) {
 
 void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user);
 void geSgxWalkerReset(GeSgxWalker *w);
+void geSgxWalkerResync(GeSgxWalker *w);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 
 // Ring events, in the order the PSP side reported them

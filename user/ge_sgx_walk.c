@@ -418,33 +418,21 @@ static void prim(GeSgxWalker *w, uint32_t data) {
 		w->vaddr = normalize(w->vaddr + count * l->size);
 }
 
-// Object space position of a vertex, normalized like the GE (s8 / 128, s16 / 32768)
-static int readPos3(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t vertex, float *out) {
-	uint32_t a = vertex + l->pos_off;
+// Object space position of a vertex (its bytes at p), normalized like the GE (s8 / 128, s16 / 32768)
+static void pos3(const GeSgxVertexLayout *l, const uint8_t *p, float *out) {
 	int i;
+	p += l->pos_off;
 	for (i = 0; i < 3; i++) {
-		uint32_t v;
-		switch (l->pos_fmt) {
-			case 1:
-				if (!readValue(w, a + i, 1, &v))
-					return 0;
-				out[i] = (int8_t)v * (1.0f / 128.0f);
-				break;
-			case 2:
-				if (!readValue(w, a + i * 2, 2, &v))
-					return 0;
-				out[i] = (int16_t)v * (1.0f / 32768.0f);
-				break;
-			case 3:
-				if (!readValue(w, a + i * 4, 4, &v))
-					return 0;
-				memcpy(&out[i], &v, 4);
-				break;
-			default:
-				return 0;
+		if (l->pos_fmt == 1) {
+			out[i] = (int8_t)p[i] * (1.0f / 128.0f);
+		} else if (l->pos_fmt == 2) {
+			int16_t v;
+			memcpy(&v, p + i * 2, 2);
+			out[i] = v * (1.0f / 32768.0f);
+		} else {
+			memcpy(&out[i], p + i * 4, 4);
 		}
 	}
-	return 1;
 }
 
 /*
@@ -515,18 +503,36 @@ static int boundingBox(GeSgxWalker *w, uint32_t count) {
 	float xs = geSgxFloat24(regs[GE_CMD_VIEWPORTXSCALE]), xc = geSgxFloat24(regs[GE_CMD_VIEWPORTXCENTER]);
 	float ys = geSgxFloat24(regs[GE_CMD_VIEWPORTYSCALE]), yc = geSgxFloat24(regs[GE_CMD_VIEWPORTYCENTER]);
 
+	/*
+		The vertices read in one go (and the indices): read a byte at a time
+		they took the walker most of a frame in Need for Speed Carbon (650
+		boxes a frame), the PSP waited and the game ran in jerks
+	*/
+	#define BBOX_VERTEX_BYTES 96
+	static uint8_t vbuf[0x100 * BBOX_VERTEX_BYTES];
+	static uint8_t ibuf[0x100 * 4];
+	if (l.size > BBOX_VERTEX_BYTES)
+		return 1;
+	if (l.index_size) {
+		if (!geSgxRead(w, base_i + first * l.index_size, ibuf, n * l.index_size))
+			return 1;
+	} else if (!geSgxRead(w, base_v + first * l.size, vbuf, n * l.size)) {
+		return 1;
+	}
+
 	uint32_t inside[6] = { 0, 0, 0, 0, 0, 0 };
-	for (i = first; i < first + n; i++) {
-		uint32_t index = i;
+	for (i = 0; i < n; i++) {
 		float p[3];
 		if (l.index_size) {
-			uint32_t v;
-			if (!readValue(w, base_i + i * l.index_size, (int)(l.index_size > 2 ? 2 : l.index_size), &v))
+			// The PSP ignores the upper 16 bits of 32 bit indices
+			uint32_t index = l.index_size == 1 ? ibuf[i] : (uint32_t)ibuf[i * l.index_size] | ((uint32_t)ibuf[i * l.index_size + 1] << 8);
+			uint8_t vtx[BBOX_VERTEX_BYTES];
+			if (!geSgxRead(w, base_v + index * l.size, vtx, l.size))
 				return 1;
-			index = v; // the PSP ignores the upper 16 bits of 32 bit indices
+			pos3(&l, vtx, p);
+		} else {
+			pos3(&l, vbuf + i * l.size, p);
 		}
-		if (!readPos3(w, &l, base_v + index * l.size, p))
-			return 1;
 		float px = mvp[0] * p[0] + mvp[4] * p[1] + mvp[8] * p[2] + mvp[12];
 		float py = mvp[1] * p[0] + mvp[5] * p[1] + mvp[9] * p[2] + mvp[13];
 		float pz = mvp[2] * p[0] + mvp[6] * p[1] + mvp[10] * p[2] + mvp[14];
@@ -914,6 +920,29 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	w->bulk_fn = bulk_fn;
 	w->vram_copy_fn = vram_copy_fn;
 	w->dump_fn = dump_fn;
+}
+
+/*
+	Events were lost: the lists start over, the GE's state does not (its
+	registers and matrices stay what they were: a game that set its depth
+	buffer, region or offset once had none after a resync), nor an asked
+	trace (asking one slows the walk down, the ring overflowed and the
+	trace was gone: The 3rd Birthday's).
+*/
+void geSgxWalkerResync(GeSgxWalker *w) {
+	static uint32_t regs[256];
+	static GeSgxMatrices mtx;
+	int trace = w->trace, dump = w->dump;
+	uint32_t trace_lines = w->trace_lines;
+	memcpy(regs, w->regs, sizeof(regs));
+	mtx = w->mtx;
+	geSgxWalkerReset(w);
+	memcpy(w->regs, regs, sizeof(regs));
+	w->mtx = mtx;
+	w->trace = trace;
+	w->dump = dump;
+	w->trace_lines = trace_lines;
+	geSgxBuildTraceNote(w, "resync: events lost, the lists start over (the GE state kept)");
 }
 
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {

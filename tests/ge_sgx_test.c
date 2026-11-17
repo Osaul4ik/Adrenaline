@@ -779,6 +779,9 @@ static void testHardwareRegs(void) {
 	CHECK(geSgxReg(w, 0x9E) == 0x110000 && geSgxReg(w, 0x9F) == 512 && w->stats.hw_regs == 1, "hw regs %x %x %u", geSgxReg(w, 0x9E), geSgxReg(w, 0x9F), w->stats.hw_regs);
 	geSgxWalkerHardwareReg(w, 0x9E, 0x120000);
 	CHECK(geSgxReg(w, 0x9E) == 0x110000, "hw reg taken once %x", geSgxReg(w, 0x9E));
+	/* a resync keeps the GE state */
+	geSgxWalkerResync(w);
+	CHECK(geSgxReg(w, 0x9E) == 0x110000 && geSgxReg(w, 0x9F) == 512 && w->count == 0, "resync kept the registers %x %x", geSgxReg(w, 0x9E), geSgxReg(w, 0x9F));
 }
 
 static void testBuild3D(void) {
