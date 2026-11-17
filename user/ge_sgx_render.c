@@ -577,6 +577,9 @@ static Target *findTarget(uint32_t fb) {
 	return NULL;
 }
 
+// Pixels per row of a linear colour surface read back as a texture: GXM's linear textures have rows of 8 pixels' multiples
+#define SURFACE_STRIDE(w) (((w) + 7) & ~7)
+
 static void freeTarget(Target *t) {
 	if (!t->tex)
 		return;
@@ -604,17 +607,42 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	// CDRAM if it fits with the emulator's reserve (the depth buffer usually took it), main RAM else
 	vita2d_texture *tex = NULL;
 	int in_cdram = 0;
+	/*
+		Made SURFACE_STRIDE(w) wide, then seen as w wide: GXM reads a linear
+		texture with rows of w rounded up to 8 pixels, vita2d writes its
+		surface with rows of w. A rendering not 8 pixels wide (Black Rock
+		Shooter's stage: a scissor to x 480, 962 pixels) was read sheared and
+		past the end of its memory: half the screen garbage, then the GPU
+		crashed.
+	*/
+	int aw = SURFACE_STRIDE(w);
+	bytes = (uint32_t)aw * h * 4;
 	if (GeSgxFreeKB(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) >= bytes / 1024 + 256 + RESERVE_CDRAM_KB) {
 		in_cdram = 1;
 		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+		tex = vita2d_create_empty_texture_format(aw, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
 	}
 	if (!tex) {
 		in_cdram = 0;
 		vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE);
-		tex = vita2d_create_empty_texture_format(w, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
+		tex = vita2d_create_empty_texture_format(aw, h, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8);
 	}
 	vita2d_texture_set_alloc_memblock_type(type);
+	if (tex && aw != w) {
+		void *data = vita2d_texture_get_datap(tex);
+		if (sceGxmTextureInitLinear(&tex->gxm_tex, data, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0) < 0 ||
+		    sceGxmColorSurfaceInit(&tex->gxm_sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+			    SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, aw, data) < 0) {
+			if (tex->gxm_rtgt)
+				sceGxmDestroyRenderTarget(tex->gxm_rtgt);
+			if (tex->depth_UID >= 0)
+				sceKernelFreeMemBlock(tex->depth_UID);
+			tex->gxm_rtgt = NULL;
+			tex->depth_UID = -1;
+			vita2d_free_texture(tex);
+			tex = NULL;
+		}
+	}
 	if (!tex || !tex->gxm_rtgt || tex->depth_UID < 0) {
 		if (tex) {
 			if (tex->gxm_rtgt)
@@ -1011,7 +1039,8 @@ static int surfaceMake(Snapshot *sf, int *ready, SnapQuad **quad, int w, int h, 
 	sf->uid = -1;
 	sf->w = w;
 	sf->h = h;
-	sf->bytes = ((uint32_t)w * h * 4 + 0xFFF) & ~0xFFFu;
+	int aw = SURFACE_STRIDE(w); // rows as GXM reads the linear texture (see createTarget)
+	sf->bytes = ((uint32_t)aw * h * 4 + 0xFFF) & ~0xFFFu;
 	const char *where = "pool";
 	sf->mem = geSgxPoolAlloc(sf->bytes);
 	if (!sf->mem) {
@@ -1035,11 +1064,11 @@ static int surfaceMake(Snapshot *sf, int *ready, SnapQuad **quad, int w, int h, 
 		quadInit(*quad, w, h, 1.0f, 1.0f);
 	if (!err) {
 		// Alpha 1 (the draws sampling it with its alpha get an opaque framebuffer, as the targets' are)
-		uint32_t *px = sf->mem, k, n = (uint32_t)w * h;
+		uint32_t *px = sf->mem, k, n = (uint32_t)aw * h;
 		for (k = 0; k < n; k++)
 			px[k] = 0xFF000000u;
 		err = sceGxmColorSurfaceInit(&sf->sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
-			SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, w, sf->mem);
+			SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, aw, sf->mem);
 	}
 	if (!err)
 		err = sceGxmTextureInitLinear(&sf->tex, sf->mem, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0);
@@ -1505,7 +1534,7 @@ static void dumpFrame(SceGxmContext *ctx, uint32_t frame_no) {
 	}
 	if (snap_ready) {
 		snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_snapshot.bmp", (unsigned)frame_no);
-		dumpBmp(path, snap.mem, snap.w, snap.h, snap.w);
+		dumpBmp(path, snap.mem, snap.w, snap.h, SURFACE_STRIDE(snap.w));
 		GeSgxLog("GeSgx render: dumped %s (%dx%d)\n", path, snap.w, snap.h);
 	}
 }
@@ -1681,7 +1710,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 				char path[96];
 				sceGxmFinish(ctx);
 				snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_s%d_snapshot.bmp", (unsigned)rframes, *scenes);
-				dumpBmp(path, snap.mem, snap.w, snap.h, snap.w);
+				dumpBmp(path, snap.mem, snap.w, snap.h, SURFACE_STRIDE(snap.w));
 			}
 			if (r >= 0)
 				(*scenes)++;
@@ -1700,7 +1729,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 				char path[96];
 				sceGxmFinish(ctx);
 				snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_s%d_depthview.bmp", (unsigned)rframes, *scenes);
-				dumpBmp(path, dview.mem, dview.w, dview.h, dview.w);
+				dumpBmp(path, dview.mem, dview.w, dview.h, SURFACE_STRIDE(dview.w));
 			}
 			if (r >= 0)
 				(*scenes)++;
