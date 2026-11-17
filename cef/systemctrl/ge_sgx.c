@@ -221,6 +221,7 @@ static int vitaBehind(void) {
 static int sceGeDrawSyncPatched(int syncType) {
 	int res = _sceGeDrawSync(syncType);
 	if (syncType == 0) {
+		ringPush(GE_SGX_EVENT_SYNC, (u32)-1, 0, 0, 0);
 		waitForVita();
 	} else if (syncType == 1) {
 		ring->sync_peeks++;
@@ -235,6 +236,7 @@ static int sceGeDrawSyncPatched(int syncType) {
 static int sceGeListSyncPatched(int qid, int syncType) {
 	int res = _sceGeListSync(qid, syncType);
 	if (syncType == 0) {
+		ringPush(GE_SGX_EVENT_SYNC, (u32)qid, 0, 0, 0);
 		waitForVita();
 	} else if (syncType == 1) {
 		ring->sync_peeks++;

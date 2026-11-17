@@ -215,6 +215,7 @@ typedef struct {
 	// Optional log for diagnostics; while trace is set, the frame is traced into it
 	void (* log_fn)(const char *fmt, ...);
 	int releasing; // geSgxWalkerRelease running: handler signals do not hold
+	int hold_signals; // lists stop after handler signals until geSgxWalkerRelease (off: the lists are walked late, at the game's sync)
 	int trace;
 	uint32_t trace_lines;
 	// A register, matrix or CLUT changed since the last primitive built

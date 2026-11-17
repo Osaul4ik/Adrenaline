@@ -58,6 +58,12 @@ enum GeSgxEventTypes {
 		the depth buffer once, in a list before the walker's state starts).
 	*/
 	GE_SGX_EVENT_REGS,
+	/*
+		The game waited for the GE (sceGeDrawSync / sceGeListSync with 0,
+		after it returned): the GE is done, the lists' memory and what they
+		use are as the GE read them. a = queue id (-1: all lists)
+	*/
+	GE_SGX_EVENT_SYNC,
 };
 
 typedef struct {

@@ -632,9 +632,13 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 				of its HUD, fog and particles, and their draws; read before, the
 				last frame's matrices put them off the screen). The list waits
 				for the flip, when the GE is done with it (geSgxWalkerRelease).
+				Off in the renderer (hold_signals): released at the flip, the
+				list's draws went into the frame flipped before it (The 3rd
+				Birthday's character was gone); its lists are walked late
+				instead, at the game's waits for the GE (ge_sgx.c).
 			*/
 			list->pc = next;
-			if (w->releasing)
+			if (w->releasing || !w->hold_signals)
 				return 1;
 			list->held = 1;
 			w->stats.held++;

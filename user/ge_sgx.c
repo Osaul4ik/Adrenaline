@@ -1154,6 +1154,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 		}
 	}
 
+	int walk_late = 0, synced_since_flip = 0;
 	while (1) {
 		if (start_seq != seen_seq) {
 			seen_seq = start_seq;
@@ -1180,6 +1181,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 				}
 			}
 			rates.resyncs = 0;
+			walk_late = 0;
+			synced_since_flip = 0;
 			logged_types = 0;
 			slow_logs = 0;
 			session_start = sceKernelGetProcessTimeWide();
@@ -1256,13 +1259,39 @@ static int GeSgxThread(SceSize args, void *argp) {
 			}
 
 			switch (e->type) {
+				/*
+					Lists are walked late, when the game waits for the GE
+					(GE_SGX_EVENT_SYNC): the GE is done, the memory is what it
+					read. Walked as they came, the walk ran ahead of the GE and
+					read what the game writes after queuing them: The 3rd
+					Birthday's signal handler writes the matrices of its HUD,
+					fog and particles after the signals (1852 list words changed
+					between the walk and the flip; off the screen with the old
+					ones); Black Rock Shooter draws its glyphs into its text
+					texture after queuing the draws that use them (empty there
+					when it was read: letters in pieces). A game that never
+					waits (no sync event yet in this game) has its lists walked
+					as they come.
+				*/
 				case GE_SGX_EVENT_LIST:
 					geSgxWalkerList(&walker, (int)e->a, e->b, e->c, (int)e->d);
-					geSgxWalkerRun(&walker);
-					noteListDone();
+					if (!walk_late) {
+						geSgxWalkerRun(&walker);
+						noteListDone();
+					}
 					break;
 				case GE_SGX_EVENT_STALL:
 					geSgxWalkerStall(&walker, (int)e->a, e->b);
+					if (!walk_late) {
+						geSgxWalkerRun(&walker);
+						noteListDone();
+					}
+					break;
+				case GE_SGX_EVENT_SYNC:
+					if (!walk_late)
+						GeSgxLog("GeSgx: the game waits for the GE: lists walked at its waits from now on\n");
+					walk_late = 1;
+					synced_since_flip = 1;
 					geSgxWalkerRun(&walker);
 					noteListDone();
 					break;
@@ -1276,8 +1305,12 @@ static int GeSgxThread(SceSize args, void *argp) {
 					noteListDone();
 					break;
 				case GE_SGX_EVENT_FLIP: {
-					// The lists held after handler signals: walked now, into this frame
-					geSgxWalkerRelease(&walker);
+					// No wait for the GE in this frame: its lists walked now (the ones after a wait are the next frame's)
+					if (walk_late && !synced_since_flip && walker.count) {
+						geSgxWalkerRun(&walker);
+						noteListDone();
+					}
+					synced_since_flip = 0;
 					if (walker.trace && scan_end) {
 						ListScan now;
 						scanList(scan_start, scan_end, &now, 1);

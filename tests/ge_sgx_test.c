@@ -253,6 +253,7 @@ static void testCallJumpOrigin(void) {
 
 static void testSignals(void) {
 	reset();
+	w->hold_signals = 1; // the hold (off in the renderer: lists are walked at the game's waits)
 	// SIGNAL JUMP to 0x08840000, SIGNAL CALL / RET, handler signal continues
 	L m = { 0x08800000 };
 	emit(&m, C(0x0E, (0x11u << 16) | 0x0885)); // CALL 0x08850000
