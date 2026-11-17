@@ -93,12 +93,16 @@ static uint32_t vram_writes = 0, vram_write_bytes = 0; // GE transfers into it d
 static uint32_t vram_want[GE_SGX_VRAM_PAGES / 32];
 static int vram_want_dirty = 0;
 
+// Pages wanted only for the PSP's picture of an asked trace (framebuffers): not wanted again after it
+static uint32_t picture_pages[GE_SGX_VRAM_PAGES / 32];
+
 static inline void wantVram(uint32_t off, uint32_t size) {
 	uint32_t p = off / GE_SGX_VRAM_PAGE, last = (off + (size ? size : 1) - 1) / GE_SGX_VRAM_PAGE;
 	if (last >= GE_SGX_VRAM_PAGES)
 		last = GE_SGX_VRAM_PAGES - 1;
 	for (; p <= last; p++) {
 		uint32_t bit = 1u << (p % 32);
+		picture_pages[p / 32] &= ~bit; // wanted for itself now
 		if (!(vram_want[p / 32] & bit)) {
 			vram_want[p / 32] |= bit;
 			vram_want_dirty = 1;
@@ -630,6 +634,43 @@ static void acquireSlot(void) {
 	frames_dropped++;
 }
 
+/*
+	The framebuffers' pages, for the PSP's picture of an asked trace: the PSP
+	side copies only the VRAM pages read here (textures), not the
+	framebuffers this renderer draws itself (the picture was black). Wanted
+	from the ask to the picture, then not any more.
+*/
+static struct { uint32_t fb, fbw, psm; } flipped[2] = { { 0xFFFFFFFFu, 0, 0 }, { 0xFFFFFFFFu, 0, 0 } };
+
+static void wantPictures(void) {
+	int k;
+	for (k = 0; k < 2; k++) {
+		if (flipped[k].fb == 0xFFFFFFFFu || !flipped[k].fbw)
+			continue;
+		uint32_t bytes = flipped[k].fbw * 272 * (flipped[k].psm == 3 ? 4 : 2);
+		uint32_t p = flipped[k].fb / GE_SGX_VRAM_PAGE, last = (flipped[k].fb + bytes - 1) / GE_SGX_VRAM_PAGE;
+		for (; p <= last && p < GE_SGX_VRAM_PAGES; p++) {
+			uint32_t bit = 1u << (p % 32);
+			if (!(vram_want[p / 32] & bit)) {
+				vram_want[p / 32] |= bit;
+				picture_pages[p / 32] |= bit;
+				vram_want_dirty = 1;
+			}
+		}
+	}
+}
+
+static void unwantPictures(void) {
+	uint32_t i;
+	for (i = 0; i < GE_SGX_VRAM_PAGES / 32; i++) {
+		if (picture_pages[i]) {
+			vram_want[i] &= ~picture_pages[i];
+			picture_pages[i] = 0;
+			vram_want_dirty = 1;
+		}
+	}
+}
+
 // Walker thread, at a display flip of fb
 /*
 	Asked (L + SELECT): the PSP's own picture of the traced frame, as its GE
@@ -683,6 +724,14 @@ static void dumpPspPicture(uint32_t fb, uint32_t fbw, uint32_t psm) {
 static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
+	if (fb != 0xFFFFFFFFu && fb != flipped[0].fb) {
+		flipped[1] = flipped[0];
+		flipped[0].fb = fb;
+	}
+	if (fb != 0xFFFFFFFFu) {
+		flipped[0].fbw = fbw;
+		flipped[0].psm = psm;
+	}
 
 	/*
 		Diagnostics: a frame of the race traced into the log, about 10 s, 40 s and
@@ -721,12 +770,14 @@ static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 			dumpFlush();
 			if (fb != 0xFFFFFFFFu)
 				dumpPspPicture(fb, fbw, psm);
+			unwantPictures();
 			walker.trace = 0;
 		} else if (++trace_tries >= 600) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
 			walker.trace = 0;
 			walker.dump = 0;
 			dumpFlush();
+			unwantPictures();
 		}
 		geSgxBuildTraceClear(&walker);
 	}
@@ -738,6 +789,7 @@ static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 		trace_asked = 1;
 		walker.trace = 1;
 		walker.dump = ++dump_asks; // each ask its own textures written
+		wantPictures();
 		trace_tries = 0;
 		geSgxBuildTraceClear(&walker);
 	}
@@ -1361,6 +1413,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 						GeSgxLog("GeSgx: the GE's signal handlers reported: lists walked up to each signal before its handler runs\n");
 					geSgxWalkerSignal(&walker, e->b);
 					noteListDone();
+					// Read up to here: the PSP side waits for it in the GE's interrupt
+					writeAck(session, read + i + 1);
 					break;
 				case GE_SGX_EVENT_REGS:
 					geSgxWalkerHardwareReg(&walker, e->a, e->b);
@@ -1494,7 +1548,7 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us) | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
@@ -1502,7 +1556,7 @@ per_second:;
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs, (unsigned)frame_stats.hw_state, (unsigned)frame_stats.contexts, (unsigned)frame_stats.signal_events,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
-					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us,
+					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
 					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024));
 			}
@@ -1572,6 +1626,7 @@ int GeSgxStart(uint32_t ring_addr) {
 
 	// The PSP side may wait for us from now on (and copies no VRAM page before we read one)
 	memset(vram_want, 0, sizeof(vram_want));
+	memset(picture_pages, 0, sizeof(picture_pages));
 	vram_want_dirty = 1;
 	writeAck(ring->session, 0);
 

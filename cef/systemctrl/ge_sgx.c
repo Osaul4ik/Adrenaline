@@ -370,28 +370,33 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	the Vita side walks the lists up to that signal (GE_SGX_EVENT_SIGNAL):
 	the handler then writes what comes after the signal (The 3rd Birthday:
 	its HUD, fog and particles, rewritten at each of its 20 signals), and
-	the next signal's walk reads it as the GE did. The wait is short and
-	bounded (in the interrupt nothing else runs); a Vita side that did not
-	answer is not waited for again until it reads.
+	the next signal's walk reads it as the GE did. The waits are short and
+	bounded (in the interrupt nothing else runs).
 */
 #define PSP_GE_INTR 25
-static int signal_stalled = 0;
-static u32 signal_stalled_read = 0;
+/*
+	Time waited in signal handlers since the last flip: at most
+	GE_SGX_SIGNAL_FRAME_US a frame (in the interrupt the PSP does nothing
+	else: its other interrupts, the DMA's and the audio's, wait too). A wait
+	that times out, or a frame's time used up, ends the waits until the
+	next flip; the lists are then read when the game waits for the GE.
+*/
+static u32 signal_frame_us = 0;
 
 static void waitForVitaSignal(void) {
 	u32 target = ring->write;
-	if (shared->session != ring->session)
+	if (shared->session != ring->session || !_sceKernelGetSystemTimeLow)
 		return;
 	u32 read = shared->read;
 	if ((int)(read - target) >= 0)
 		return;
-	if (signal_stalled) {
-		if (read == signal_stalled_read)
-			return;
-		signal_stalled = 0;
-	}
-	if (!_sceKernelGetSystemTimeLow)
+	if (signal_frame_us >= GE_SGX_SIGNAL_FRAME_US) {
+		ring->signal_skipped++;
 		return;
+	}
+	u32 limit = GE_SGX_SIGNAL_FRAME_US - signal_frame_us;
+	if (limit > GE_SGX_SIGNAL_TIMEOUT_US)
+		limit = GE_SGX_SIGNAL_TIMEOUT_US;
 
 	u32 start = timeNow(), waited = 0;
 	ring->signal_waits++;
@@ -400,14 +405,16 @@ static void waitForVitaSignal(void) {
 		if ((int)(read - target) >= 0)
 			break;
 		waited = timeNow() - start;
-		if (waited >= GE_SGX_SIGNAL_TIMEOUT_US) {
+		if (waited >= limit) {
 			ring->signal_timeouts++;
-			signal_stalled = 1;
-			signal_stalled_read = read;
+			signal_frame_us = GE_SGX_SIGNAL_FRAME_US;
 			break;
 		}
 	}
+	signal_frame_us += waited;
 	ring->signal_wait_us += waited;
+	if (waited > ring->signal_max_us)
+		ring->signal_max_us = waited;
 }
 
 static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int arg3) {
@@ -524,6 +531,7 @@ static void pushRegs(void) {
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
 	copyVram();
 	pushRegs();
+	signal_frame_us = 0;
 	ringPush(GE_SGX_EVENT_FLIP, (u32)topaddr, bufferwidth, pixelformat, sync);
 	return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -648,7 +656,7 @@ int GeSgxInit(void) {
 		sctrlHENPatchSyscall((u32)_sceGeSetCallback, sceGeSetCallbackPatched);
 	if (_sceGeRestoreContext)
 		sctrlHENPatchSyscall((u32)_sceGeRestoreContext, sceGeRestoreContextPatched);
-	signal_stalled = 0;
+	signal_frame_us = 0;
 	if (_sceKernelCallSubIntrHandler && subintr_stub)
 		MAKE_JUMP(subintr_stub, sceKernelCallSubIntrHandlerPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);

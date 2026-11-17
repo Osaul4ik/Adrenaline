@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 2 // the ring's layout: both sides from the same build
+#define GE_SGX_VERSION 3 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -135,6 +135,8 @@ typedef struct {
 	volatile unsigned int signal_waits;    // signal handlers that waited for the Vita side's walk (GE_SGX_EVENT_SIGNAL)
 	volatile unsigned int signal_timeouts; // ... and gave up
 	volatile unsigned int signal_wait_us;  // total time waited
+	volatile unsigned int signal_max_us;   // longest wait
+	volatile unsigned int signal_skipped;  // not waited for: the frame's time for it used up (GE_SGX_SIGNAL_FRAME_US)
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
@@ -187,6 +189,8 @@ typedef struct {
 #define GE_SGX_SYNC_TIMEOUT_US 100000
 
 // Longest wait for the Vita side in a signal handler (the GE's interrupt: nothing else runs on the PSP meanwhile)
-#define GE_SGX_SIGNAL_TIMEOUT_US 8000
+#define GE_SGX_SIGNAL_TIMEOUT_US 3000
+// ... and in all of a frame's signal handlers (until the next flip): past it, the lists are read at the game's wait for the GE
+#define GE_SGX_SIGNAL_FRAME_US 6000
 
 #endif
