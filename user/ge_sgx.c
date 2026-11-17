@@ -721,6 +721,9 @@ static void dumpPspPicture(uint32_t fb, uint32_t fbw, uint32_t psm) {
 	GeSgxLog("GeSgx: the PSP's picture of the traced frame: %s (fb %X width %u format %u)\n", name, (unsigned)fb, (unsigned)fbw, (unsigned)psm);
 }
 
+// An asked trace (L + SELECT) is waiting for its frame
+static int trace_asked = 0;
+
 static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 	uint32_t addr = top & 0x0FFFFFFF;
 	uint32_t fb = (addr >= VRAM_START && addr < VRAM_START + 0x00800000u) ? (addr & (VRAM_SIZE - 1)) : 0xFFFFFFFFu;
@@ -744,7 +747,6 @@ static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 		probeVram();
 
 	static uint32_t big_frames = 0, trace_tries = 0;
-	static int trace_asked = 0;
 	/*
 		An asked trace ends with the next frame walked, built or not (a walker
 		behind walks frames without building them: the trace never ended)
@@ -772,7 +774,7 @@ static void publishSlot(uint32_t top, uint32_t fbw, uint32_t psm) {
 				dumpPspPicture(fb, fbw, psm);
 			unwantPictures();
 			walker.trace = 0;
-		} else if (++trace_tries >= 600) {
+		} else if (++trace_tries >= 60) {
 			GeSgxLog("GeSgx T: no frame with 1000 draws\n");
 			walker.trace = 0;
 			walker.dump = 0;
@@ -1437,7 +1439,13 @@ static int GeSgxThread(SceSize args, void *argp) {
 					if ((!walk_late || !synced_since_flip) && walker.count)
 						walkAll();
 					synced_since_flip = 0;
-					if (walker.trace && scan_end) {
+					/*
+						Asked traces only: an automatic one waiting for a frame of
+						1000 draws wrote these lines at every flip (up to 600
+						frames at 2 to 7 frames a second, The 3rd Birthday and
+						Black Rock Shooter)
+					*/
+					if (walker.trace && trace_asked && scan_end) {
 						ListScan now;
 						scanList(scan_start, scan_end, &now, 1);
 						GeSgxLog("GeSgx T: list scan %X-%X: walker's top level prims %u calls %u signals %u | when done %u words, prims %u calls %u jumps %u signals %u nops %u sum %08X | "

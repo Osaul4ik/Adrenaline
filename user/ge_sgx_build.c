@@ -887,6 +887,46 @@ static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex
 	return 1;
 }
 
+
+/*
+	A 5551 framebuffer keeps one bit of stencil, its alpha: the top bit of
+	the value written, read back as 0 or 0xFF; an increment sets it, a
+	decrement clears it (PPSSPP's software renderer: GetPixelStencil,
+	SetPixelStencil, ApplyStencilOp). The rendering's stencil has 8 bits:
+	the operations made to leave 0 or 0xFF in it, as the PSP reads it. The
+	reference is changed only where the test does not use it (always,
+	never).
+*/
+static void stencil5551(GeSgxDraw *d) {
+	int test_uses_ref = d->sfunc != 0 && d->sfunc != 1;
+	uint16_t out = 0;
+	int k, replace = 0, incr = 0;
+	for (k = 0; k < 3; k++) {
+		uint32_t op = (d->sops >> (k * 4)) & 0xF;
+		if (op == 5) // decrement: cleared
+			op = 1;
+		if (op == 2)
+			replace = 1;
+		if (op == 4)
+			incr = 1;
+		out |= (uint16_t)(op << (k * 4));
+	}
+	if (!test_uses_ref) {
+		uint8_t value = (d->sref & 0x80) ? 0xFF : 0x00;
+		// An increment sets the bit: a replace with 0xFF (unless a replace of 0 is in the same draw)
+		if (incr && (!replace || value == 0xFF)) {
+			for (k = 0; k < 3; k++) {
+				if (((out >> (k * 4)) & 0xF) == 4)
+					out = (uint16_t)((out & ~(0xFu << (k * 4))) | (2u << (k * 4)));
+			}
+			value = 0xFF;
+		}
+		d->sref = value;
+	}
+	d->sops = out;
+	d->swmask = (d->swmask & 0x80) ? 0xFF : 0x00;
+}
+
 static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 	memset(d, 0, sizeof(*d));
 	d->ztest = 1;
@@ -923,6 +963,8 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 			d->smask = (uint8_t)((st >> 16) & 0xFF);
 			d->sops = (uint16_t)((op & 7) | (((op >> 8) & 7) << 4) | (((op >> 16) & 7) << 8));
 			d->swmask = (uint8_t)(~reg(w, GE_CMD_MASKALPHA) & 0xFF);
+			if ((reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3) == 1)
+				stencil5551(d);
 		}
 		if (reg(w, GE_CMD_TEXTUREMAPENABLE) & 1)
 			d->flags |= GE_SGX_DRAW_TEXTURED;
@@ -977,7 +1019,8 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 	d->fb = (((reg(w, GE_CMD_FRAMEBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_FRAMEBUFPTR)) & 0x001FFFFFu;
 	d->texture = -1;
 	// A framebuffer with alpha (5551, 4444, 8888: not 565), its stencil
-	if ((reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3) != 0)
+	d->fbfmt = (uint8_t)(reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3);
+	if (d->fbfmt != 0)
 		d->flags |= GE_SGX_DRAW_FB_ALPHA;
 }
 
@@ -2073,8 +2116,12 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		return;
 
 	// A clear of the stencil: to the alpha of its (CPU built) vertices
-	if ((d.flags & GE_SGX_DRAW_CLEAR) && (d.flags & GE_SGX_DRAW_WRITE_ALPHA) && !gpu)
+	if ((d.flags & GE_SGX_DRAW_CLEAR) && (d.flags & GE_SGX_DRAW_WRITE_ALPHA) && !gpu) {
 		d.sref = (uint8_t)(vout[0].color >> 24);
+		// 5551: one bit of stencil, the value's top bit, read as 0 or 0xFF (stencil5551)
+		if (d.fbfmt == 1)
+			d.sref = (d.sref & 0x80) ? 0xFF : 0x00;
+	}
 
 	if (!gpu) {
 		/*

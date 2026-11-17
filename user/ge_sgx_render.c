@@ -259,11 +259,14 @@ static const SceGxmProgram *registeredGxp(uint32_t key, SceGxmShaderPatcherId *i
 	return gxp;
 }
 
+// Blend keys of the stencil-to-alpha passes (blendKey never gives these)
+#define BLEND_ALPHA_SET 0x20000001u
+#define BLEND_ALPHA_ADD 0x20000002u
+
 // extra: shader key bits from the render state (GE_SGX_KEY_SCISSOR)
 #define GE_SGX_KEY_SCISSOR (1u << 12)
-static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram *vgxp, uint32_t extra) {
+static FragmentProgram *fragmentProgramBlend(const GeSgxDraw *d, const SceGxmProgram *vgxp, uint32_t extra, uint32_t blend) {
 	uint32_t key = geSgxShaderKey(d) | extra;
-	uint32_t blend = blendKey(d);
 	int i;
 
 	for (i = 0; i < nfragment_programs; i++) {
@@ -290,7 +293,14 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	info.alphaFunc = SCE_GXM_BLEND_FUNC_NONE;
 	info.colorSrc = info.alphaSrc = SCE_GXM_BLEND_FACTOR_ONE;
 	info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ZERO;
-	if (blend & 0x80000000u) {
+	if (blend == BLEND_ALPHA_SET || blend == BLEND_ALPHA_ADD) {
+		// The stencil copied into alpha (stencilToAlpha): alpha only, set or added
+		info.colorMask = SCE_GXM_COLOR_MASK_A;
+		if (blend == BLEND_ALPHA_ADD) {
+			info.colorFunc = info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
+			info.colorDst = info.alphaDst = SCE_GXM_BLEND_FACTOR_ONE;
+		}
+	} else if (blend & 0x80000000u) {
 		info.colorMask = blend & SCE_GXM_COLOR_MASK_ALL; // a clear: alpha too when it writes the stencil
 	} else {
 		if (blend & 0x40000000u) {
@@ -340,6 +350,10 @@ static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram 
 	fp->fog_color = sceGxmProgramFindParameterByName(gxp, "uFogColor");
 	fp->scissor = sceGxmProgramFindParameterByName(gxp, "uScissor");
 	return fp;
+}
+
+static FragmentProgram *fragmentProgram(const GeSgxDraw *d, const SceGxmProgram *vgxp, uint32_t extra) {
+	return fragmentProgramBlend(d, vgxp, extra, blendKey(d));
 }
 
 /*
@@ -560,6 +574,7 @@ typedef struct {
 	uint32_t max_scenes;  // scenes a frame its render target is made for
 	uint32_t used;  // frame it was last drawn or shown
 	uint32_t bytes;
+	int sampled;    // read as a texture: its alpha is its stencil (stencilToAlpha)
 } Target;
 
 static Target targets[GE_SGX_MAX_FBS];
@@ -715,6 +730,7 @@ static Target *createTarget(Target *t, uint32_t fb, int w, int h) {
 	t->pool_depth_bytes = own_depth ? 0 : depth_bytes;
 	t->scene_frame = 0;
 	t->nscenes = 0;
+	t->sampled = 0;
 	t->max_scenes = max_scenes;
 	t->used = target_clock;
 	t->bytes = bytes;
@@ -756,6 +772,77 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 		}
 		freeTarget(&targets[oldest]);
 	}
+}
+
+/*
+	The PSP keeps its stencil in the framebuffer's alpha: a framebuffer read
+	as a texture has its stencil as alpha (5551: its one bit, 0 or 1).
+	Black Rock Shooter's glow: the character drawn with the stencil
+	incremented, then the framebuffer copied with an alpha test (alpha not
+	0) into a small one and blended back over it. Here the stencil is in the
+	depth-stencil buffer and draws write no alpha: the copy found alpha 0
+	everywhere, no glow. A rendering read as a texture gets its stencil
+	copied into its alpha at the end of each of its scenes, with the
+	stencil test: alpha set to 0, then each of the stencil's bits added
+	(5551: the one bit, as 1).
+*/
+static void setViewport(SceGxmContext *ctx);
+
+static void stencilToAlpha(SceGxmContext *ctx, const Target *t, int fmt5551) {
+	GeSgxDraw d;
+	memset(&d, 0, sizeof(d)); // untextured, the vertex colour
+	FragmentProgram *set = fragmentProgramBlend(&d, vertex_gxp, 0, BLEND_ALPHA_SET);
+	FragmentProgram *add = fragmentProgramBlend(&d, vertex_gxp, 0, BLEND_ALPHA_ADD);
+	if (!set || !add || !vertex_program)
+		return;
+	int npass = fmt5551 ? 1 : 8;
+	GeSgxVertex *v = vita2d_pool_memalign((uint32_t)(npass + 1) * 4 * sizeof(GeSgxVertex), 16);
+	uint16_t *ix = vita2d_pool_memalign(6 * sizeof(uint16_t), 16);
+	if (!v || !ix)
+		return;
+	static const uint16_t quad[6] = { 0, 1, 2, 1, 3, 2 };
+	memcpy(ix, quad, sizeof(quad));
+	int p, k;
+	for (p = 0; p <= npass; p++) {
+		// pass 0: alpha 0; pass 1 + b: bit b's value (5551: 1)
+		uint32_t a = p == 0 ? 0 : fmt5551 ? 0xFF : (1u << (p - 1));
+		for (k = 0; k < 4; k++) {
+			GeSgxVertex *q = &v[p * 4 + k];
+			q->x = (k & 1) ? (float)t->w : 0.0f;
+			q->y = (k & 2) ? (float)t->h : 0.0f;
+			q->z = 0.5f;
+			q->w = 1.0f;
+			q->u = q->v = 0.0f;
+			q->color = a << 24;
+			q->fog = 1.0f;
+		}
+	}
+
+	setViewport(ctx);
+	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
+	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, t->w - 1, t->h - 1);
+	sceGxmSetVertexProgram(ctx, vertex_program);
+	for (p = 0; p <= npass; p++) {
+		if (p == 0) {
+			stencilOff(ctx);
+			sceGxmSetFragmentProgram(ctx, set->program);
+		} else {
+			uint8_t bit = fmt5551 ? 0x80 : (uint8_t)(1u << (p - 1));
+			// Where the stencil has this bit: (ref & mask) == (stencil & mask), nothing written to it
+			sceGxmSetFrontStencilFunc(ctx, SCE_GXM_STENCIL_FUNC_EQUAL, SCE_GXM_STENCIL_OP_KEEP, SCE_GXM_STENCIL_OP_KEEP,
+				SCE_GXM_STENCIL_OP_KEEP, bit, 0);
+			sceGxmSetFrontStencilRef(ctx, bit);
+			if (p == 1)
+				sceGxmSetFragmentProgram(ctx, add->program);
+		}
+		sceGxmSetVertexStream(ctx, 0, &v[p * 4]);
+		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, ix, 6);
+	}
+	stencilOff(ctx);
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 }
 
 /* ---- Diagnostics ---- */
@@ -1327,8 +1414,10 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			} else if (d->fbtex) {
 				uint32_t sfb = d->fbtex - 1;
 				Target *src = sfb == target_fb ? NULL : findTarget(sfb);
-				if (src)
+				if (src) {
 					t = &src->tex->gxm_tex;
+					src->sampled = 1;
+				}
 				else if (sfb == target_fb && snap_fb == sfb && snap_ready)
 					t = &snap.tex; // its own framebuffer: the copy made before it
 			} else {
@@ -1757,6 +1846,19 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			t->fresh = 0;
 		}
 		renderDraws(ctx, frame, i, j, t->w, t->h, dfb, stats);
+		/*
+			Read as a texture (before, or by a later draw of this frame): its
+			alpha from its stencil, as the PSP's framebuffer has it
+		*/
+		if (frame->draws[i].flags & GE_SGX_DRAW_FB_ALPHA) {
+			int sampled_later = t->sampled;
+			for (k = j; k < frame->ndraws && !sampled_later; k++)
+				sampled_later = frame->draws[k].fbtex == dfb + 1;
+			if (sampled_later) {
+				stencilToAlpha(ctx, t, frame->draws[i].fbfmt == 1);
+				rtraceAdd("GeSgx R:   its stencil copied into its alpha (read as a texture)\n");
+			}
+		}
 		vita2d_end_drawing();
 		// Its depth changed in this scene: a view of it made before is old
 		if (dview_fb == dfb)

@@ -1145,6 +1145,45 @@ static void testGpuDirect(void) {
 	w->direct_size = 0;
 }
 
+/* A 5551 framebuffer's stencil is one bit, read as 0 or 0xFF: clears and operations kept to those */
+static void testStencil5551(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0x40FFFFFF, 0, 0);   /* alpha 0x40: bit 7 clear */
+	spriteVertex(v + 16, 480, 272, 0x40FFFFFF, 480, 272);
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD2, 1));                  /* 5551 */
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0xD3, 0x201));              /* clear: stencil */
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0xD3, 0));
+	emit(&l, C(0x24, 1));
+	emit(&l, C(0xDC, (0xFF << 16) | (0x01 << 8) | 1)); /* always, ref 1 */
+	emit(&l, C(0xDD, 4 << 16));            /* increment on pass */
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0xDC, (0xFF << 16) | (0x01 << 8) | 2)); /* equal 1 (the test uses the reference) */
+	emit(&l, C(0xDD, 5 << 16));            /* decrement on pass */
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 3, "draws %u", frame.ndraws);
+	if (frame.ndraws == 3) {
+		GeSgxDraw *c = &fdraws[0], *i = &fdraws[1], *d = &fdraws[2];
+		CHECK(c->fbfmt == 1 && c->sref == 0x00, "clear fmt %u ref %X", c->fbfmt, c->sref);
+		CHECK(i->sops == 0x200 && i->sref == 0xFF && i->swmask == 0xFF, "increment: ops %X ref %X wmask %X", i->sops, i->sref, i->swmask);
+		CHECK(d->sops == 0x100 && d->sref == 0x01, "decrement: ops %X ref %X", d->sops, d->sref);
+	}
+}
+
 /* Framebuffers as textures, stencil, colour mask, stencil clear */
 static void testFbTexture(void) {
 	resetFrame();
@@ -1552,6 +1591,7 @@ int main(void) {
 	testGpuTransform();
 	testGpuDirect();
 	testFbTexture();
+	testStencil5551();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();
