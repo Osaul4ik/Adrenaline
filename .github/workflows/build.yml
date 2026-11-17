@@ -88,7 +88,13 @@ jobs:
           /tmp/vdpm/bootstrap-vitasdk.sh
           export PATH="$VITASDK/bin:$PATH"
           # taihen for the user module, the rest for vita2d
-          VDPM_NONINTERACTIVE=1 vdpm install taihen zlib libpng libjpeg-turbo freetype
+          # The channel's package database may lack them (2026.08, sequence 2026111687: "target not found"):
+          # then the packages' own archives, unpacked where vdpm puts them
+          if ! VDPM_NONINTERACTIVE=1 vdpm install taihen zlib libpng libjpeg-turbo freetype; then
+            for p in taihen zlib libpng libjpeg-turbo freetype; do
+              curl -fsSL "https://github.com/vitasdk/packages/releases/download/master/$p.tar.xz" | tar -xJ -C "$VITASDK/arm-vita-eabi"
+            done
+          fi
           echo "VITASDK=$VITASDK" >> "$GITHUB_ENV"
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
 
