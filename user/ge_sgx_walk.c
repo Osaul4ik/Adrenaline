@@ -1197,43 +1197,35 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 	is read before the game's finish handler, which writes the next frame's
 	commands over it). The lists after it go on as before.
 */
-void geSgxWalkerFinish(GeSgxWalker *w) {
+void geSgxWalkerFinish(GeSgxWalker *w, uint32_t after) {
 	w->stats.signal_events++;
 	if (!w->count)
 		return;
-	w->lists[0].held = 0;
+	// The list the walk already finished (its END just before after): nothing more to do
+	if (after && w->done_count && (normalize(after) & ~3u) == w->done_end + 4)
+		return;
+	GeSgxList *l = &w->lists[0];
+	l->held = 0;
+	/*
+		The GE got to after (the list address past its FINISH/END): a stall
+		before it is passed (a stall update the walker did not see left the
+		list stalled here for good, and every list queued after it waited
+		behind it: Black Rock Shooter, 58 lists queued, frames without
+		draws, the PSP's own picture shown in between)
+	*/
+	if (after) {
+		uint32_t a = normalize(after) & ~3u;
+		if (l->stall && l->stall < a && a - l->pc <= GE_SGX_FINISH_SPAN) {
+			if (l->pc == l->stall)
+				w->stats.unstalled++;
+			l->stall = a;
+		}
+	}
 	w->releasing = 1;
 	w->run_one = 1;
 	geSgxWalkerRun(w);
 	w->run_one = 0;
 	w->releasing = 0;
-}
-
-/*
-	The game waited for the GE (GE_SGX_EVENT_SYNC; qid -1: all lists): the
-	GE is done with them, so it got past their stall addresses. A stall
-	update the walker missed left a list stalled here for good, and every
-	list queued after it waited behind it (Black Rock Shooter: 58 lists
-	queued, frames without draws, the PSP's picture shown in between).
-	Those lists go on to their end.
-*/
-void geSgxWalkerSynced(GeSgxWalker *w, int qid) {
-	int i, last = -1;
-	if (qid == -1) {
-		last = w->count - 1;
-	} else {
-		for (i = 0; i < w->count; i++) {
-			if (w->lists[i].qid == qid)
-				last = i;
-		}
-	}
-	for (i = 0; i <= last; i++) {
-		if (w->lists[i].stall) {
-			if (w->lists[i].pc == w->lists[i].stall)
-				w->stats.unstalled++;
-			w->lists[i].stall = 0;
-		}
-	}
 }
 
 int geSgxWalkerFlip(GeSgxWalker *w, uint32_t top, GeSgxRect *out, int max, GeSgxStats *stats) {

@@ -1435,7 +1435,6 @@ static int GeSgxThread(SceSize args, void *argp) {
 						GeSgxLog("GeSgx: the game waits for the GE: lists walked at its waits from now on\n");
 					walk_late = 1;
 					synced_since_flip = 1;
-					geSgxWalkerSynced(&walker, (int)e->a);
 					walkAll();
 					break;
 				case GE_SGX_EVENT_SIGNAL:
@@ -1463,7 +1462,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 						}
 					}
 					if (e->c)
-						geSgxWalkerFinish(&walker);
+						geSgxWalkerFinish(&walker, e->b);
 					else
 						geSgxWalkerSignal(&walker, e->b);
 					noteListDone();

@@ -950,10 +950,10 @@ static void testFinishAndSync(void) {
 	geSgxWalkerList(w, 2, 0x08801000, 0, 0);
 	geSgxWalkerSignal(w, 0x08800008);
 	CHECK(w->count == 2 && w->lists[0].held, "held at the first signal: count %d", w->count);
-	geSgxWalkerFinish(w);
+	geSgxWalkerFinish(w, 0);
 	CHECK(w->count == 1 && geSgxReg(w, 0x9C) == 0x11000 && w->lists[0].qid == 2 && !w->lists[0].started, "first list finished only: count %d fbp %x", w->count, geSgxReg(w, 0x9C));
 
-	/* a list stalled here, the game's wait says the GE is done: it goes on */
+	/* a list stalled here the GE finished (its finish handler at its end): it goes on to there; the next one keeps its stall */
 	reset();
 	L c = { 0x08800000 };
 	emit(&c, C(0x9C, 0x33000));
@@ -964,12 +964,12 @@ static void testFinishAndSync(void) {
 	geSgxWalkerList(w, 2, 0x08800000, 0x08800000, 0);
 	geSgxWalkerRun(w);
 	CHECK(w->count == 2 && geSgxReg(w, 0x9D) != 0x44, "stalled: count %d", w->count);
-	geSgxWalkerSynced(w, 1);
-	geSgxWalkerRun(w);
-	CHECK(w->count == 1 && geSgxReg(w, 0x9D) == 0x44 && w->stats.unstalled == 1, "list 1 passed its stall: count %d unstalled %u", w->count, w->stats.unstalled);
-	geSgxWalkerSynced(w, -1);
-	geSgxWalkerRun(w);
-	CHECK(w->count == 0, "all done: count %d", w->count);
+	geSgxWalkerFinish(w, 0x48800010);
+	CHECK(w->count == 1 && geSgxReg(w, 0x9D) == 0x44 && w->stats.unstalled == 1 && w->lists[0].stall == 0x08800000,
+	      "list 1 to its end: count %d unstalled %u, list 2 stall %x", w->count, w->stats.unstalled, w->count ? w->lists[0].stall : 0);
+	/* the same finish reported again (a list the walk had finished): the next list (same address, stalled at its start) keeps its stall */
+	geSgxWalkerFinish(w, 0x48800010);
+	CHECK(w->count == 1 && w->lists[0].stall == 0x08800000, "next list not passed: count %d stall %x", w->count, w->count ? w->lists[0].stall : 0);
 }
 
 static void testBuild3D(void) {
