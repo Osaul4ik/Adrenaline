@@ -796,27 +796,37 @@ static void stencilToAlpha(SceGxmContext *ctx, const Target *t, int fmt5551) {
 	if (!set || !add || !vertex_program)
 		return;
 	int npass = fmt5551 ? 1 : 8;
-	GeSgxVertex *v = vita2d_pool_memalign((uint32_t)(npass + 1) * 4 * sizeof(GeSgxVertex), 16);
-	uint16_t *ix = vita2d_pool_memalign(6 * sizeof(uint16_t), 16);
-	if (!v || !ix)
-		return;
-	static const uint16_t quad[6] = { 0, 1, 2, 1, 3, 2 };
-	memcpy(ix, quad, sizeof(quad));
-	int p, k;
-	for (p = 0; p <= npass; p++) {
-		// pass 0: alpha 0; pass 1 + b: bit b's value (5551: 1)
-		uint32_t a = p == 0 ? 0 : fmt5551 ? 0xFF : (1u << (p - 1));
-		for (k = 0; k < 4; k++) {
-			GeSgxVertex *q = &v[p * 4 + k];
-			q->x = (k & 1) ? (float)t->w : 0.0f;
-			q->y = (k & 2) ? (float)t->h : 0.0f;
-			q->z = 0.5f;
-			q->w = 1.0f;
-			q->u = q->v = 0.0f;
-			q->color = a << 24;
-			q->fog = 1.0f;
+	/*
+		Its quads in GPU memory of their own, written once (uncached, as the
+		GPU reads it): pass 0 alpha 0, pass 1 + b bit b's value, pass 9 the
+		one bit of 5551 (1). They cover any rendering (2048 x 2048), the
+		region clip cuts them. Not in vita2d's pool: reset at the next frame
+		while the GPU may still read this one, its indices overwritten made
+		the GPU read past the vertices.
+	*/
+	static struct { GeSgxVertex v[10 * 4]; uint16_t ix[8]; } *quads = NULL;
+	if (!quads) {
+		quads = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, sizeof(*quads), SCE_GXM_MEMORY_ATTRIB_READ);
+		if (!quads)
+			return;
+		int p, k;
+		for (p = 0; p < 10; p++) {
+			uint32_t a = p == 0 ? 0 : p == 9 ? 0xFF : (1u << (p - 1));
+			for (k = 0; k < 4; k++) {
+				GeSgxVertex *q = &quads->v[p * 4 + k];
+				q->x = (k & 1) ? 2048.0f : 0.0f;
+				q->y = (k & 2) ? 2048.0f : 0.0f;
+				q->z = 0.5f;
+				q->w = 1.0f;
+				q->u = q->v = 0.0f;
+				q->color = a << 24;
+				q->fog = 1.0f;
+			}
 		}
+		static const uint16_t quad[6] = { 0, 1, 2, 1, 3, 2 };
+		memcpy(quads->ix, quad, sizeof(quad));
 	}
+	int p;
 
 	setViewport(ctx);
 	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
@@ -838,11 +848,10 @@ static void stencilToAlpha(SceGxmContext *ctx, const Target *t, int fmt5551) {
 			if (p == 1)
 				sceGxmSetFragmentProgram(ctx, add->program);
 		}
-		sceGxmSetVertexStream(ctx, 0, &v[p * 4]);
-		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, ix, 6);
+		sceGxmSetVertexStream(ctx, 0, &quads->v[(p == 0 ? 0 : fmt5551 ? 9 : p) * 4]);
+		sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, quads->ix, 6);
 	}
 	stencilOff(ctx);
-	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
 }
 
 /* ---- Diagnostics ---- */
