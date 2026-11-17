@@ -33,6 +33,7 @@
 #define GE_CMD_PRIM       0x04u
 #define GE_CMD_BEZIER     0x05u
 #define GE_CMD_SPLINE     0x06u
+#define GE_CMD_BOUNDINGBOX 0x07u
 #define GE_CMD_JUMP       0x08u
 #define GE_CMD_BJUMP      0x09u
 #define GE_CMD_CALL       0x0Au
@@ -44,6 +45,19 @@
 #define GE_CMD_VERTEXTYPE 0x12u
 #define GE_CMD_OFFSETADDR 0x13u
 #define GE_CMD_ORIGIN     0x14u
+#define GE_CMD_REGION1    0x15u
+#define GE_CMD_REGION2    0x16u
+#define GE_CMD_CLIPENABLE 0x1Cu
+#define GE_CMD_VIEWPORTXSCALE  0x42u
+#define GE_CMD_VIEWPORTYSCALE  0x43u
+#define GE_CMD_VIEWPORTZSCALE  0x44u
+#define GE_CMD_VIEWPORTXCENTER 0x45u
+#define GE_CMD_VIEWPORTYCENTER 0x46u
+#define GE_CMD_VIEWPORTZCENTER 0x47u
+#define GE_CMD_OFFSETX    0x4Cu
+#define GE_CMD_OFFSETY    0x4Du
+#define GE_CMD_SCISSOR1   0xD4u
+#define GE_CMD_SCISSOR2   0xD5u
 #define GE_CMD_BONEMATRIXNUMBER  0x2Au
 #define GE_CMD_BONEMATRIXDATA    0x2Bu
 #define GE_CMD_WORLDMATRIXNUMBER 0x3Au
@@ -404,6 +418,142 @@ static void prim(GeSgxWalker *w, uint32_t data) {
 		w->vaddr = normalize(w->vaddr + count * l->size);
 }
 
+// Object space position of a vertex, normalized like the GE (s8 / 128, s16 / 32768)
+static int readPos3(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t vertex, float *out) {
+	uint32_t a = vertex + l->pos_off;
+	int i;
+	for (i = 0; i < 3; i++) {
+		uint32_t v;
+		switch (l->pos_fmt) {
+			case 1:
+				if (!readValue(w, a + i, 1, &v))
+					return 0;
+				out[i] = (int8_t)v * (1.0f / 128.0f);
+				break;
+			case 2:
+				if (!readValue(w, a + i * 2, 2, &v))
+					return 0;
+				out[i] = (int16_t)v * (1.0f / 32768.0f);
+				break;
+			case 3:
+				if (!readValue(w, a + i * 4, 4, &v))
+					return 0;
+				memcpy(&out[i], &v, 4);
+				break;
+			default:
+				return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+	BOUNDINGBOX (PPSSPP's Execute_BoundingBox and TestBoundingBox): count 0
+	only resets the result (to "not visible": a BJUMP after it always jumps,
+	games use that as a jump); else the vertices are tested against the
+	drawing region and the depth planes, the result is "visible" unless all
+	of them are outside one side. The vertices are consumed like a PRIM's.
+	What cannot be tested here is visible.
+*/
+static int boundingBox(GeSgxWalker *w, uint32_t count) {
+	const uint32_t *regs = w->regs;
+	GeSgxVertexLayout l;
+	uint32_t vtype = regs[GE_CMD_VERTEXTYPE] & 0x00FFFFFF;
+	uint32_t base_v = w->vaddr, base_i = w->iaddr;
+	uint32_t n = count, first = 0, i;
+
+	if (count == 0)
+		return 0;
+	geSgxVertexLayout(vtype, &l);
+	if (l.index_size)
+		w->iaddr = normalize(w->iaddr + count * l.index_size);
+	else
+		w->vaddr = normalize(w->vaddr + count * l.size);
+
+	if ((vtype & GE_VTYPE_THROUGH) || l.morphs != 1 || l.wt_fmt || !l.pos_fmt)
+		return 1;
+	// The PSP tests 0x100 vertices at most: past 0x200, the second to last 0x100
+	if (count > 0x200) {
+		first = count - 0x200;
+		n = 0x100;
+	} else if (count > 0x100) {
+		n = count - 0x100;
+	}
+
+	int ox = (int)(regs[GE_CMD_OFFSETX] & 0xFFFF) / 16;
+	int oy = (int)(regs[GE_CMD_OFFSETY] & 0xFFFF) / 16;
+	int rx1 = regs[GE_CMD_REGION1] & 0x3FF, ry1 = (regs[GE_CMD_REGION1] >> 10) & 0x3FF;
+	int rx2 = regs[GE_CMD_REGION2] & 0x3FF, ry2 = (regs[GE_CMD_REGION2] >> 10) & 0x3FF;
+	int sx1 = regs[GE_CMD_SCISSOR1] & 0x3FF, sy1 = (regs[GE_CMD_SCISSOR1] >> 10) & 0x3FF;
+	int sx2 = regs[GE_CMD_SCISSOR2] & 0x3FF, sy2 = (regs[GE_CMD_SCISSOR2] >> 10) & 0x3FF;
+	// The top and left are a pixel off on the PSP
+	int left = ox + (rx1 > sx1 ? rx1 : sx1) - 1;
+	int top = oy + (ry1 > sy1 ? ry1 : sy1) - 1;
+	int right = ox + (rx2 < sx2 ? rx2 : sx2) + 1;
+	int bottom = oy + (ry2 < sy2 ? ry2 : sy2) + 1;
+	// A box reaching out of the 4096x4096 space passes all the checks
+	if (right >= 4096 || bottom >= 4096 || left < 1 || top < 1)
+		return 1;
+
+	// proj * view * world, 4x4 column-major
+	const GeSgxMatrices *m = &w->mtx;
+	float wv[12], mvp[16];
+	int c, r;
+	for (c = 0; c < 4; c++) {
+		const float *col = &m->world[c * 3];
+		for (r = 0; r < 3; r++)
+			wv[c * 3 + r] = m->view[r] * col[0] + m->view[3 + r] * col[1] + m->view[6 + r] * col[2] + (c == 3 ? m->view[9 + r] : 0.0f);
+	}
+	for (c = 0; c < 4; c++) {
+		for (r = 0; r < 4; r++) {
+			float v = m->proj[r] * wv[c * 3] + m->proj[4 + r] * wv[c * 3 + 1] + m->proj[8 + r] * wv[c * 3 + 2];
+			if (c == 3)
+				v += m->proj[12 + r];
+			mvp[c * 4 + r] = v;
+		}
+	}
+	float xs = geSgxFloat24(regs[GE_CMD_VIEWPORTXSCALE]), xc = geSgxFloat24(regs[GE_CMD_VIEWPORTXCENTER]);
+	float ys = geSgxFloat24(regs[GE_CMD_VIEWPORTYSCALE]), yc = geSgxFloat24(regs[GE_CMD_VIEWPORTYCENTER]);
+
+	uint32_t inside[6] = { 0, 0, 0, 0, 0, 0 };
+	for (i = first; i < first + n; i++) {
+		uint32_t index = i;
+		float p[3];
+		if (l.index_size) {
+			uint32_t v;
+			if (!readValue(w, base_i + i * l.index_size, (int)(l.index_size > 2 ? 2 : l.index_size), &v))
+				return 1;
+			index = v; // the PSP ignores the upper 16 bits of 32 bit indices
+		}
+		if (!readPos3(w, &l, base_v + index * l.size, p))
+			return 1;
+		float px = mvp[0] * p[0] + mvp[4] * p[1] + mvp[8] * p[2] + mvp[12];
+		float py = mvp[1] * p[0] + mvp[5] * p[1] + mvp[9] * p[2] + mvp[13];
+		float pz = mvp[2] * p[0] + mvp[6] * p[1] + mvp[10] * p[2] + mvp[14];
+		float pw = mvp[3] * p[0] + mvp[7] * p[1] + mvp[11] * p[2] + mvp[15];
+		if (pz >= -pw)
+			inside[4]++;
+		if (pz <= pw)
+			inside[5]++;
+		float dx = px * xs + xc * pw;
+		float dy = py * ys + yc * pw;
+		if (dx >= left * pw)
+			inside[0]++;
+		if (dx <= right * pw)
+			inside[1]++;
+		if (dy >= top * pw)
+			inside[2]++;
+		if (dy <= bottom * pw)
+			inside[3]++;
+	}
+	int sides = (regs[GE_CMD_CLIPENABLE] & 1) ? 6 : 4;
+	for (c = 0; c < sides; c++) {
+		if (inside[c] == 0)
+			return 0;
+	}
+	return 1;
+}
+
 static int push(GeSgxList *list, uint32_t ret, uint32_t offset) {
 	if (list->depth >= GE_SGX_MAX_STACK)
 		return 0;
@@ -502,9 +652,10 @@ static const uint8_t special_cmd[256] = {
 	[GE_CMD_PROJMATRIXDATA] = 1,
 	[GE_CMD_TGENMATRIXNUMBER] = 1,
 	[GE_CMD_TGENMATRIXDATA] = 1,
-	// BJUMP: the bounding box result is not known, the draws after it are
-	// walked (as if the box was visible); BASE, VERTEXTYPE, CLEARMODE, the
-	// framebuffer and the rest are read from regs[] where they are used
+	[GE_CMD_BOUNDINGBOX] = 1,
+	[GE_CMD_BJUMP] = 1,
+	// BASE, VERTEXTYPE, CLEARMODE, the framebuffer and the rest are read
+	// from regs[] where they are used
 };
 
 static int fetchBlock(GeSgxWalker *w, uint32_t block) {
@@ -589,6 +740,18 @@ special:
 					break;
 				case GE_CMD_JUMP:
 					pc = relativeAddress(w, data & 0x00FFFFFC);
+					break;
+				case GE_CMD_BOUNDINGBOX:
+					list->bbox = (uint8_t)boundingBox(w, data & 0xFFFF);
+					if (list->bbox)
+						w->stats.bbox_visible++;
+					else
+						w->stats.bbox_hidden++;
+					break;
+				case GE_CMD_BJUMP:
+					// Jumps unless the last bounding box was visible (a list starts with "not visible")
+					if (!list->bbox)
+						pc = relativeAddress(w, data & 0x00FFFFFC);
 					break;
 				case GE_CMD_CALL:
 					if (list->depth == 0)

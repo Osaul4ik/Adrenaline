@@ -563,6 +563,37 @@ static void testBuildSprites(void) {
 	CHECK(feq(fverts[4].x, 200) && feq(fverts[4].u, 0.5f) && fverts[4].color == 0xFF0000FFu && fidx[6] == 4 && fidx[11] == 6, "second sprite %f %f %08x idx %u", fverts[4].x, fverts[4].u, fverts[4].color, fidx[6]);
 }
 
+/* Through mode sprites one texel per pixel: the nearest texel (PSP pixel centres are texel centres); stretched: filtered */
+static void testPixelMapped(void) {
+	int k;
+	for (k = 0; k < 2; k++) {
+		resetFrame();
+		uint32_t v = 0x08900000;
+		spriteVertex(v + 0, 4, 2, 0xFFFFFFFF, 10, 20);
+		spriteVertex(v + 16, k ? 36 : 68, 18, 0xFFFFFFFF, 42, 36);  /* 32x16 texels, or 64x16 over 32x16 pixels */
+		L l = { 0x08800000 };
+		emit(&l, C(0x9C, 0x44000));
+		emit(&l, C(0x9D, 512));
+		emit(&l, C(0xD4, 0));
+		emit(&l, C(0xD5, (271 << 10) | 479));
+		emit(&l, C(0x1E, 1));
+		emit(&l, C(0xC6, 0x101));              // linear min and mag
+		emit(&l, C(0xA0, 0x123450));
+		emit(&l, C(0xA8, (0x09 << 16) | 128));
+		emit(&l, C(0xB8, (5 << 8) | 7));       // 128 x 32
+		emit(&l, C(0xC3, GE_TFMT_8888));
+		emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+		emit(&l, C(0x10, 0x080000));
+		emit(&l, C(0x01, 0x900000));
+		emit(&l, C(0x04, (6u << 16) | 2));
+		emit(&l, C(0x0C, 0));
+		geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+		geSgxWalkerRun(w);
+		uint8_t linear = GE_SGX_TEX_LINEAR_MIN | GE_SGX_TEX_LINEAR_MAG;
+		CHECK(frame.ndraws == 1 && (fdraws[0].tex_mode & linear) == (k ? 0 : linear), "pixel mapped %d: tex mode %x", k, frame.ndraws ? fdraws[0].tex_mode : 0xFF);
+	}
+}
+
 static void testBuildOther(void) {
 	resetFrame();
 	uint32_t v = 0x08900000;
@@ -681,6 +712,58 @@ static void setup3D(L *l) {
 	emit(l, C(0x49, F24(1.0f)));
 	emit(l, C(0x4A, F24(0.0f)));
 	emit(l, C(0x4B, F24(0.0f)));
+}
+
+/* BOUNDINGBOX and BJUMP: count 0 makes BJUMP jump, the box test, the vertices consumed */
+static void testBoundingBox(void) {
+	reset();
+	uint32_t v = 0x08900000;
+	static const float pos[4][3] = { { 0, 0, -2 }, { 100, 0, -2 }, { 100, 0, -2 }, { 200, 0, -2 } };
+	int i;
+	for (i = 0; i < 4; i++) {
+		wf(v + i * 12, pos[i][0]);
+		wf(v + i * 12 + 4, pos[i][1]);
+		wf(v + i * 12 + 8, pos[i][2]);
+	}
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x15, 0));
+	emit(&l, C(0x16, (271 << 10) | 479));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x12, VT_POSF));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x07, 2));                 // one vertex on the screen: visible
+	emit(&l, C(0x09, 0x800200));          // not taken
+	emit(&l, C(0x9D, 0x111));
+	emit(&l, C(0x08, 0x800300));
+	CHECK(l.pos <= 0x08800200, "list fits %08x", l.pos);
+	L a = { 0x08800200 };
+	emit(&a, C(0x9C, 0x222));
+	emit(&a, C(0x0C, 0));
+	L b = { 0x08800300 };
+	emit(&b, C(0x07, 2));                 // both right of the screen: hidden
+	emit(&b, C(0x09, 0x800400));          // taken
+	emit(&b, C(0x0A, 0));                 // never run
+	emit(&b, C(0x0C, 0));
+	L c = { 0x08800400 };
+	emit(&c, C(0x07, 0));                 // reset: BJUMP jumps
+	emit(&c, C(0x09, 0x800500));
+	emit(&c, C(0x9C, 0x333));
+	emit(&c, C(0x0C, 0));
+	L d = { 0x08800500 };
+	emit(&d, C(0x09, 0x800600));          // still not visible: taken
+	emit(&d, C(0x9C, 0x444));
+	L e = { 0x08800600 };
+	emit(&e, C(0x0C, 0));
+
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 0 && w->stats.bad == 0, "bbox list count %d bad %u", w->count, w->stats.bad);
+	CHECK(geSgxReg(w, 0x9D) == 0x111 && geSgxReg(w, 0x9C) == 0, "bbox jumps: fbw %x fbp %x", geSgxReg(w, 0x9D), geSgxReg(w, 0x9C));
+	CHECK(w->vaddr == v + 4 * 12, "bbox consumed the vertices: %08x", w->vaddr);
+	CHECK(w->stats.bbox_visible == 1 && w->stats.bbox_hidden == 2, "bbox results %u/%u", w->stats.bbox_visible, w->stats.bbox_hidden);
 }
 
 static void testBuild3D(void) {
@@ -1117,7 +1200,7 @@ static void testIndexed(void) {
 	uint8_t src[4] = { 0x21, 0x43, 0x65, 0x87 }; /* row 0: 1 2 3 4, row 1: 5 6 7 8 */
 	uint8_t out[16];
 	CHECK(geSgxTexIndexed(GE_TFMT_CLUT4) && geSgxTexIndexed(GE_TFMT_CLUT8) && !geSgxTexIndexed(GE_TFMT_CLUT16), "indexed formats");
-	CHECK(geSgxTexConvertIndices(&d, src, 2, out, 8) && out[0] == 1 && out[1] == 2 && out[3] == 4 && out[8] == 5 && out[11] == 8, "clut4 indices %u %u %u %u", out[0], out[1], out[8], out[11]);
+	CHECK(geSgxTexConvertIndices(&d, src, 2, 4, out, 8) && out[0] == 1 && out[1] == 2 && out[3] == 4 && out[8] == 5 && out[11] == 8, "clut4 indices %u %u %u %u", out[0], out[1], out[8], out[11]);
 	static uint32_t clut[512], pal[256];
 	int i;
 	for (i = 0; i < 512; i++)
@@ -1149,7 +1232,7 @@ static void testTexconv(void) {
 		memset(&dd, 0, sizeof(dd));
 		dd.format = GE_TFMT_DXT1; dd.w = 8; dd.h = 4; dd.bufw = 8;
 		CHECK(geSgxTexRows(&dd) == 1, "dxt rows %u", geSgxTexRows(&dd));
-		CHECK(geSgxTexConvert(&dd, dxt, 16, (uint8_t *)px, 8 * 4, NULL), "dxt1 convert");
+		CHECK(geSgxTexConvert(&dd, dxt, 16, 16, (uint8_t *)px, 8 * 4, NULL), "dxt1 convert");
 		/* blue in the low bits of the PSP 565: 0xF800 is red -> 0xFF0000F8 */
 		CHECK(px[0] == 0xFF0000F8u && px[1] == 0xFFF80000u, "dxt1 colours %08x %08x", px[0], px[1]);
 		CHECK(px[2] == rgbaT(0xA5, 0, 0x52, 0xFF) && px[3] == rgbaT(0x52, 0, 0xA5, 0xFF), "dxt1 mix %08x %08x", px[2], px[3]);
@@ -1159,10 +1242,10 @@ static void testTexconv(void) {
 		/* DXT5: alpha 255 / 0 with 6 interpolated, index bits 3 per texel; DXT3: 4 bit alpha */
 		uint8_t d5[16] = { 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0x08, 0, 0, 0, 0, 0, 0xFF, 0x00 }; /* texel 0 idx 0, texel 1 idx 1 */
 		dd.format = GE_TFMT_DXT5; dd.w = 4;
-		CHECK(geSgxTexConvert(&dd, d5, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0xFF && (px[1] >> 24) == 0 && (px[0] & 0xFFFFFF) == 0xF8FCF8, "dxt5 %08x %08x", px[0], px[1]);
+		CHECK(geSgxTexConvert(&dd, d5, 16, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0xFF && (px[1] >> 24) == 0 && (px[0] & 0xFFFFFF) == 0xF8FCF8, "dxt5 %08x %08x", px[0], px[1]);
 		uint8_t d3[16] = { 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0x21, 0x00, 0, 0, 0, 0, 0, 0xF0 };
 		dd.format = GE_TFMT_DXT3;
-		CHECK(geSgxTexConvert(&dd, d3, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0x11 && (px[1] >> 24) == 0x22 && (px[15] >> 24) == 0xFF, "dxt3 %08x %08x %08x", px[0], px[1], px[15]);
+		CHECK(geSgxTexConvert(&dd, d3, 16, 16, (uint8_t *)px, 4 * 4, NULL) && (px[0] >> 24) == 0x10 && (px[1] >> 24) == 0x20 && (px[15] >> 24) == 0xF0, "dxt3 %08x %08x %08x", px[0], px[1], px[15]);
 	}
 
 	GeSgxTexDesc d;
@@ -1170,7 +1253,7 @@ static void testTexconv(void) {
 	d.w = 4; d.h = 2; d.bufw = 8; d.format = GE_TFMT_5650;
 	CHECK(geSgxTexOutStride(&d) == 16, "stride %u", geSgxTexOutStride(&d));
 	memset(out, 0xAA, sizeof(out));
-	CHECK(geSgxTexConvert(&d, lin, 16, out, 16, NULL) && memcmp(out, lin, 8) == 0 && out[8] == 0 && memcmp(out + 16, lin + 16, 8) == 0, "16 bit rows copied, padding cleared");
+	CHECK(geSgxTexConvert(&d, lin, 16, 32, out, 16, NULL) && memcmp(out, lin, 8) == 0 && out[8] == 0 && memcmp(out + 16, lin + 16, 8) == 0, "16 bit rows copied, padding cleared");
 
 	/* CLUT: 5551 entries, CLUT8 with shift 1, mask 0x0F, start 1 (base 16) */
 	uint8_t clutraw[64];
@@ -1187,7 +1270,7 @@ static void testTexconv(void) {
 	memset(&d, 0, sizeof(d));
 	d.w = 8; d.h = 1; d.bufw = 8; d.format = GE_TFMT_CLUT8;
 	d.clut_format = 1 | (1 << 2) | (0x0F << 8) | (1 << 16);
-	CHECK(geSgxTexConvert(&d, idx, 8, out, 32, clut), "clut8 convert");
+	CHECK(geSgxTexConvert(&d, idx, 8, 8, out, 32, clut), "clut8 convert");
 	uint32_t o[8];
 	memcpy(o, out, 32);
 	/* (raw >> 1) & 15 | 16 */
@@ -1198,9 +1281,36 @@ static void testTexconv(void) {
 	memset(&d, 0, sizeof(d));
 	d.w = 4; d.h = 1; d.bufw = 4; d.format = GE_TFMT_CLUT4;
 	d.clut_format = 1 | (0xFF << 8);
-	CHECK(geSgxTexConvert(&d, nib, 2, out, 32, clut), "clut4 convert");
+	CHECK(geSgxTexConvert(&d, nib, 2, 2, out, 32, clut), "clut4 convert");
 	memcpy(o, out, 16);
 	CHECK(o[0] == clut[1] && o[1] == clut[2] && o[2] == clut[3] && o[3] == clut[4], "clut4 order %08x %08x", o[0], o[1]);
+
+	/* A texture wider than its buffer: texels past a row's end are the next row's (8888, w 8, bufw 4, 2 rows) */
+	{
+		uint32_t t[12], px[16];
+		for (i = 0; i < 12; i++)
+			t[i] = 0x01000000u * (i + 1);
+		memset(&d, 0, sizeof(d));
+		d.w = 8; d.h = 2; d.bufw = 4; d.format = GE_TFMT_8888;
+		CHECK(geSgxTexExtent(&d) == 48, "extent %u", geSgxTexExtent(&d));
+		CHECK(geSgxTexConvert(&d, (const uint8_t *)t, 16, 48, (uint8_t *)px, 32, NULL), "wide convert");
+		CHECK(px[4] == t[4] && px[7] == t[7] && px[8] == t[4] && px[15] == t[11], "wide rows %08x %08x %08x", px[4], px[8], px[15]);
+		/* the same past the end of the data: 0 */
+		CHECK(geSgxTexConvert(&d, (const uint8_t *)t, 16, 40, (uint8_t *)px, 32, NULL) && px[13] == t[9] && px[14] == 0 && px[15] == 0, "past the data %08x %08x", px[13], px[14]);
+		/* DXT: blocks per row bufw / 4, the extent covers the texture's width */
+		memset(&d, 0, sizeof(d));
+		d.w = 16; d.h = 8; d.bufw = 8; d.format = GE_TFMT_DXT1;
+		CHECK(geSgxTexRowBytes(GE_TFMT_DXT1, 8) == 16 && geSgxTexRowBytes(GE_TFMT_DXT1, 4) == 8 && geSgxTexExtent(&d) == 16 + 32, "dxt extent %u", geSgxTexExtent(&d));
+	}
+	/* DXT5 interpolated alpha, rounded like PPSSPP: a0 255 a1 0 index 2 -> (255 * 6 * 256 / 7 + 31) >> 8 = 218 */
+	{
+		uint8_t d5[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0xFF, 0x00 };
+		uint32_t px[16];
+		GeSgxTexDesc dd;
+		memset(&dd, 0, sizeof(dd));
+		dd.format = GE_TFMT_DXT5; dd.w = 4; dd.h = 4; dd.bufw = 4;
+		CHECK(geSgxTexConvert(&dd, d5, 16, 16, (uint8_t *)px, 16, NULL) && (px[0] >> 24) == 218, "dxt5 lerp %u", px[0] >> 24);
+	}
 
 	CHECK(geSgxDecodeColor16(0, 0x07E0) == 0xFF00FF00u && geSgxDecodeColor16(2, 0x8F00) == 0x88FF0000u, "colour decode %08x %08x", geSgxDecodeColor16(0, 0x07E0), geSgxDecodeColor16(2, 0x8F00));
 }
@@ -1249,6 +1359,8 @@ int main(void) {
 	testTransferIntoVram();
 	testTexconv();
 	testTexBufw();
+	testBoundingBox();
+	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);

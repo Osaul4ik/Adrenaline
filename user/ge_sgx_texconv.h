@@ -46,6 +46,9 @@ uint32_t geSgxTexBufw(uint32_t format, uint32_t bufw_reg);
 // Rows to read from PSP memory (swizzled textures are stored in blocks of 8 rows)
 uint32_t geSgxTexRows(const GeSgxTexDesc *d);
 
+// Bytes of the (unswizzled) texels the texture covers: past its rows when it is wider than its buffer
+uint32_t geSgxTexExtent(const GeSgxTexDesc *d);
+
 // Bytes per texel of the converted texture (2 or 4)
 uint32_t geSgxTexOutBpp(uint32_t format);
 
@@ -58,7 +61,7 @@ static inline int geSgxTexIndexed(uint32_t format) {
 	return format == 4 || format == 5; // GE_TFMT_CLUT4, GE_TFMT_CLUT8
 }
 void geSgxTexPalette(const GeSgxTexDesc *d, const uint32_t *clut_rgba, uint32_t *palette);
-int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint8_t *dst, uint32_t dst_stride);
+int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint32_t src_bytes, uint8_t *dst, uint32_t dst_stride);
 
 // Row stride of the converted texture: GXM linear textures use rows of a multiple of 8 texels
 static inline uint32_t geSgxTexOutStride(const GeSgxTexDesc *d) {
@@ -72,11 +75,13 @@ void geSgxUnswizzle(uint8_t *dst, const uint8_t *src, uint32_t rowbytes, uint32_
 void geSgxClutDecode(uint32_t clut_format, const uint8_t *clut, uint32_t bytes, uint32_t *out);
 
 /*
-	src: linear texels, src_rowbytes per row (geSgxTexRowBytes), at least h
-	rows. dst: d->h rows of geSgxTexOutStride bytes. clut: from
-	geSgxClutDecode (CLUT formats). Returns 0 if the format is not supported.
+	src: linear texels, src_rowbytes per row (geSgxTexRowBytes), src_bytes of
+	them (geSgxTexExtent: a row wider than the buffer goes on into the next
+	one, as on the GE; past src_bytes the texels are 0). dst: d->h rows of
+	geSgxTexOutStride bytes. clut: from geSgxClutDecode (CLUT formats).
+	Returns 0 if the format is not supported.
 */
-int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes,
+int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint32_t src_bytes,
 	uint8_t *dst, uint32_t dst_stride, const uint32_t *clut);
 
 // 16 bit GE colour (0: 565, 1: 5551, 2: 4444) to 0xAABBGGRR

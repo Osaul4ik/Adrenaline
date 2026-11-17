@@ -1885,11 +1885,29 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	if (gpu) {
 		// Indices only (below)
 	} else if (type == GE_PRIM_RECTANGLES) {
+		/*
+			Through mode sprites mapped one texel per pixel at whole texel
+			offsets (PPSSPP's exactlyPixelMapped): on the PSP each pixel centre
+			is a texel centre, the linear filter gives that texel. At 960x544
+			the pixel centres fall between texels: filtered, the picture was
+			soft and took colour from the neighbours in the texture (lines at
+			the edges of the font and of the HUD's parts in atlases). Those
+			draws sample the nearest texel, as the PSP does.
+		*/
+		int exact = xp->through && (d.flags & GE_SGX_DRAW_TEXTURED) && d.texture >= 0 && !d.fbtex && !d.depthtex &&
+			(d.tex_mode & (GE_SGX_TEX_LINEAR_MIN | GE_SGX_TEX_LINEAR_MAG)) && xp->tex_w > 0.0f && xp->tex_h > 0.0f;
 		// Sprites: two corners each, screen aligned (3D ones after the projection)
 		for (i = 0; i + 1 < count; i += 2) {
 			GeSgxVertex a, b;
 			if (!vertexOut(w, xp, prim_index[i], &a) || !vertexOut(w, xp, prim_index[i + 1], &b))
 				goto fail;
+			if (exact) {
+				float dx = (b.x - a.x) * (1.0f / GE_SGX_SCALE), dy = (b.y - a.y) * (1.0f / GE_SGX_SCALE);
+				float du = (b.u - a.u) / xp->tex_w, dv = (b.v - a.v) / xp->tex_h;
+				float ou = a.u / xp->tex_w - a.x * (1.0f / GE_SGX_SCALE), ov = a.v / xp->tex_h - a.y * (1.0f / GE_SGX_SCALE);
+				if (dx <= 0.0f || dy <= 0.0f || dx != du || dy != dv || ou != floorf(ou) || ov != floorf(ov))
+					exact = 0;
+			}
 			if (!xp->through) {
 				if (a.w <= 0.0f || b.w <= 0.0f)
 					continue;
@@ -1912,6 +1930,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			iout[ni++] = (uint16_t)(nv + 2);
 			nv += 4;
 		}
+		if (exact && nv)
+			d.tex_mode &= (uint8_t)~(GE_SGX_TEX_LINEAR_MIN | GE_SGX_TEX_LINEAR_MAG);
 	}
 	if (gpu || type != GE_PRIM_RECTANGLES) {
 		// Local vertex numbers: the compact index range, or one vertex per index

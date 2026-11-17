@@ -58,6 +58,8 @@ typedef struct {
 	uint32_t signals;     // signal commands
 	uint32_t bad;         // lists stopped at an unreadable address or runaway
 	uint32_t dropped;     // lists dropped because the queue was full
+	uint32_t bbox_visible; // BOUNDINGBOX results
+	uint32_t bbox_hidden;
 } GeSgxStats;
 
 typedef struct {
@@ -74,6 +76,7 @@ typedef struct {
 	uint32_t stall; // 0: none
 	int started;
 	int depth;
+	uint8_t bbox; // result of the last BOUNDINGBOX (BJUMP jumps when 0)
 	uint32_t stack[GE_SGX_MAX_STACK][2]; // return address, offset
 } GeSgxList;
 

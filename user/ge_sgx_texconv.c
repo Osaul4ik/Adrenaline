@@ -39,12 +39,12 @@ uint32_t geSgxTexRowBytes(uint32_t format, uint32_t bufw) {
 			return bufw;
 		case GE_TFMT_CLUT4:
 			return (bufw + 1) / 2;
-		// DXT: one row of 4x4 blocks
+		// DXT: one row of 4x4 blocks, bufw / 4 of them (at least one, PPSSPP DecodeDXTBlocks)
 		case GE_TFMT_DXT1:
-			return ((bufw + 3) / 4) * 8;
+			return (bufw >= 8 ? bufw / 4 : 1) * 8;
 		case GE_TFMT_DXT3:
 		case GE_TFMT_DXT5:
-			return ((bufw + 3) / 4) * 16;
+			return (bufw >= 8 ? bufw / 4 : 1) * 16;
 		default:
 			return 0;
 	}
@@ -76,6 +76,21 @@ uint32_t geSgxTexRows(const GeSgxTexDesc *d) {
 	if (isDxt(d->format))
 		return (d->h + 3u) / 4; // block rows, never swizzled
 	return d->swizzle ? ((d->h + 7u) & ~7u) : d->h;
+}
+
+/*
+	The GE reads texel (x, y) at y * bufw + x (PPSSPP SourceExtent): a texture
+	wider than its buffer reads the texels past a row's end from the next
+	row's memory, the last row past the buffer's rows. The bytes of the
+	unswizzled texels a texture covers.
+*/
+uint32_t geSgxTexExtent(const GeSgxTexDesc *d) {
+	uint32_t rowbytes = geSgxTexRowBytes(d->format, d->bufw);
+	uint32_t rows = geSgxTexRows(d);
+	uint32_t wbytes = isDxt(d->format) ? geSgxTexRowBytes(d->format, d->w < 4 ? 4 : (d->w + 3u) & ~3u) : geSgxTexRowBytes(d->format, d->w);
+	if (!rowbytes || !rows)
+		return 0;
+	return (rows - 1) * rowbytes + (wbytes > rowbytes ? wbytes : rowbytes);
 }
 
 /*
@@ -119,12 +134,13 @@ static void dxtBlock(uint32_t format, const uint8_t *blk, uint32_t *out, uint32_
 		uint32_t a0 = blk[14], a1 = blk[15];
 		alpha[0] = (uint8_t)a0;
 		alpha[1] = (uint8_t)a1;
+		// PPSSPP's lerp8/lerp6: 8.8 fixed point, rounded
 		if (a0 > a1) {
 			for (x = 1; x < 7; x++)
-				alpha[x + 1] = (uint8_t)(((7 - x) * a0 + x * a1) / 7);
+				alpha[x + 1] = (uint8_t)(((a0 * ((7 - x) << 8)) / 7 + (a1 * (x << 8)) / 7 + 31) >> 8);
 		} else {
 			for (x = 1; x < 5; x++)
-				alpha[x + 1] = (uint8_t)(((5 - x) * a0 + x * a1) / 5);
+				alpha[x + 1] = (uint8_t)(((a0 * ((5 - x) << 8)) / 5 + (a1 * (x << 8)) / 5 + 31) >> 8);
 			alpha[6] = 0;
 			alpha[7] = 255;
 		}
@@ -139,7 +155,8 @@ static void dxtBlock(uint32_t format, const uint8_t *blk, uint32_t *out, uint32_
 			uint32_t v = c[idx & 3];
 			idx >>= 2;
 			if (format == GE_TFMT_DXT3) {
-				v = (v & 0x00FFFFFFu) | (((aline >> (x * 4)) & 0xF) * 0x11u) << 24;
+				// The 4 bits are the top of the alpha (PPSSPP: 15 is 0xF0)
+				v = (v & 0x00FFFFFFu) | (((aline >> (x * 4)) & 0xF) << 28);
 			} else if (format == GE_TFMT_DXT5) {
 				v = (v & 0x00FFFFFFu) | ((uint32_t)alpha[abits & 7] << 24);
 				abits >>= 3;
@@ -203,19 +220,23 @@ void geSgxTexPalette(const GeSgxTexDesc *d, const uint32_t *clut_rgba, uint32_t 
 		palette[i] = i < n ? clut_rgba[clutIndex(d->clut_format, i)] : 0;
 }
 
-int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint8_t *dst, uint32_t dst_stride) {
+int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint32_t src_bytes, uint8_t *dst, uint32_t dst_stride) {
 	uint32_t x, y, w = d->w, h = d->h;
 	for (y = 0; y < h; y++) {
-		const uint8_t *s = src + y * src_rowbytes;
+		uint32_t row = y * src_rowbytes;
 		uint8_t *o = dst + y * dst_stride;
 		if (d->format == GE_TFMT_CLUT8) {
-			uint32_t n = w < src_rowbytes ? w : src_rowbytes;
-			memcpy(o, s, n);
+			uint32_t n = row < src_bytes ? src_bytes - row : 0;
+			if (n > w)
+				n = w;
+			memcpy(o, src + row, n);
 			if (n < w)
 				memset(o + n, 0, w - n);
 		} else if (d->format == GE_TFMT_CLUT4) {
-			for (x = 0; x < w; x++)
-				o[x] = x / 2 < src_rowbytes ? (uint8_t)((s[x / 2] >> ((x & 1) * 4)) & 0xF) : 0;
+			for (x = 0; x < w; x++) {
+				uint32_t at = row + x / 2;
+				o[x] = at < src_bytes ? (uint8_t)((src[at] >> ((x & 1) * 4)) & 0xF) : 0;
+			}
 		} else {
 			return 0;
 		}
@@ -223,21 +244,24 @@ int geSgxTexConvertIndices(const GeSgxTexDesc *d, const uint8_t *src, uint32_t s
 	return 1;
 }
 
-int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes,
+int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowbytes, uint32_t src_bytes,
 	uint8_t *dst, uint32_t dst_stride, const uint32_t *clut) {
 	uint32_t x, y;
 	uint32_t w = d->w, h = d->h;
 
+	// Texel (x, y) at y * src_rowbytes + x * bpp, up to src_bytes (geSgxTexExtent); past it 0
 	switch (d->format) {
 		case GE_TFMT_5650:
 		case GE_TFMT_5551:
 		case GE_TFMT_4444:
 		case GE_TFMT_8888: {
-			uint32_t row = w * geSgxTexOutBpp(d->format);
-			if (row > src_rowbytes)
-				row = src_rowbytes;
+			uint32_t want = w * geSgxTexOutBpp(d->format);
 			for (y = 0; y < h; y++) {
-				memcpy(dst + y * dst_stride, src + y * src_rowbytes, row);
+				uint32_t at = y * src_rowbytes;
+				uint32_t row = at < src_bytes ? src_bytes - at : 0;
+				if (row > want)
+					row = want;
+				memcpy(dst + y * dst_stride, src + at, row);
 				if (row < dst_stride)
 					memset(dst + y * dst_stride + row, 0, dst_stride - row);
 			}
@@ -246,37 +270,40 @@ int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowb
 		case GE_TFMT_CLUT4:
 			for (y = 0; y < h; y++) {
 				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t left = y * src_rowbytes < src_bytes ? src_bytes - y * src_rowbytes : 0;
 				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
-				for (x = 0; x < w && x / 2 < src_rowbytes; x++) {
-					uint32_t raw = (s[x / 2] >> ((x & 1) * 4)) & 0xF;
-					o[x] = clut[clutIndex(d->clut_format, raw)];
-				}
+				for (x = 0; x < w; x++)
+					o[x] = x / 2 < left ? clut[clutIndex(d->clut_format, (s[x / 2] >> ((x & 1) * 4)) & 0xF)] : 0;
 			}
 			return 1;
 		case GE_TFMT_CLUT8:
 			for (y = 0; y < h; y++) {
 				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t left = y * src_rowbytes < src_bytes ? src_bytes - y * src_rowbytes : 0;
 				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
-				for (x = 0; x < w && x < src_rowbytes; x++)
-					o[x] = clut[clutIndex(d->clut_format, s[x])];
+				for (x = 0; x < w; x++)
+					o[x] = x < left ? clut[clutIndex(d->clut_format, s[x])] : 0;
 			}
 			return 1;
 		case GE_TFMT_CLUT16:
 			for (y = 0; y < h; y++) {
 				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t left = y * src_rowbytes < src_bytes ? src_bytes - y * src_rowbytes : 0;
 				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
-				for (x = 0; x < w && x * 2 + 1 < src_rowbytes; x++)
-					o[x] = clut[clutIndex(d->clut_format, (uint32_t)s[x * 2] | ((uint32_t)s[x * 2 + 1] << 8))];
+				for (x = 0; x < w; x++)
+					o[x] = x * 2 + 2 <= left ? clut[clutIndex(d->clut_format, (uint32_t)s[x * 2] | ((uint32_t)s[x * 2 + 1] << 8))] : 0;
 			}
 			return 1;
 		case GE_TFMT_CLUT32:
 			for (y = 0; y < h; y++) {
 				const uint8_t *s = src + y * src_rowbytes;
+				uint32_t left = y * src_rowbytes < src_bytes ? src_bytes - y * src_rowbytes : 0;
 				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
-				for (x = 0; x < w && x * 4 + 3 < src_rowbytes; x++) {
-					uint32_t raw;
-					memcpy(&raw, s + x * 4, 4);
-					o[x] = clut[clutIndex(d->clut_format, raw)];
+				for (x = 0; x < w; x++) {
+					uint32_t raw = 0;
+					if (x * 4 + 4 <= left)
+						memcpy(&raw, s + x * 4, 4);
+					o[x] = x * 4 + 4 <= left ? clut[clutIndex(d->clut_format, raw)] : 0;
 				}
 			}
 			return 1;
@@ -286,10 +313,18 @@ int geSgxTexConvert(const GeSgxTexDesc *d, const uint8_t *src, uint32_t src_rowb
 			uint32_t bsize = d->format == GE_TFMT_DXT1 ? 8 : 16;
 			uint32_t stride_px = dst_stride / 4;
 			for (y = 0; y < h; y += 4) {
-				const uint8_t *s = src + (y / 4) * src_rowbytes;
+				uint32_t row = (y / 4) * src_rowbytes;
 				uint32_t *o = (uint32_t *)(dst + y * dst_stride);
-				for (x = 0; x < w && (x / 4 + 1) * bsize <= src_rowbytes; x += 4)
-					dxtBlock(d->format, s + (x / 4) * bsize, o + x, stride_px, w - x < 4 ? w - x : 4, h - y < 4 ? h - y : 4);
+				uint32_t bh = h - y < 4 ? h - y : 4;
+				for (x = 0; x < w; x += 4) {
+					uint32_t at = row + (x / 4) * bsize, bw = w - x < 4 ? w - x : 4, k;
+					if (at + bsize <= src_bytes) {
+						dxtBlock(d->format, src + at, o + x, stride_px, bw, bh);
+					} else {
+						for (k = 0; k < bh; k++)
+							memset(o + k * stride_px + x, 0, bw * 4);
+					}
+				}
 			}
 			return 1;
 		}

@@ -189,7 +189,8 @@ static int sameKey(const GeSgxTexDesc *a, const GeSgxTexDesc *b) {
 	The rows past the end read as 0 (transparent).
 */
 static uint32_t sourceBytes(const GeSgxTexDesc *d) {
-	uint32_t size = geSgxTexRowBytes(d->format, d->bufw) * geSgxTexRows(d);
+	// Swizzled: the blocks of the buffer's rows; else up to the last texel (a texture wider than its buffer reads on)
+	uint32_t size = d->swizzle && d->format < GE_TFMT_DXT1 ? geSgxTexRowBytes(d->format, d->bufw) * geSgxTexRows(d) : geSgxTexExtent(d);
 	uint32_t span = geSgxPspSpan(d->addr);
 	return size < span ? size : span;
 }
@@ -292,11 +293,14 @@ static int failed(const GeSgxTexDesc *d, const char *why) {
 static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	uint32_t rowbytes = geSgxTexRowBytes(d->format, d->bufw);
 	uint32_t rows = geSgxTexRows(d);
-	uint32_t size = rowbytes * rows;
+	int swizzled = d->swizzle && d->format < GE_TFMT_DXT1;
+	// The texels the conversion reads (unswizzled), and the bytes of PSP memory they come from
+	uint32_t extent = geSgxTexExtent(d);
+	if (swizzled && extent < rowbytes * rows)
+		extent = rowbytes * rows;
+	uint32_t size = swizzled ? rowbytes * rows : extent;
 	uint32_t have = sourceBytes(d); // up to the end of RAM or VRAM; the rest reads as 0
-	// A buffer narrower than the texture (480 wide pictures in 512 textures) is fine:
-	// the texels past it are not used
-	if (!rowbytes || !d->bufw || size > STAGING_BYTES || d->w > 512 || d->h > 512)
+	if (!rowbytes || !d->bufw || extent > STAGING_BYTES || d->w > 512 || d->h > 512)
 		return failed(d, "size");
 
 	const uint8_t *src = have ? geSgxPspPtr(d->addr, have) : NULL;
@@ -352,8 +356,11 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 		memset(staging[0] + have, 0, size - have);
 
 	const uint8_t *linear = staging[0];
-	if (d->swizzle && d->format < GE_TFMT_DXT1) {
+	if (swizzled) {
+		// The texels past the buffer's rows (a texture wider than its buffer) read as 0, like PPSSPP's
 		geSgxUnswizzle(staging[1], staging[0], rowbytes, rows);
+		if (extent > size)
+			memset(staging[1] + size, 0, extent - size);
 		linear = staging[1];
 	}
 
@@ -400,13 +407,11 @@ static int32_t upload(const GeSgxTexDesc *d, uint32_t sample) {
 	int ok;
 	if (indexed) {
 		geSgxTexPalette(d, clut_rgba, (uint32_t *)(out + pal_off));
-		ok = geSgxTexConvertIndices(d, linear, rowbytes, out, stride) &&
+		ok = geSgxTexConvertIndices(d, linear, rowbytes, extent, out, stride) &&
 			sceGxmTextureInitLinear(&e->tex, gpu, SCE_GXM_TEXTURE_FORMAT_P8_ABGR, d->w, d->h, 0) >= 0 &&
 			sceGxmTextureSetPalette(&e->tex, (uint8_t *)gpu + pal_off) >= 0;
 	} else {
-		if (d->bufw < d->w)
-			memset(out, 0, stride * d->h);
-		ok = geSgxTexConvert(d, linear, rowbytes, out, stride, clut_rgba) &&
+		ok = geSgxTexConvert(d, linear, rowbytes, extent, out, stride, clut_rgba) &&
 			sceGxmTextureInitLinear(&e->tex, gpu, gxmFormat(d->format), d->w, d->h, 0) >= 0;
 	}
 	if (!ok) {
