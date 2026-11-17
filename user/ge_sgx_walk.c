@@ -869,6 +869,26 @@ void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user) {
 	w->state_dirty = 1;
 }
 
+/*
+	A register's value as the GE has it: taken when the walk never saw it set
+	(regs[] keeps whole commands: a register set has its command in the top
+	byte). Games set some once, at the start, in lists the walk may not have
+	(Prince of Persia Revelations' depth buffer: its fog reads it through a
+	palette, at the depth's address).
+*/
+void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value) {
+	if (cmd > 0xFF || (w->regs[cmd] >> 24) == cmd)
+		return;
+	w->regs[cmd] = (cmd << 24) | (value & 0x00FFFFFFu);
+	w->state_dirty = 1;
+	w->stats.hw_regs++;
+	static int logs = 0;
+	if (w->log_fn && logs < 32) {
+		logs++;
+		w->log_fn("GeSgx: register %02X from the GE: %06X (not set in the walked lists)\n", (unsigned)cmd, (unsigned)(value & 0x00FFFFFFu));
+	}
+}
+
 void geSgxWalkerReset(GeSgxWalker *w) {
 	GeSgxFrameData *frame = w->frame;
 	GeSgxTextureFn texture_fn = w->texture_fn;

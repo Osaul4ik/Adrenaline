@@ -60,6 +60,7 @@ typedef struct {
 	uint32_t dropped;     // lists dropped because the queue was full
 	uint32_t bbox_visible; // BOUNDINGBOX results
 	uint32_t bbox_hidden;
+	uint32_t hw_regs;     // registers taken from the GE (geSgxWalkerHardwareReg)
 } GeSgxStats;
 
 typedef struct {
@@ -267,6 +268,7 @@ static inline uint32_t geSgxReg(const GeSgxWalker *w, uint32_t cmd) {
 
 void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user);
 void geSgxWalkerReset(GeSgxWalker *w);
+void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 
 // Ring events, in the order the PSP side reported them
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head);

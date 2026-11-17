@@ -1217,6 +1217,10 @@ static int GeSgxThread(SceSize args, void *argp) {
 					geSgxWalkerRun(&walker);
 					noteListDone();
 					break;
+				case GE_SGX_EVENT_REGS:
+					geSgxWalkerHardwareReg(&walker, e->a, e->b);
+					geSgxWalkerHardwareReg(&walker, e->c, e->d);
+					break;
 				case GE_SGX_EVENT_DEQUEUE:
 					geSgxWalkerDequeue(&walker, (int)e->a);
 					geSgxWalkerRun(&walker);
@@ -1334,12 +1338,12 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u bbox %u/%u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u bad %u bbox %u/%u hw regs %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
-					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden,
+					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,

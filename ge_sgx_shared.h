@@ -51,6 +51,13 @@ enum GeSgxEventTypes {
 	GE_SGX_EVENT_STALL,     // a = queue id, b = new stall address
 	GE_SGX_EVENT_FLIP,      // a = top address, b = buffer width, c = pixel format, d = sync
 	GE_SGX_EVENT_DEQUEUE,   // a = queue id
+	/*
+		GE registers as the GE has them (sceGeGetCmd), at a flip: a = command,
+		b = its value (24 bits), c = another command, d = its value. The Vita
+		side takes them for the registers its walk never saw set (games set
+		the depth buffer once, in a list before the walker's state starts).
+	*/
+	GE_SGX_EVENT_REGS,
 };
 
 typedef struct {

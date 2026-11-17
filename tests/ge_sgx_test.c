@@ -766,6 +766,21 @@ static void testBoundingBox(void) {
 	CHECK(w->stats.bbox_visible == 1 && w->stats.bbox_hidden == 2, "bbox results %u/%u", w->stats.bbox_visible, w->stats.bbox_hidden);
 }
 
+/* Registers from the GE: taken only when the walk never set them */
+static void testHardwareRegs(void) {
+	reset();
+	L l = { 0x08800000 };
+	emit(&l, C(0x9F, 512));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	geSgxWalkerHardwareReg(w, 0x9E, 0x110000);
+	geSgxWalkerHardwareReg(w, 0x9F, 0x40);
+	CHECK(geSgxReg(w, 0x9E) == 0x110000 && geSgxReg(w, 0x9F) == 512 && w->stats.hw_regs == 1, "hw regs %x %x %u", geSgxReg(w, 0x9E), geSgxReg(w, 0x9F), w->stats.hw_regs);
+	geSgxWalkerHardwareReg(w, 0x9E, 0x120000);
+	CHECK(geSgxReg(w, 0x9E) == 0x110000, "hw reg taken once %x", geSgxReg(w, 0x9E));
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1360,6 +1375,7 @@ int main(void) {
 	testTexconv();
 	testTexBufw();
 	testBoundingBox();
+	testHardwareRegs();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 

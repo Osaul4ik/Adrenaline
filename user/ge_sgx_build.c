@@ -1638,6 +1638,17 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			// A framebuffer's depth through a palette (CLUT16 at the depth's mirror, 0x04600000 + its z address)
 			if (taddr >= 0x04000000u && taddr < 0x04800000u && (taddr & 0x00600000u) == 0x00600000u && tfmt == 6)
 				zt = fbFindZ(taddr & 0x001FFFFFu, cached_d.fb);
+			// Traced: a CLUT16 texture at a depth mirror, and the depth buffers known
+			if (w->trace && taddr >= 0x04000000u && taddr < 0x04800000u && (taddr & 0x00600000u) == 0x00600000u && tfmt == 6) {
+				int q;
+				traceLine(w, "depth texture %X: %s, z of %X now %06X%s", (unsigned)taddr, zt >= 0 ? "a framebuffer's depth" : "no framebuffer with that depth",
+					(unsigned)cached_d.fb, (unsigned)((((reg(w, GE_CMD_ZBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_ZBUFPTR)) & 0x001FFFFFu),
+					(w->regs[GE_CMD_ZBUFPTR] >> 24) == GE_CMD_ZBUFPTR ? "" : " (never set)");
+				for (q = 0; q < GE_SGX_MAX_FBS; q++) {
+					if (fbreg[q].used)
+						traceLine(w, "depth texture: fb %X %ux%u z %06X", (unsigned)fbreg[q].fb, (unsigned)fbreg[q].w, (unsigned)fbreg[q].h, (unsigned)fbreg[q].z);
+				}
+			}
 		}
 		diagDraw(w, f, &cached_d, taddr, rt);
 		cached_d.depthtex = 0;

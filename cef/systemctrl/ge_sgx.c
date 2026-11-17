@@ -45,6 +45,7 @@ static int (* _sceGeListSync)(int qid, int syncType);
 static int (* _sceGeSetCallback)(PspGeCallbackData *cb);
 static int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 static u32 (* _sceKernelGetSystemTimeLow)(void);
+static u32 (* _sceGeGetCmd)(int cmd);
 
 static volatile GeSgxRing *ring = NULL; // uncached
 static u32 ring_mask = 0;
@@ -333,8 +334,24 @@ static u32 findExport(const char *libname, u32 nid, const char **modname) {
 	return 0;
 }
 
+/*
+	Registers games set once (sceGuInit, sceGuDepthBuffer, sceGuOffset...):
+	the GE's values, for the ones the Vita side's walk has not seen. In
+	pairs: depth buffer, framebuffer, drawing offset, region.
+*/
+static const u8 hw_regs[] = { 0x9E, 0x9F, 0x9C, 0x9D, 0x4C, 0x4D, 0x15, 0x16 };
+
+static void pushRegs(void) {
+	if (!_sceGeGetCmd)
+		return;
+	u32 i;
+	for (i = 0; i + 1 < sizeof(hw_regs); i += 2)
+		ringPush(GE_SGX_EVENT_REGS, hw_regs[i], _sceGeGetCmd(hw_regs[i]) & 0x00FFFFFF, hw_regs[i + 1], _sceGeGetCmd(hw_regs[i + 1]) & 0x00FFFFFF);
+}
+
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
 	copyVram();
+	pushRegs();
 	ringPush(GE_SGX_EVENT_FLIP, (u32)topaddr, bufferwidth, pixelformat, sync);
 	return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
 }
@@ -399,11 +416,12 @@ int GeSgxInit(void) {
 	_sceGeSetCallback = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xA4FC06A4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
+	_sceGeGetCmd = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xDC93CFEF);
 	// VRAM copied with the DMA (1) or the CPU (2)
 	const char *dmac_module = "";
 	_sceDmacMemcpy = (void *)findExport("sceDmac", 0x617F3FE6, &dmac_module);
 	u32 how = _sceDmacMemcpy ? 1 : 2;
-	log("GeSgx: VRAM copied with %d\n", (int)how);
+	log("GeSgx: VRAM copied with %d, GE registers %s\n", (int)how, _sceGeGetCmd ? "read" : "not found");
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
 	    !_sceGeDrawSync || !_sceGeListSync || !_sceDisplaySetFrameBuf) {
