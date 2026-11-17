@@ -886,6 +886,51 @@ static void testListContext(void) {
 	CHECK(geSgxReg(w, 0x48) == 0x3F8000 && w->mtx.world[0] == 0.0f && w->stats.contexts == 1 && w->count == 0, "restored %x world %f contexts %u", geSgxReg(w, 0x48), (double)w->mtx.world[0], w->stats.contexts);
 }
 
+/*
+	Signal handlers reported by the PSP side: the list walked up to each
+	signal before its handler runs; what a handler writes after its signal is
+	read at the next one, as the GE reads it
+*/
+static void testSignalEvents(void) {
+	reset();
+	L m = { 0x08800000 };
+	emit(&m, C(0x9C, 0x11000));
+	emit(&m, C(0x0E, (0x01u << 16) | 0x00C8)); // handler signal 1
+	emit(&m, C(0x0C, 0x0000));
+	uint32_t after1 = m.pos;
+	emit(&m, C(0x00, 0));                      // written by handler 1
+	emit(&m, C(0x0E, (0x01u << 16) | 0x00C9)); // handler signal 2
+	emit(&m, C(0x0C, 0x0000));
+	uint32_t after2 = m.pos;
+	emit(&m, C(0x00, 0));                      // written by handler 2
+	emit(&m, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);   /* walked late: queued only */
+	geSgxWalkerSignal(w, 0x08800000 + 0x40000000u + (after1 - 0x08800000)); /* the GE at signal 1 (uncached address) */
+	CHECK(w->count == 1 && w->lists[0].held && w->lists[0].pc == after1 && geSgxReg(w, 0x9C) == 0x11000, "at signal 1: held %d pc %x", w->count ? w->lists[0].held : -1, w->count ? w->lists[0].pc : 0);
+	w32(after1, C(0x9D, 0x111)); /* handler 1 */
+	geSgxWalkerSignal(w, after2);
+	CHECK(w->count == 1 && w->lists[0].pc == after2 && geSgxReg(w, 0x9D) == 0x111, "at signal 2: pc %x fbw %x", w->count ? w->lists[0].pc : 0, geSgxReg(w, 0x9D));
+	w32(after1, C(0x9D, 0x999)); /* handler 2 rewrites the first one's: not read again */
+	w32(after2, C(0x9F, 0x222));
+	geSgxWalkerRelease(w);
+	CHECK(w->count == 0 && geSgxReg(w, 0x9D) == 0x111 && geSgxReg(w, 0x9F) == 0x222 && w->stats.signal_events == 2, "end: count %d fbw %x zbw %x events %u", w->count, geSgxReg(w, 0x9D), geSgxReg(w, 0x9F), w->stats.signal_events);
+
+	/* a handler signal not reported (no callback): walked over at the next one reported */
+	reset();
+	L n = { 0x08800000 };
+	emit(&n, C(0x0E, (0x01u << 16) | 1));
+	emit(&n, C(0x0C, 0));
+	emit(&n, C(0x9C, 0x44000));
+	emit(&n, C(0x0E, (0x01u << 16) | 2));
+	emit(&n, C(0x0C, 0));
+	uint32_t afterb = n.pos;
+	emit(&n, C(0x9C, 0x55000));
+	emit(&n, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerSignal(w, afterb);
+	CHECK(w->count == 1 && w->lists[0].pc == afterb && geSgxReg(w, 0x9C) == 0x44000, "skipped to the reported one: pc %x fbp %x", w->count ? w->lists[0].pc : 0, geSgxReg(w, 0x9C));
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1517,6 +1562,7 @@ int main(void) {
 	testHardwareRegs();
 	testHardwareState();
 	testListContext();
+	testSignalEvents();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 

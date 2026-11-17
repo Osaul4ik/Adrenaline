@@ -48,6 +48,7 @@ static u32 (* _sceKernelGetSystemTimeLow)(void);
 static u32 (* _sceGeGetCmd)(int cmd);
 static int (* _sceGeGetMtx)(int type, void *matrix);
 static int (* _sceGeRestoreContext)(const void *context);
+static int (* _sceKernelCallSubIntrHandler)(int intr, int sub, int arg2, int arg3);
 
 static volatile GeSgxRing *ring = NULL; // uncached
 static u32 ring_mask = 0;
@@ -361,6 +362,62 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	return res;
 }
 
+/*
+	The GE driver calls the game's signal callback from the GE's interrupt
+	(sceKernelCallSubIntrHandler(GE, callback * 2, signal, list address after
+	the SIGNAL/END), uOFW's _sceGeListInterrupt), with the GE stopped for a
+	HANDLER_SUSPEND signal until it returns. Before the game's handler runs,
+	the Vita side walks the lists up to that signal (GE_SGX_EVENT_SIGNAL):
+	the handler then writes what comes after the signal (The 3rd Birthday:
+	its HUD, fog and particles, rewritten at each of its 20 signals), and
+	the next signal's walk reads it as the GE did. The wait is short and
+	bounded (in the interrupt nothing else runs); a Vita side that did not
+	answer is not waited for again until it reads.
+*/
+#define PSP_GE_INTR 25
+static int signal_stalled = 0;
+static u32 signal_stalled_read = 0;
+
+static void waitForVitaSignal(void) {
+	u32 target = ring->write;
+	if (shared->session != ring->session)
+		return;
+	u32 read = shared->read;
+	if ((int)(read - target) >= 0)
+		return;
+	if (signal_stalled) {
+		if (read == signal_stalled_read)
+			return;
+		signal_stalled = 0;
+	}
+	if (!_sceKernelGetSystemTimeLow)
+		return;
+
+	u32 start = timeNow(), waited = 0;
+	ring->signal_waits++;
+	while (1) {
+		read = shared->read;
+		if ((int)(read - target) >= 0)
+			break;
+		waited = timeNow() - start;
+		if (waited >= GE_SGX_SIGNAL_TIMEOUT_US) {
+			ring->signal_timeouts++;
+			signal_stalled = 1;
+			signal_stalled_read = read;
+			break;
+		}
+	}
+	ring->signal_wait_us += waited;
+}
+
+static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int arg3) {
+	if (intr == PSP_GE_INTR && !(sub & 1) && ring) {
+		ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 0, 0);
+		waitForVitaSignal();
+	}
+	return _sceKernelCallSubIntrHandler(intr, sub, arg2, arg3);
+}
+
 // Counted only: games that learn from the GE's interrupt that a list is done
 static int sceGeSetCallbackPatched(PspGeCallbackData *cb) {
 	ring->callbacks++;
@@ -534,12 +591,17 @@ int GeSgxInit(void) {
 	_sceGeGetCmd = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xDC93CFEF);
 	_sceGeGetMtx = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x57C8945B);
 	_sceGeRestoreContext = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x0BF608FB);
+	_sceKernelCallSubIntrHandler = (void *)FindProc("sceInterruptManager", "InterruptManagerForKernel", 0x0C5F7AE3);
+	u32 subintr_stub = sctrlHENFindImport("sceGE_Manager", "InterruptManagerForKernel", 0x0C5F7AE3);
+	if (!subintr_stub)
+		subintr_stub = sctrlHENFindImport("sceGE_Manager", "InterruptManagerForKernel", 0xCDC86B64);
 	// VRAM copied with the DMA (1) or the CPU (2)
 	const char *dmac_module = "";
 	_sceDmacMemcpy = (void *)findExport("sceDmac", 0x617F3FE6, &dmac_module);
 	u32 how = _sceDmacMemcpy ? 1 : 2;
 	log("GeSgx: VRAM copied with %d, GE registers %s, matrices %s, context restore %s\n", (int)how, _sceGeGetCmd ? "read" : "not found",
 		_sceGeGetMtx ? "read" : "not found", _sceGeRestoreContext ? "hooked" : "not found");
+	log("GeSgx: GE signal callbacks %s\n", (_sceKernelCallSubIntrHandler && subintr_stub) ? "hooked" : "not found");
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
 	    !_sceGeDrawSync || !_sceGeListSync || !_sceDisplaySetFrameBuf) {
@@ -586,6 +648,9 @@ int GeSgxInit(void) {
 		sctrlHENPatchSyscall((u32)_sceGeSetCallback, sceGeSetCallbackPatched);
 	if (_sceGeRestoreContext)
 		sctrlHENPatchSyscall((u32)_sceGeRestoreContext, sceGeRestoreContextPatched);
+	signal_stalled = 0;
+	if (_sceKernelCallSubIntrHandler && subintr_stub)
+		MAKE_JUMP(subintr_stub, sceKernelCallSubIntrHandlerPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 	ClearCaches();
 

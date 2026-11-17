@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 1
+#define GE_SGX_VERSION 2 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -78,6 +78,16 @@ enum GeSgxEventTypes {
 		them every GE_SGX_STATE_FULL_EVERY times.
 	*/
 	GE_SGX_EVENT_STATE,
+	/*
+		The GE stopped at a signal whose handler is about to run (the GE
+		driver's call of the game's signal callback, sceKernelCallSubIntrHandler):
+		a = the signal's 16 bits, b = the list address after its SIGNAL/END
+		(0: not given). The PSP side waits (GE_SGX_SIGNAL_TIMEOUT_US at most)
+		until the Vita side has walked the lists up to that signal, then lets
+		the handler run: what the handler writes for the commands after the
+		signal is read after it ran, as the GE reads it.
+	*/
+	GE_SGX_EVENT_SIGNAL,
 };
 
 #define GE_SGX_LIST_HEAD    1 // queued at the head
@@ -122,6 +132,9 @@ typedef struct {
 	volatile unsigned int sync_peeks;   // DrawSync/ListSync(1) calls (polling whether the GE is done)
 	volatile unsigned int sync_held;    // ... answered "drawing" because the Vita side had not read the lists yet
 	volatile unsigned int callbacks;    // sceGeSetCallback calls (games told by the GE's interrupt that it is done)
+	volatile unsigned int signal_waits;    // signal handlers that waited for the Vita side's walk (GE_SGX_EVENT_SIGNAL)
+	volatile unsigned int signal_timeouts; // ... and gave up
+	volatile unsigned int signal_wait_us;  // total time waited
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
@@ -172,5 +185,8 @@ typedef struct {
 	reads) costs it once.
 */
 #define GE_SGX_SYNC_TIMEOUT_US 100000
+
+// Longest wait for the Vita side in a signal handler (the GE's interrupt: nothing else runs on the PSP meanwhile)
+#define GE_SGX_SIGNAL_TIMEOUT_US 8000
 
 #endif

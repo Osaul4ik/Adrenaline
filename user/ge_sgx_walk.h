@@ -34,6 +34,7 @@
 #include "../ge_sgx_shared.h" // GE_SGX_LIST_*
 
 #define GE_SGX_MAX_LISTS 64
+#define GE_SGX_MAX_SIGNAL_STEPS 64 // held signals passed for one reported handler at most
 #define GE_SGX_MAX_STACK 32
 #define GE_SGX_MAX_RECTS 256
 // Unit in which PSP memory is fetched (ScePspemu maps the PSP RAM uncached:
@@ -66,6 +67,7 @@ typedef struct {
 	uint32_t held;        // lists held after a handler signal
 	uint32_t hw_state;    // state values the GE had other than the walk's (geSgxWalkerHardwareState)
 	uint32_t contexts;    // lists with a context ended (their state restored)
+	uint32_t signal_events; // signal handlers reported by the PSP side (geSgxWalkerSignal)
 } GeSgxStats;
 
 typedef struct {
@@ -83,7 +85,7 @@ typedef struct {
 	int started;
 	int depth;
 	uint8_t bbox; // result of the last BOUNDINGBOX (BJUMP jumps when 0)
-	uint8_t held; // stopped after a handler signal until the flip (geSgxWalkerRelease)
+	uint8_t held; // stopped after a handler signal until the GE gets to the next one (geSgxWalkerSignal) or geSgxWalkerRelease
 	uint8_t context; // queued with a context: the GE's state saved when it starts, restored when it ends
 	uint32_t stack[GE_SGX_MAX_STACK][2]; // return address, offset
 } GeSgxList;
@@ -227,7 +229,7 @@ typedef struct {
 	// Optional log for diagnostics; while trace is set, the frame is traced into it
 	void (* log_fn)(const char *fmt, ...);
 	int releasing; // geSgxWalkerRelease running: handler signals do not hold
-	int hold_signals; // lists stop after handler signals until geSgxWalkerRelease (off: the lists are walked late, at the game's sync)
+	int hold_signals; // lists stop after handler signals (on once the PSP side reports the handlers: geSgxWalkerSignal)
 	int trace;
 	uint32_t trace_lines;
 	// A register, matrix or CLUT changed since the last primitive built
@@ -288,6 +290,7 @@ void geSgxWalkerInit(GeSgxWalker *w, GeSgxPageFn page_fn, void *user);
 void geSgxWalkerReset(GeSgxWalker *w);
 void geSgxWalkerResync(GeSgxWalker *w);
 void geSgxWalkerRelease(GeSgxWalker *w);
+void geSgxWalkerSignal(GeSgxWalker *w, uint32_t after);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value);
 

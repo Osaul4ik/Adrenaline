@@ -83,6 +83,7 @@
 
 // Signal behaviours that move the list
 #define GE_SIGNAL_HANDLER_SUSPEND 0x01u
+#define GE_SIGNAL_HANDLER_CONTINUE 0x02u
 #define GE_SIGNAL_HANDLER_PAUSE   0x03u
 #define GE_SIGNAL_JUMP  0x10u
 #define GE_SIGNAL_CALL  0x11u
@@ -625,24 +626,23 @@ static int signal(GeSgxWalker *w, GeSgxList *list, uint32_t data) {
 				list->pc = next;
 			return 1;
 		case GE_SIGNAL_HANDLER_SUSPEND:
+		case GE_SIGNAL_HANDLER_CONTINUE:
 		case GE_SIGNAL_HANDLER_PAUSE:
 			/*
-				The GE stops here and the game's signal handler runs; it writes
-				what comes after the signal (The 3rd Birthday: the view matrix
-				of its HUD, fog and particles, and their draws; read before, the
-				last frame's matrices put them off the screen). The list waits
-				for the flip, when the GE is done with it (geSgxWalkerRelease).
-				Off in the renderer (hold_signals): released at the flip, the
-				list's draws went into the frame flipped before it (The 3rd
-				Birthday's character was gone); its lists are walked late
-				instead, at the game's waits for the GE (ge_sgx.c).
+				The game's signal handler runs here; it writes what comes after
+				the signal (The 3rd Birthday: its HUD, fog and particles). With
+				the PSP side reporting the handlers (hold_signals), the list
+				stops after the signal until the GE gets to the next one
+				(geSgxWalkerSignal), or the game waits for the GE, or the flip
+				(geSgxWalkerRelease): what follows is read after the handler
+				wrote it, as the GE reads it.
 			*/
 			list->pc = next;
 			if (w->releasing || !w->hold_signals)
 				return 1;
 			list->held = 1;
 			w->stats.held++;
-			geSgxBuildTraceNote(w, "list: qid %X held after the handler signal until the flip", (unsigned)list->qid);
+			geSgxBuildTraceNote(w, "list: qid %X held after the handler signal at %X", (unsigned)list->qid, (unsigned)(next - 8));
 			return 2;
 		default:
 			// Signals the game's handler gets while the GE goes on, and the rest: the list goes on after the END
@@ -1042,6 +1042,31 @@ void geSgxWalkerResync(GeSgxWalker *w) {
 }
 
 // The flip: the lists held after handler signals go on (the GE is done with them, their memory is final)
+/*
+	The GE stopped at a signal and its handler is about to run
+	(GE_SGX_EVENT_SIGNAL; after = the list address after the signal's
+	SIGNAL/END, 0 if not known): the lists walked up to it. A list held at
+	an earlier handler signal goes on, until it is held after this one (or
+	finishes, or stalls). Without the address, one step.
+*/
+void geSgxWalkerSignal(GeSgxWalker *w, uint32_t after) {
+	w->hold_signals = 1;
+	w->stats.signal_events++;
+	uint32_t a = after ? normalize(after) & ~3u : 0;
+	int k;
+	for (k = 0; k < GE_SGX_MAX_SIGNAL_STEPS && w->count > 0; k++) {
+		GeSgxList *l = &w->lists[0];
+		if (l->held) {
+			if (a && l->pc == a)
+				return;
+			l->held = 0;
+		}
+		geSgxWalkerRun(w);
+		if (!w->count || !w->lists[0].held || !a || w->lists[0].pc == a)
+			return;
+	}
+}
+
 void geSgxWalkerRelease(GeSgxWalker *w) {
 	int i, any = 0;
 	for (i = 0; i < w->count; i++) {
@@ -1052,7 +1077,7 @@ void geSgxWalkerRelease(GeSgxWalker *w) {
 	}
 	if (!any)
 		return;
-	geSgxBuildTraceNote(w, "list: the held lists go on at the flip");
+	geSgxBuildTraceNote(w, "list: the held lists go on to their end");
 	w->releasing = 1;
 	geSgxWalkerRun(w);
 	w->releasing = 0;

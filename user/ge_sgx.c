@@ -57,6 +57,7 @@
 
 #define EVENTS_PER_BATCH 256
 #define IDLE_DELAY_US 300
+#define IDLE_DELAY_SIGNALS_US 100
 
 #define RAM_START  0x08000000u
 #define VRAM_START 0x04000000u
@@ -506,6 +507,13 @@ static void noteListDone(void) {
 		memcpy(scan_copy, p, bytes);
 		subsNote();
 	}
+}
+
+// The lists to their end: held ones after handler signals too (the GE is done with them)
+static void walkAll(void) {
+	geSgxWalkerRelease(&walker);
+	geSgxWalkerRun(&walker);
+	noteListDone();
 }
 
 /*
@@ -1273,7 +1281,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 		}
 
 		if (write == read) {
-			sceKernelDelayThread(IDLE_DELAY_US);
+			// The PSP side may wait in a signal handler for the walk: looked at more often then
+			sceKernelDelayThread(walker.hold_signals ? IDLE_DELAY_SIGNALS_US : IDLE_DELAY_US);
 			goto per_second;
 		}
 
@@ -1304,7 +1313,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 			SceUInt64 t0 = sceKernelGetProcessTimeWide();
 			epoch++;
 
-			if (e->type < 8 && !(logged_types & (1u << e->type))) {
+			if (e->type < 32 && !(logged_types & (1u << e->type))) {
 				logged_types |= 1u << e->type;
 				GeSgxLog("GeSgx: first event %u: %08X %08X %08X %08X (walker: %d lists)\n",
 					(unsigned)e->type, (unsigned)e->a, (unsigned)e->b, (unsigned)e->c, (unsigned)e->d, walker.count);
@@ -1344,7 +1353,13 @@ static int GeSgxThread(SceSize args, void *argp) {
 						GeSgxLog("GeSgx: the game waits for the GE: lists walked at its waits from now on\n");
 					walk_late = 1;
 					synced_since_flip = 1;
-					geSgxWalkerRun(&walker);
+					walkAll();
+					break;
+				case GE_SGX_EVENT_SIGNAL:
+					// The GE at a signal, its handler about to run: the lists up to it (the PSP side waits for this)
+					if (!walker.hold_signals)
+						GeSgxLog("GeSgx: the GE's signal handlers reported: lists walked up to each signal before its handler runs\n");
+					geSgxWalkerSignal(&walker, e->b);
 					noteListDone();
 					break;
 				case GE_SGX_EVENT_REGS:
@@ -1353,10 +1368,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 					break;
 				case GE_SGX_EVENT_STATE:
 					// Read with the GE idle: the lists it has done first (queued, not walked yet)
-					if (walker.count) {
-						geSgxWalkerRun(&walker);
-						noteListDone();
-					}
+					if (walker.count)
+						walkAll();
 					geSgxWalkerHardwareState(&walker, e->a, e->b);
 					geSgxWalkerHardwareState(&walker, e->c, e->d);
 					break;
@@ -1367,10 +1380,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 					break;
 				case GE_SGX_EVENT_FLIP: {
 					// No wait for the GE in this frame: its lists walked now (the ones after a wait are the next frame's)
-					if (walk_late && !synced_since_flip && walker.count) {
-						geSgxWalkerRun(&walker);
-						noteListDone();
-					}
+					if ((!walk_late || !synced_since_flip) && walker.count)
+						walkAll();
 					synced_since_flip = 0;
 					if (walker.trace && scan_end) {
 						ListScan now;
@@ -1483,14 +1494,15 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us) | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
 					(unsigned)frame_stats.lists, (unsigned)frame_stats.commands, (unsigned)frame_stats.prims, (unsigned)frame_stats.vertices,
-					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs, (unsigned)frame_stats.hw_state, (unsigned)frame_stats.contexts,
+					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs, (unsigned)frame_stats.hw_state, (unsigned)frame_stats.contexts, (unsigned)frame_stats.signal_events,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
+					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
 					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024));
 			}
