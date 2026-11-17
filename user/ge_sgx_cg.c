@@ -193,6 +193,19 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 			"}\n");
 	}
 
+	if (key == GE_SGX_SHADER_DEPTHVIEW) {
+		return snprintf(buf, size,
+			/*
+				The depth buffer (S8D24) read as A8B8G8R8: blue is the depth's
+				high byte, which picks the palette's colour (256 x 1)
+			*/
+			"float4 main(float2 vTexcoord : TEXCOORD0, uniform sampler2D uDepth, uniform sampler2D uLut) : COLOR\n"
+			"{\n"
+			"	float h = floor(tex2D(uDepth, vTexcoord).b * 255.0 + 0.5);\n"
+			"	return tex2D(uLut, float2((h + 0.5) * (1.0 / 256.0), 0.5));\n"
+			"}\n");
+	}
+
 	int clear = (key >> 10) & 1;
 	int fog = (key >> 11) & 1;
 	int textured = key & 1;
@@ -276,6 +289,7 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 
 #define ADD(k) do { if (n < max) keys[n] = (k); n++; } while (0)
 	ADD(GE_SGX_SHADER_VERTEX);
+	ADD(GE_SGX_SHADER_DEPTHVIEW);
 	// GPU transform: every attribute combination, with and without lighting
 	{
 		uint32_t v, wc, lit;

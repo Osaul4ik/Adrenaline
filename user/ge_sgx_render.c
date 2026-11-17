@@ -740,7 +740,7 @@ static void runFlush(void) {
 		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X %08X %08X %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
-		(run.tex & 0x80000000u) ? "fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x7FFFFFFFu),
+		(run.tex & 0x80000000u) ? "fb " : (run.tex & 0x40000000u) ? "depth of fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x3FFFFFFFu),
 		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xFF),
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
@@ -756,7 +756,8 @@ static uint32_t nskip_seen = 0;
 static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDraw *d, uint32_t index, uint32_t target_fb,
 	const GeSgxFrameData *frame) {
 	uint32_t fkey = geSgxShaderKey(d), blend = blendKey(d), vkey = d->gpu ? d->vkey : 0;
-	uint32_t tex = !(d->flags & GE_SGX_DRAW_TEXTURED) ? 0 : d->fbtex ? (0x80000000u | (d->fbtex - 1)) : (uint32_t)d->texture;
+	uint32_t tex = !(d->flags & GE_SGX_DRAW_TEXTURED) ? 0 : d->depthtex ? (0x40000000u | (d->depthtex - 1)) :
+		d->fbtex ? (0x80000000u | (d->fbtex - 1)) : (uint32_t)d->texture;
 	if (outcome != OUTCOME_DRAWN) {
 		stats->skipped[outcome]++;
 		uint32_t k = (outcome << 28) ^ (fkey * 0x9E3779B1u) ^ (vkey * 0x85EBCA77u) ^ ((outcome == GE_SGX_SKIP_FBTEX) ? (tex * 31u) : 0);
@@ -902,79 +903,98 @@ static uint32_t snap_fb = 0xFFFFFFFFu; // framebuffer whose rendering the snapsh
 static uint32_t snap_count = 0;        // snapshots this frame
 static int snap_failures = 0;
 
+// A draw reading a depth through another palette or another depth than the one before (it needs a view of its own)
+static int newDepthView(const GeSgxDraw *prev, const GeSgxDraw *d) {
+	return d->depthtex && !(d->flags & GE_SGX_DRAW_CLEAR) && (prev->depthtex != d->depthtex || prev->lut != d->lut);
+}
+
 static int selfSampling(const GeSgxDraw *d, uint32_t fb) {
 	return (d->flags & GE_SGX_DRAW_TEXTURED) && !(d->flags & GE_SGX_DRAW_CLEAR) && d->fbtex == fb + 1;
 }
 
-static void snapshotFree(SceGxmContext *ctx) {
-	if (!snap_ready)
+/*
+	A colour surface with its texture and render target (the snapshot's and
+	the depth view's), and a quad of its size in uncached memory of its own
+*/
+static void surfaceFree(SceGxmContext *ctx, Snapshot *sf, int *ready) {
+	if (!*ready)
 		return;
 	if (ctx)
 		sceGxmFinish(ctx); // the GPU may still read or write it
-	if (snap.rtgt)
-		sceGxmDestroyRenderTarget(snap.rtgt);
-	if (snap.uid >= 0) {
-		sceGxmUnmapMemory(snap.mem);
-		sceKernelFreeMemBlock(snap.uid);
-	} else if (snap.mem) {
-		geSgxPoolFree(snap.mem, snap.bytes);
+	if (sf->rtgt)
+		sceGxmDestroyRenderTarget(sf->rtgt);
+	if (sf->uid >= 0) {
+		sceGxmUnmapMemory(sf->mem);
+		sceKernelFreeMemBlock(sf->uid);
+	} else if (sf->mem) {
+		geSgxPoolFree(sf->mem, sf->bytes);
 	}
-	memset(&snap, 0, sizeof(snap));
-	snap_ready = 0;
+	memset(sf, 0, sizeof(*sf));
+	*ready = 0;
 }
 
-static int snapshotMake(int w, int h) {
-	memset(&snap, 0, sizeof(snap));
-	snap.uid = -1;
-	snap.w = w;
-	snap.h = h;
-	snap.bytes = ((uint32_t)w * h * 4 + 0xFFF) & ~0xFFFu;
+static void snapshotFree(SceGxmContext *ctx) {
+	surfaceFree(ctx, &snap, &snap_ready);
+}
+
+/*
+	The quad's vertices: pixels 0..w x 0..h, texture coordinates 0..u1 x
+	0..v1 (the GPU no longer reads the old ones: the surface was finished)
+*/
+static void quadInit(SnapQuad *q, int w, int h, float u1, float v1) {
+	int k;
+	for (k = 0; k < 4; k++) {
+		GeSgxVertex *v = &q->v[k];
+		v->x = (k & 1) ? (float)w : 0.0f;
+		v->y = (k & 2) ? (float)h : 0.0f;
+		v->z = 0.5f;
+		v->w = 1.0f;
+		v->u = (k & 1) ? u1 : 0.0f;
+		v->v = (k & 2) ? v1 : 0.0f;
+		v->color = 0xFFFFFFFFu;
+		v->fog = 1.0f;
+	}
+	static const uint16_t ix[6] = { 0, 1, 2, 1, 3, 2 };
+	memcpy(q->ix, ix, sizeof(ix));
+}
+
+static int surfaceMake(Snapshot *sf, int *ready, SnapQuad **quad, int w, int h, const char *name, const char *purpose) {
+	memset(sf, 0, sizeof(*sf));
+	sf->uid = -1;
+	sf->w = w;
+	sf->h = h;
+	sf->bytes = ((uint32_t)w * h * 4 + 0xFFF) & ~0xFFFu;
 	const char *where = "pool";
-	snap.mem = geSgxPoolAlloc(snap.bytes);
-	if (!snap.mem) {
+	sf->mem = geSgxPoolAlloc(sf->bytes);
+	if (!sf->mem) {
 		where = "RAM";
-		snap.uid = sceKernelAllocMemBlock("SceGeSgxSnapshot", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, snap.bytes, NULL);
-		if (snap.uid >= 0) {
-			sceKernelGetMemBlockBase(snap.uid, &snap.mem);
-			if (sceGxmMapMemory(snap.mem, snap.bytes, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) < 0) {
-				sceKernelFreeMemBlock(snap.uid);
-				snap.uid = -1;
-				snap.mem = NULL;
+		sf->uid = sceKernelAllocMemBlock(name, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, sf->bytes, NULL);
+		if (sf->uid >= 0) {
+			sceKernelGetMemBlockBase(sf->uid, &sf->mem);
+			if (sceGxmMapMemory(sf->mem, sf->bytes, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) < 0) {
+				sceKernelFreeMemBlock(sf->uid);
+				sf->uid = -1;
+				sf->mem = NULL;
 			}
 		} else {
-			snap.mem = NULL;
+			sf->mem = NULL;
 		}
 	}
-	if (!snap_quad)
-		snap_quad = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, 4096, SCE_GXM_MEMORY_ATTRIB_READ);
-	int err = snap.mem && snap_quad ? 0 : -1;
-	if (!err) {
-		// Pixels of the target (the viewport is the screen's); the GPU no longer reads the old ones (finished)
-		int k;
-		for (k = 0; k < 4; k++) {
-			GeSgxVertex *v = &snap_quad->v[k];
-			v->x = (k & 1) ? (float)w : 0.0f;
-			v->y = (k & 2) ? (float)h : 0.0f;
-			v->z = 0.5f;
-			v->w = 1.0f;
-			v->u = (k & 1) ? 1.0f : 0.0f;
-			v->v = (k & 2) ? 1.0f : 0.0f;
-			v->color = 0xFFFFFFFFu;
-			v->fog = 1.0f;
-		}
-		static const uint16_t ix[6] = { 0, 1, 2, 1, 3, 2 };
-		memcpy(snap_quad->ix, ix, sizeof(ix));
-	}
+	if (!*quad)
+		*quad = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, 4096, SCE_GXM_MEMORY_ATTRIB_READ);
+	int err = sf->mem && *quad ? 0 : -1;
+	if (!err)
+		quadInit(*quad, w, h, 1.0f, 1.0f);
 	if (!err) {
 		// Alpha 1 (the draws sampling it with its alpha get an opaque framebuffer, as the targets' are)
-		uint32_t *px = snap.mem, k, n = (uint32_t)w * h;
+		uint32_t *px = sf->mem, k, n = (uint32_t)w * h;
 		for (k = 0; k < n; k++)
 			px[k] = 0xFF000000u;
-		err = sceGxmColorSurfaceInit(&snap.sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
-			SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, w, snap.mem);
+		err = sceGxmColorSurfaceInit(&sf->sfc, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+			SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h, w, sf->mem);
 	}
 	if (!err)
-		err = sceGxmTextureInitLinear(&snap.tex, snap.mem, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0);
+		err = sceGxmTextureInitLinear(&sf->tex, sf->mem, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, w, h, 0);
 	if (!err) {
 		SceGxmRenderTargetParams params;
 		memset(&params, 0, sizeof(params));
@@ -983,17 +1003,21 @@ static int snapshotMake(int w, int h) {
 		params.scenesPerFrame = TARGET_SCENES; // more: invalid value
 		params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
 		params.driverMemBlock = -1;
-		err = sceGxmCreateRenderTarget(&params, &snap.rtgt);
+		err = sceGxmCreateRenderTarget(&params, &sf->rtgt);
 	}
-	snap_ready = 1;
+	*ready = 1;
 	if (err) {
 		if (snap_failures++ < 8)
-			GeSgxLog("GeSgx render: snapshot %dx%d FAILED (%08X)\n", w, h, (unsigned)err);
-		snapshotFree(NULL);
+			GeSgxLog("GeSgx render: %s %dx%d FAILED (%08X)\n", name, w, h, (unsigned)err);
+		surfaceFree(NULL, sf, ready);
 		return 0;
 	}
-	GeSgxLog("GeSgx render: snapshot %dx%d in %s, for draws sampling their own framebuffer\n", w, h, where);
+	GeSgxLog("GeSgx render: %s %dx%d in %s, %s\n", name, w, h, where, purpose);
 	return 1;
+}
+
+static int snapshotMake(int w, int h) {
+	return surfaceMake(&snap, &snap_ready, &snap_quad, w, h, "snapshot", "for draws sampling their own framebuffer");
 }
 
 // 1: copied; 0: a scene but no copy; -1: no scene (nothing to copy into)
@@ -1053,6 +1077,126 @@ static int snapshotTarget(SceGxmContext *ctx, const vita2d_texture *src, int w, 
 }
 
 /*
+	Depth view: a draw reading a framebuffer's depth buffer through a
+	palette (GeSgxDraw.depthtex; Prince of Persia Revelations' fog, a CLUT16
+	texture at the depth's VRAM mirror). The PSP's depth is not in VRAM
+	here: the rendering's own depth buffer (S8D24, stored after its scene)
+	is read as A8B8G8R8, its high byte (blue) picking the colour in the
+	frame's palette (256 x 1, GeSgxFrameData.luts), into a surface of the
+	rendering's size the draw samples as it would a framebuffer's rendering.
+*/
+#define MAX_DEPTH_VIEWS 4 // a frame (with their scenes, within TARGET_SCENES of the target they split)
+#define LUT_SLOTS 16      // palettes the GPU may still read from frames before
+static Snapshot dview;
+static int dview_ready = 0;
+static SnapQuad *dview_quad = NULL;
+static uint32_t dview_fb = 0xFFFFFFFFu; // the depth whose view it holds (this frame), and with which palette
+static int dview_lut = -1;
+static uint32_t dview_count = 0;
+static uint32_t *lut_mem = NULL;
+static uint32_t lut_slot = 0;
+static SceGxmFragmentProgram *dview_program = NULL;
+static int dview_unit_depth = 0, dview_unit_lut = 1, dview_failed = 0;
+
+// The rendering's depth buffer, a tiled S8D24 surface of 32 aligned width and height
+static void *targetDepth(const Target *t) {
+	if (!t->own_depth)
+		return t->pool_depth;
+	void *base = NULL;
+	if (t->tex->depth_UID < 0 || sceKernelGetMemBlockBase(t->tex->depth_UID, &base) < 0)
+		return NULL;
+	return base;
+}
+
+static int dviewProgram(void) {
+	if (dview_program)
+		return 1;
+	if (dview_failed)
+		return 0;
+	SceGxmShaderPatcherId id;
+	const SceGxmProgram *gxp = registeredGxp(GE_SGX_SHADER_DEPTHVIEW, &id);
+	if (!gxp) {
+		dview_failed = 1;
+		GeSgxLog("GeSgx render: depth view: no program (compiled by the app at its next start)\n");
+		return 0;
+	}
+	const SceGxmProgramParameter *pd = sceGxmProgramFindParameterByName(gxp, "uDepth");
+	const SceGxmProgramParameter *pl = sceGxmProgramFindParameterByName(gxp, "uLut");
+	if (pd)
+		dview_unit_depth = (int)sceGxmProgramParameterGetResourceIndex(pd);
+	if (pl)
+		dview_unit_lut = (int)sceGxmProgramParameterGetResourceIndex(pl);
+	int res = sceGxmShaderPatcherCreateFragmentProgram(patcher, id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+		SCE_GXM_MULTISAMPLE_NONE, NULL, vertex_gxp, &dview_program);
+	if (res < 0 || !pd || !pl) {
+		dview_failed = 1;
+		dview_program = NULL;
+		GeSgxLog("GeSgx render: depth view: program %08X (depth %d, palette %d)\n", (unsigned)res, pd != NULL, pl != NULL);
+		return 0;
+	}
+	GeSgxLog("GeSgx render: depth view program: depth unit %d, palette unit %d\n", dview_unit_depth, dview_unit_lut);
+	return 1;
+}
+
+// 1: made; 0: a scene but no view; -1: no scene
+static int depthView(SceGxmContext *ctx, const Target *src, const uint32_t *palette, int lut, int reset_pool) {
+	if (!dviewProgram())
+		return -1;
+	if (dview_ready && (dview.w != src->w || dview.h != src->h))
+		surfaceFree(ctx, &dview, &dview_ready);
+	if (!dview_ready && !surfaceMake(&dview, &dview_ready, &dview_quad, src->w, src->h, "depth view",
+	    "for draws reading a depth buffer through a palette"))
+		return -1;
+	if (!lut_mem) {
+		lut_mem = gpuAlloc(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, LUT_SLOTS * 256 * 4, SCE_GXM_MEMORY_ATTRIB_READ);
+		if (!lut_mem)
+			return -1;
+	}
+	void *depth = targetDepth(src);
+	if (!depth)
+		return -1;
+	int dw = (src->w + 31) & ~31, dh = (src->h + 31) & ~31;
+
+	// The depth as a texture; the quad's texture coordinates over the rendering's part of it
+	SceGxmTexture zt, lt;
+	if (sceGxmTextureInitTiled(&zt, depth, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, dw, dh, 0) < 0)
+		return -1;
+	sceGxmTextureSetMinFilter(&zt, SCE_GXM_TEXTURE_FILTER_POINT);
+	sceGxmTextureSetMagFilter(&zt, SCE_GXM_TEXTURE_FILTER_POINT);
+	quadInit(dview_quad, src->w, src->h, (float)src->w / dw, (float)src->h / dh);
+	uint32_t *slot = lut_mem + (lut_slot++ % LUT_SLOTS) * 256;
+	memcpy(slot, palette, 256 * 4);
+	if (sceGxmTextureInitLinear(&lt, slot, SCE_GXM_TEXTURE_FORMAT_A8B8G8R8, 256, 1, 0) < 0)
+		return -1;
+	sceGxmTextureSetMinFilter(&lt, SCE_GXM_TEXTURE_FILTER_POINT);
+	sceGxmTextureSetMagFilter(&lt, SCE_GXM_TEXTURE_FILTER_POINT);
+	sceGxmTextureSetUAddrMode(&lt, SCE_GXM_TEXTURE_ADDR_CLAMP);
+	sceGxmTextureSetVAddrMode(&lt, SCE_GXM_TEXTURE_ADDR_CLAMP);
+
+	if (reset_pool)
+		vita2d_pool_reset();
+	sceGxmBeginScene(ctx, 0, dview.rtgt, NULL, NULL, NULL, &dview.sfc, NULL);
+	setViewport(ctx);
+	sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
+	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+	stencilOff(ctx);
+	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, src->w - 1, src->h - 1);
+	sceGxmSetVertexProgram(ctx, vertex_program);
+	sceGxmSetFragmentProgram(ctx, dview_program);
+	sceGxmSetFragmentTexture(ctx, dview_unit_depth, &zt);
+	sceGxmSetFragmentTexture(ctx, dview_unit_lut, &lt);
+	sceGxmSetVertexStream(ctx, 0, dview_quad->v);
+	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+	sceGxmDraw(ctx, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16, dview_quad->ix, 6);
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, 959, 543);
+	sceGxmEndScene(ctx, NULL, NULL);
+	dview_fb = src->fb;
+	dview_lut = lut;
+	return 1;
+}
+
+/*
 	Draws [first, last) of the frame (one framebuffer) into the scene being
 	drawn, a target of w x h pixels.
 */
@@ -1105,7 +1249,10 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		SceGxmTexture tex;
 		if (d->flags & GE_SGX_DRAW_TEXTURED) {
 			const SceGxmTexture *t = NULL;
-			if (d->fbtex) {
+			if (d->depthtex) {
+				if (dview_ready && dview_fb == d->depthtex - 1)
+					t = &dview.tex;
+			} else if (d->fbtex) {
 				uint32_t sfb = d->fbtex - 1;
 				Target *src = sfb == target_fb ? NULL : findTarget(sfb);
 				if (src)
@@ -1434,10 +1581,14 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 	*/
 	snap_fb = 0xFFFFFFFFu;
 	snap_count = 0;
+	dview_fb = 0xFFFFFFFFu;
+	dview_lut = -1;
+	dview_count = 0;
 	uint32_t i = 0;
 	while (i < frame->ndraws) {
 		uint32_t dfb = frame->draws[i].fb, j = i + 1;
-		while (j < frame->ndraws && frame->draws[j].fb == dfb && !(snap_count < MAX_SNAPSHOTS && selfSampling(&frame->draws[j], dfb)))
+		while (j < frame->ndraws && frame->draws[j].fb == dfb && !(snap_count < MAX_SNAPSHOTS && selfSampling(&frame->draws[j], dfb)) &&
+		       !(dview_count < MAX_DEPTH_VIEWS && newDepthView(&frame->draws[j - 1], &frame->draws[j])))
 			j++;
 
 		uint32_t w = 480, h = 272, k;
@@ -1468,12 +1619,32 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			if (r >= 0)
 				(*scenes)++;
 		}
+		// A draw reading a depth through a palette: its view first (that depth as stored by its scene before)
+		const GeSgxDraw *fd = &frame->draws[i];
+		if (fd->depthtex && !(dview_fb == fd->depthtex - 1 && dview_lut == fd->lut) && dview_count < MAX_DEPTH_VIEWS) {
+			Target *zsrc = findTarget(fd->depthtex - 1);
+			int r = zsrc && !zsrc->fresh && fd->lut < frame->nluts ? depthView(ctx, zsrc, frame->luts[fd->lut], fd->lut, *scenes == 0) : -1;
+			dview_count++;
+			if (r <= 0)
+				dview_fb = 0xFFFFFFFFu;
+			rtraceAdd("GeSgx R: scene %d: depth view of fb %X (palette %u) for draw %u%s\n", *scenes, (unsigned)(fd->depthtex - 1),
+				(unsigned)fd->lut, (unsigned)i, r > 0 ? "" : " FAILED");
+			if (asked && r > 0) {
+				char path[96];
+				sceGxmFinish(ctx);
+				snprintf(path, sizeof(path), "ux0:data/adrenaline/sgx_dump/%u_s%d_depthview.bmp", (unsigned)rframes, *scenes);
+				dumpBmp(path, dview.mem, dview.w, dview.h, dview.w);
+			}
+			if (r >= 0)
+				(*scenes)++;
+		}
 		rtraceAdd("GeSgx R: scene %d: draws %u-%u into fb %X, rendering %dx%d%s\n", *scenes, (unsigned)i, (unsigned)(j - 1), (unsigned)dfb,
 			t->w, t->h, t->fresh ? " (new, cleared)" : "");
-		// Depth and stencil: kept from its scene before in this frame, kept for one after
+		// Depth and stencil: kept from its scene before in this frame, kept for one after (a draw into it, or reading it)
 		int again = 0;
 		for (k = j; k < frame->ndraws && !again; k++)
-			again = frame->draws[k].fb == dfb;
+			again = frame->draws[k].fb == dfb || frame->draws[k].depthtex == dfb + 1;
+
 		int resumed = t->scene_frame == rframes + 1;
 		sceGxmDepthStencilSurfaceSetForceLoadMode(&t->tex->gxm_sfd,
 			resumed ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
@@ -1490,6 +1661,9 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 		}
 		renderDraws(ctx, frame, i, j, t->w, t->h, dfb, stats);
 		vita2d_end_drawing();
+		// Its depth changed in this scene: a view of it made before is old
+		if (dview_fb == dfb)
+			dview_fb = 0xFFFFFFFFu;
 		// Asked (L + SELECT): the smaller renderings after each of their scenes (the blur's steps)
 		if (asked && (t->w != 960 || t->h != 544)) {
 			char path[96];

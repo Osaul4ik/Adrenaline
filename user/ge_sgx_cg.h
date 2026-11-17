@@ -45,6 +45,8 @@
 // Key of the vertex program (fragment program keys are below 0x1000; 0xFFFF
 // was the vertex program of the 2D only renderer)
 #define GE_SGX_SHADER_VERTEX 0xFFFEu
+// Fragment program of the depth view: a rendering's depth through a palette (GeSgxDraw.depthtex)
+#define GE_SGX_SHADER_DEPTHVIEW 0xFFFDu
 
 static inline int geSgxCgIsVertex(uint32_t key) {
 	return key == GE_SGX_SHADER_VERTEX || (key & 0xF000u) == GE_SGX_VS_BASE;

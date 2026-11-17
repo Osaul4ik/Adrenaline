@@ -556,6 +556,7 @@ static void acquireSlot(void) {
 			s->data.nuniforms = 0;
 			s->data.nraw = 0;
 			s->data.ndraws = 0;
+			s->data.nluts = 0;
 			s->data.draws_3d = 0;
 			s->data.prims_gpu = 0;
 			memset(s->data.cpu_reason, 0, sizeof(s->data.cpu_reason));
@@ -1122,6 +1123,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 				geSgxTexReset();
 				if (building) {
 					building->data.ndraws = 0;
+					building->data.nluts = 0;
 					building->data.nvertices = 0;
 					building->data.nindices = 0;
 					building->data.nuniforms = 0;

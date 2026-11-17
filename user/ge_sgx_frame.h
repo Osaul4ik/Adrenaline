@@ -38,6 +38,9 @@
 // Framebuffers a game draws into that are tracked (rendered and usable as textures)
 #define GE_SGX_MAX_FBS 8
 
+// Depth textures a frame may have (each with its palette: GeSgxFrameData.luts)
+#define GE_SGX_MAX_LUTS 8
+
 /*
 	Homogeneous: x, y are 960x544 pixels and z the depth 0..1, all three
 	multiplied by w (the clip w of 3D draws, 1 for 2D), so the GPU clips and
@@ -107,6 +110,14 @@ typedef struct {
 	// Framebuffer texture: VRAM offset + 1 of a framebuffer drawn here, sampled from
 	// its own 960x544 rendering instead of the PSP's (0: a normal texture)
 	uint32_t fbtex;
+	/*
+		Depth texture: VRAM offset + 1 of a framebuffer whose depth buffer is
+		read (a CLUT16 texture at its depth's VRAM mirror, 0x04600000 + z
+		address: Prince of Persia Revelations' fog), from its rendering's
+		depth through the palette frame->luts[lut] (0: none)
+	*/
+	uint32_t depthtex;
+	uint8_t lut;
 	// Colour channels not written (MASKRGB): bit 0 red, 1 green, 2 blue
 	uint8_t cmask;
 	// Stencil: GE function (0xFF: no test), reference, compare and write masks,
@@ -156,6 +167,10 @@ typedef struct {
 	// The framebuffers drawn (and how big they are in PSP pixels): their renderings are sized by this
 	struct { uint32_t fb; uint16_t w, h; } fbs[GE_SGX_MAX_FBS];
 	uint32_t nfbs;
+
+	// Depth textures' palettes: the colour (0xAABBGGRR) for each depth's high byte (GeSgxDraw.depthtex)
+	uint32_t luts[GE_SGX_MAX_LUTS][256];
+	uint32_t nluts;
 
 	uint32_t draws_3d;      // transformed (not through mode) primitives built
 	uint32_t prims_gpu;     // of them with the GPU transform

@@ -43,6 +43,8 @@
 #define GE_CMD_MATERIALALPHA    0x58u
 #define GE_CMD_FRAMEBUFPTR      0x9Cu
 #define GE_CMD_FRAMEBUFWIDTH    0x9Du
+#define GE_CMD_ZBUFPTR          0x9Eu
+#define GE_CMD_ZBUFWIDTH        0x9Fu
 #define GE_CMD_TEXADDR0         0xA0u
 #define GE_CMD_TEXBUFWIDTH0     0xA8u
 #define GE_CMD_CLUTADDR         0xB0u
@@ -981,7 +983,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->atest_func == b->atest_func && a->atest_ref == b->atest_ref && a->tex_mode == b->tex_mode &&
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
-		a->fbtex == b->fbtex && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
+		a->fbtex == b->fbtex && a->depthtex == b->depthtex && a->lut == b->lut && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
 		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
@@ -992,7 +994,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 	from its 960x544 rendering, and the draw thread sizes those renderings
 	by the same numbers (frame->fbs).
 */
-static struct { uint32_t fb; uint16_t w, h; uint32_t used, drawn; } fbreg[GE_SGX_MAX_FBS];
+static struct { uint32_t fb, z; uint16_t w, h; uint32_t used, drawn; } fbreg[GE_SGX_MAX_FBS];
 static uint32_t fbreg_clock = 0;
 static uint32_t fbreg_frame = 0; // frames built (fbreg[].drawn: the last one drawing into it)
 
@@ -1003,6 +1005,65 @@ static int fbFind(uint32_t fb) {
 			return i;
 	}
 	return -1;
+}
+
+/*
+	The framebuffer whose depth buffer is at a VRAM offset: the one drawn
+	into now if it is its, else the one drawn into last (Prince of Persia
+	Revelations' two framebuffers share their depth buffer)
+*/
+static int fbFindZ(uint32_t z, uint32_t current_fb) {
+	int i, best = -1;
+	for (i = 0; i < GE_SGX_MAX_FBS; i++) {
+		if (!fbreg[i].used || fbreg[i].z != z || !fbreg[i].w || !fbreg[i].h)
+			continue;
+		if (fbreg[i].fb == current_fb)
+			return i;
+		if (best < 0 || fbreg[i].used > fbreg[best].used)
+			best = i;
+	}
+	return best;
+}
+
+// A CLUT entry as 0xAABBGGRR (CLUTFORMAT's format: 565, 5551, 4444, 8888)
+static uint32_t clutColor(const uint8_t *clut, uint32_t bytes, uint32_t format, uint32_t index) {
+	if (format == 3) {
+		if ((index + 1) * 4 > bytes)
+			return 0;
+		const uint8_t *p = clut + index * 4;
+		return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+	}
+	if ((index + 1) * 2 > bytes)
+		return 0;
+	uint32_t c = (uint32_t)clut[index * 2] | ((uint32_t)clut[index * 2 + 1] << 8), r, g, b, a;
+	if (format == 0) {
+		r = c & 31; g = (c >> 5) & 63; b = (c >> 11) & 31;
+		r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2); a = 255;
+	} else if (format == 1) {
+		r = c & 31; g = (c >> 5) & 31; b = (c >> 10) & 31; a = (c >> 15) ? 255 : 0;
+		r = (r << 3) | (r >> 2); g = (g << 3) | (g >> 2); b = (b << 3) | (b >> 2);
+	} else {
+		r = (c & 15) * 17; g = ((c >> 4) & 15) * 17; b = ((c >> 8) & 15) * 17; a = ((c >> 12) & 15) * 17;
+	}
+	return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+/*
+	A depth texture's palette by the depth's high byte: the colour of the
+	index CLUTFORMAT makes of a depth with that high byte (shift, mask,
+	start); exact for shifts of 8 or more (the fog's: the high byte), the
+	low byte taken as its middle below that
+*/
+static void depthLut(GeSgxWalker *w, uint32_t *lut) {
+	readClut(w);
+	uint32_t cf = reg(w, GE_CMD_CLUTFORMAT);
+	uint32_t format = cf & 3, shift = (cf >> 2) & 31, mask = (cf >> 8) & 0xFF, start = ((cf >> 16) & 31) << 4;
+	uint32_t h;
+	for (h = 0; h < 256; h++) {
+		uint32_t z = (h << 8) | 0x80;
+		uint32_t index = ((z >> shift) & mask) | start;
+		lut[h] = clutColor(w->clut, w->clut_bytes, format, index & 0x3FF);
+	}
 }
 
 // The framebuffer at or below an address (0xFFFFFFFF: none), for the diagnostics
@@ -1048,6 +1109,7 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 		fbreg[i].h = (uint16_t)sh;
 	fbreg[i].used = ++fbreg_clock;
 	fbreg[i].drawn = fbreg_frame;
+	fbreg[i].z = (((reg(w, GE_CMD_ZBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_ZBUFPTR)) & 0x001FFFFFu;
 
 	// This frame's list
 	uint32_t k;
@@ -1556,7 +1618,7 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		cached_frame = f;
 		cached_x.tex_w = cached_x.tex_h = 1.0f;
 		cached_x.fbk_u = cached_x.fbk_v = 1.0f;
-		int rt = -1;
+		int rt = -1, zt = -1;
 		uint32_t taddr = 0;
 		if (cached_d.flags & GE_SGX_DRAW_TEXTURED) {
 			// A framebuffer drawn before: its rendering, texel coordinates scaled from the texture to it
@@ -1573,9 +1635,36 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			*/
 			if (rt >= 0 && fbreg_frame - fbreg[rt].drawn >= 30)
 				rt = -1;
+			// A framebuffer's depth through a palette (CLUT16 at the depth's mirror, 0x04600000 + its z address)
+			if (taddr >= 0x04000000u && taddr < 0x04800000u && (taddr & 0x00600000u) == 0x00600000u && tfmt == 6)
+				zt = fbFindZ(taddr & 0x001FFFFFu, cached_d.fb);
 		}
 		diagDraw(w, f, &cached_d, taddr, rt);
-		if (rt >= 0) {
+		cached_d.depthtex = 0;
+		cached_d.lut = 0;
+		if (zt >= 0 && f->nluts < GE_SGX_MAX_LUTS) {
+			uint32_t *lut = f->luts[f->nluts];
+			depthLut(w, lut);
+			// The same palette as the last one: its slot
+			if (f->nluts && memcmp(lut, f->luts[f->nluts - 1], sizeof(f->luts[0])) == 0)
+				cached_d.lut = (uint8_t)(f->nluts - 1);
+			else
+				cached_d.lut = (uint8_t)f->nluts++;
+			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
+			float tw = (float)(1u << (size & 0xF)), th = (float)(1u << ((size >> 8) & 0xF));
+			float kx = tw / fbreg[zt].w, ky = th / fbreg[zt].h;
+			cached_d.texture = 0;
+			cached_d.fbtex = 0;
+			cached_d.depthtex = fbreg[zt].fb + 1;
+			cached_x.tex_w = 1.0f / fbreg[zt].w;
+			cached_x.tex_h = 1.0f / fbreg[zt].h;
+			cached_x.fbk_u = kx;
+			cached_x.fbk_v = ky;
+			cached_x.uscale *= kx;
+			cached_x.uoff *= kx;
+			cached_x.vscale *= ky;
+			cached_x.voff *= ky;
+		} else if (rt >= 0) {
 			uint32_t size = reg(w, GE_CMD_TEXSIZE0);
 			float tw = (float)(1u << (size & 0xF)), th = (float)(1u << ((size >> 8) & 0xF));
 			float kx = tw / fbreg[rt].w, ky = th / fbreg[rt].h;

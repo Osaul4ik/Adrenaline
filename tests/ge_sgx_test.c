@@ -927,6 +927,63 @@ static void testFbTexture(void) {
 	CHECK(found, "fb 0x88000 256x128 listed");
 }
 
+/*
+	A depth buffer read through a palette (CLUT16 at its VRAM mirror
+	0x04600000 + the z address): the framebuffer whose depth it is, a
+	palette by the depth's high byte (shift 8), no texture lookup
+*/
+static void testDepthTexture(void) {
+	resetFrame();
+	int i;
+	for (i = 0; i < 256; i++)
+		w32(0x08A00000 + i * 4, 0x10000000u * (uint32_t)(i & 15) | (uint32_t)i);
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 272, 0xFFFFFFFF, 480, 272);
+
+	L l = { 0x08800000 };
+	/* draw into 0x88000 with its depth at 0x110000 */
+	emit(&l, C(0x9C, 0x88000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0x9E, 0x110000));
+	emit(&l, C(0x9F, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	/* the same framebuffer, its depth as a CLUT16 texture: 8888 palette, shift 8, mask 0xFF */
+	emit(&l, C(0xB0, 0xA00000));
+	emit(&l, C(0xB1, 0x080000));
+	emit(&l, C(0xC5, 3 | (8 << 2) | (0xFF << 8)));
+	emit(&l, C(0xC4, 32));                // 1024 bytes
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xA0, 0x710000));
+	emit(&l, C(0xA8, (0x04 << 16) | 512));
+	emit(&l, C(0xB8, (9 << 8) | 9));      // 512 x 512
+	emit(&l, C(0xC3, 6));                 // CLUT16
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	tex_calls = 0;
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+
+	CHECK(frame.ndraws == 2, "depth texture draws %u", frame.ndraws);
+	if (frame.ndraws == 2) {
+		GeSgxDraw *d = &fdraws[1];
+		CHECK(d->depthtex == 0x88000 + 1 && d->fbtex == 0 && tex_calls == 0 && frame.nluts == 1 && d->lut == 0,
+		      "depth texture %X fbtex %X lookups %d palettes %u", d->depthtex, d->fbtex, tex_calls, frame.nluts);
+		/* high byte 0x37: palette entry 0x37 (depth 0x3780 >> 8) */
+		CHECK(frame.luts[0][0x37] == (0x70000000u | 0x37u) && frame.luts[0][0] == 0u && frame.luts[0][255] == 0xF00000FFu,
+		      "palette %08X %08X %08X", frame.luts[0][0x37], frame.luts[0][0], frame.luts[0][255]);
+		/* texels (480, 272) of the 480x272 framebuffer's depth: u = 480 / 480 * 512 / 512 */
+		GeSgxVertex *cv = &fverts[d->base + 3];
+		CHECK(feq(cv->u, 1.0f) && feq(cv->v, 1.0f), "depth texture uv %f %f", cv->u, cv->v);
+	}
+}
+
 /* A framebuffer as texture with generated coordinates (texture matrix, environment map): scaled to the texture's part too */
 static void testFbTextureGenerated(void) {
 	resetFrame();
@@ -1192,6 +1249,7 @@ int main(void) {
 	testTransferIntoVram();
 	testTexconv();
 	testTexBufw();
+	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 
 	printf("ge_sgx_test: %d checks, %d failures (page fetches %d)\n", checks, failures, page_calls);
 	free(ram);
