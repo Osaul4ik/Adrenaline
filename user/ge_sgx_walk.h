@@ -62,6 +62,7 @@ typedef struct {
 	uint32_t bbox_hidden;
 	uint32_t hw_regs;     // registers taken from the GE (geSgxWalkerHardwareReg)
 	uint32_t held;        // lists held after a handler signal
+	uint32_t hw_state;    // state values the GE had other than the walk's (geSgxWalkerHardwareState)
 } GeSgxStats;
 
 typedef struct {
@@ -277,6 +278,7 @@ void geSgxWalkerReset(GeSgxWalker *w);
 void geSgxWalkerResync(GeSgxWalker *w);
 void geSgxWalkerRelease(GeSgxWalker *w);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
+void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value);
 
 // Ring events, in the order the PSP side reported them
 void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head);

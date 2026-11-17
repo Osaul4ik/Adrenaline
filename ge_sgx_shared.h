@@ -64,7 +64,24 @@ enum GeSgxEventTypes {
 		use are as the GE read them. a = queue id (-1: all lists)
 	*/
 	GE_SGX_EVENT_SYNC,
+	/*
+		The GE's state as the GE has it, read while it is idle (after a
+		sceGeDrawSync(0), a sceGeListSync(0) that left nothing running, a
+		sceGeRestoreContext): a = id, b = its value (24 bits), c = id, d =
+		value. Ids below 0x100 are commands (sceGeGetCmd); 0x100 + type * 16
+		+ index a matrix value (sceGeGetMtx, type 8 world, 9 view, 10
+		projection, 11 texture; the float's top 24 bits, as the GE keeps it).
+		The Vita side walks the lists the GE has done, then takes these over
+		its own: the GE's state is what the next lists start from (state the
+		walk never saw change: a sceGeRestoreContext, a list of the kernel's).
+		Only the values that changed since the last ones sent, and all of
+		them every GE_SGX_STATE_FULL_EVERY times.
+	*/
+	GE_SGX_EVENT_STATE,
 };
+
+#define GE_SGX_STATE_MATRIX 0x100
+#define GE_SGX_STATE_FULL_EVERY 16
 
 typedef struct {
 	unsigned int type;

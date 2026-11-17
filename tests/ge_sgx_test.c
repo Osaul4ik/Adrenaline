@@ -836,6 +836,33 @@ static void testHardwareRegs(void) {
 	CHECK(geSgxReg(w, 0x9E) == 0x110000 && geSgxReg(w, 0x9F) == 512 && w->count == 0, "resync kept the registers %x %x", geSgxReg(w, 0x9E), geSgxReg(w, 0x9F));
 }
 
+/* The GE's state read while it is idle: taken over the walk's, plain state and matrices only */
+static void testHardwareState(void) {
+	reset();
+	L l = { 0x08800000 };
+	emit(&l, C(0x48, 0x3F28F5)); /* texture scale u 0.66 */
+	emit(&l, C(0x3A, 0));
+	emit(&l, C(0x3B, 0x400000)); /* world[0] = 2 */
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	w->state_dirty = 0;
+	geSgxWalkerHardwareState(w, 0x48, 0x3F8000); /* 1.0 on the GE */
+	CHECK(geSgxReg(w, 0x48) == 0x3F8000 && w->state_dirty && w->stats.hw_state == 1, "state reg %x dirty %d n %u", geSgxReg(w, 0x48), w->state_dirty, w->stats.hw_state);
+	geSgxWalkerHardwareState(w, 0x48, 0x3F8000);
+	CHECK(w->stats.hw_state == 1, "same value not counted %u", w->stats.hw_state);
+	geSgxWalkerHardwareState(w, 0x01, 0x123456); /* the vertex address: the walk's own */
+	geSgxWalkerHardwareState(w, 0x04, 0x123456);
+	geSgxWalkerHardwareState(w, 0x3B, 0x123456);
+	CHECK(geSgxReg(w, 0x01) != 0x123456 && geSgxReg(w, 0x04) != 0x123456 && geSgxReg(w, 0x3B) == 0x400000 && w->stats.hw_state == 1, "special commands kept %u", w->stats.hw_state);
+	CHECK(w->mtx.world[0] == 2.0f, "world %f", (double)w->mtx.world[0]);
+	geSgxWalkerHardwareState(w, 0x100 + 8 * 16 + 0, 0x3F8000); /* world[0] = 1 */
+	geSgxWalkerHardwareState(w, 0x100 + 10 * 16 + 15, 0x3F8000); /* proj[15] = 1 */
+	geSgxWalkerHardwareState(w, 0x100 + 9 * 16 + 12, 0x3F8000); /* past the view matrix */
+	geSgxWalkerHardwareState(w, 0x100 + 3 * 16 + 0, 0x3F8000); /* bones: not sent */
+	CHECK(w->mtx.world[0] == 1.0f && w->mtx.proj[15] == 1.0f && w->stats.hw_state == 3, "matrices %f %f n %u", (double)w->mtx.world[0], (double)w->mtx.proj[15], w->stats.hw_state);
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1465,6 +1492,7 @@ int main(void) {
 	testBoundingBox();
 	testFbWidthChange();
 	testHardwareRegs();
+	testHardwareState();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 

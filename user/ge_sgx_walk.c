@@ -934,6 +934,55 @@ void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value) {
 	}
 }
 
+/*
+	The GE's own state, read on the PSP while the GE was idle, after the walk
+	of the lists it had done (GE_SGX_EVENT_STATE): what the next lists start
+	from. Taken over the walk's values. They differ where the GE's state
+	changed outside the lists walked (a sceGeRestoreContext, a list of the
+	kernel's). Black Rock Shooter: every texture of its menu drawn magnified,
+	its texture coordinates scaled by 0.66 x 0.75, which the PSP's picture
+	of the same frame does not have.
+*/
+void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value) {
+	value &= 0x00FFFFFFu;
+	uint32_t old;
+	if (id < 0x100) {
+		// Plain state only: the commands the walk acts on are its own
+		if (id < GE_CMD_BASE || special_cmd[id])
+			return;
+		old = w->regs[id] & 0x00FFFFFFu;
+		if ((w->regs[id] >> 24) == id && old == value)
+			return;
+		w->regs[id] = (id << 24) | value;
+	} else {
+		uint32_t type = (id - 0x100) >> 4, i = id & 0xF;
+		float *m;
+		switch (type) {
+			case 8: m = i < 12 ? &w->mtx.world[i] : NULL; break;
+			case 9: m = i < 12 ? &w->mtx.view[i] : NULL; break;
+			case 10: m = &w->mtx.proj[i]; break;
+			case 11: m = i < 12 ? &w->mtx.tgen[i] : NULL; break;
+			default: m = NULL; break;
+		}
+		if (!m)
+			return;
+		float f = geSgxFloat24(value);
+		uint32_t bits;
+		memcpy(&bits, m, 4);
+		old = bits >> 8;
+		if (old == value)
+			return;
+		*m = f;
+	}
+	w->state_dirty = 1;
+	w->stats.hw_state++;
+	static int logs = 0;
+	if (w->log_fn && logs < 48) {
+		logs++;
+		w->log_fn("GeSgx: GE state %03X is %06X on the GE, %06X in the walk: taken from the GE\n", (unsigned)id, (unsigned)value, (unsigned)old);
+	}
+}
+
 void geSgxWalkerReset(GeSgxWalker *w) {
 	GeSgxFrameData *frame = w->frame;
 	GeSgxTextureFn texture_fn = w->texture_fn;

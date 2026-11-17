@@ -46,6 +46,8 @@ static int (* _sceGeSetCallback)(PspGeCallbackData *cb);
 static int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 static u32 (* _sceKernelGetSystemTimeLow)(void);
 static u32 (* _sceGeGetCmd)(int cmd);
+static int (* _sceGeGetMtx)(int type, void *matrix);
+static int (* _sceGeRestoreContext)(const void *context);
 
 static volatile GeSgxRing *ring = NULL; // uncached
 static u32 ring_mask = 0;
@@ -218,10 +220,114 @@ static int vitaBehind(void) {
 	return 1;
 }
 
+/*
+	The GE's state, read while it is idle, for the Vita side
+	(GE_SGX_EVENT_STATE): the commands that are plain state (not the list
+	flow, the matrix uploads, the CLUT load, the transfer), and the world,
+	view, projection and texture matrices. Values sent once, then when they
+	change, and all of them every GE_SGX_STATE_FULL_EVERY times.
+*/
+#define STATE_IDS (0xF0 - 0x10 + 4 * 16)
+static u32 state_sent[STATE_IDS];
+static u32 state_snapshots = 0;
+static int state_full = 1;
+
+static int stateCmd(u32 cmd) {
+	if (cmd < 0x10 || cmd >= 0xF0)
+		return 0;
+	if (cmd == 0x13 || cmd == 0x14) // offset address, origin
+		return 0;
+	if (cmd >= 0x2A && cmd <= 0x2B) // bone matrix upload
+		return 0;
+	if (cmd >= 0x3A && cmd <= 0x41) // world, view, projection, texture matrix uploads
+		return 0;
+	if (cmd == 0xC4 || cmd == 0xEA) // CLUT load, transfer start
+		return 0;
+	return 1;
+}
+
+static u32 pend_id = 0, pend_value = 0;
+static int pending = 0;
+
+static void statePut(u32 id, u32 value, u32 slot) {
+	value &= 0x00FFFFFF;
+	if (!state_full && state_sent[slot] == value)
+		return;
+	state_sent[slot] = value;
+	if (!pending) {
+		pend_id = id;
+		pend_value = value;
+		pending = 1;
+	} else {
+		ringPush(GE_SGX_EVENT_STATE, pend_id, pend_value, id, value);
+		pending = 0;
+	}
+}
+
+static int state_busy = 0;
+
+static void pushState(void) {
+	if (!_sceGeGetCmd)
+		return;
+	if (shared->session != ring->session)
+		return;
+	// One thread at a time (the values sent and the pair being built are shared)
+	u32 intr = interruptsOff();
+	int busy = state_busy;
+	state_busy = 1;
+	interruptsRestore(intr);
+	if (busy)
+		return;
+	if (++state_snapshots % GE_SGX_STATE_FULL_EVERY == 0)
+		state_full = 1;
+
+	int k1 = pspSdkSetK1(0);
+	u32 cmd;
+	for (cmd = 0x10; cmd < 0xF0; cmd++) {
+		if (stateCmd(cmd))
+			statePut(cmd, _sceGeGetCmd(cmd), cmd - 0x10);
+	}
+	if (_sceGeGetMtx) {
+		u32 type;
+		for (type = 8; type <= 11; type++) {
+			u32 m[16];
+			u32 n = type == 10 ? 16 : 12, i;
+			if (_sceGeGetMtx(type, m) < 0)
+				continue;
+			for (i = 0; i < n; i++)
+				statePut(GE_SGX_STATE_MATRIX + type * 16 + i, m[i] >> 8, (0xF0 - 0x10) + (type - 8) * 16 + i);
+		}
+	}
+	pspSdkSetK1(k1);
+
+	if (pending) {
+		ringPush(GE_SGX_EVENT_STATE, pend_id, pend_value, pend_id, pend_value);
+		pending = 0;
+	}
+	state_full = 0;
+	state_busy = 0;
+}
+
+// Nothing queued is left to run (sceGeDrawSync(1) answers "completed")
+static int geIdle(void) {
+	return _sceGeDrawSync(1) == 0;
+}
+
+static int sceGeRestoreContextPatched(const void *context) {
+	int res = _sceGeRestoreContext(context);
+	if (res >= 0 && geIdle()) {
+		state_full = 1;
+		pushState();
+	}
+	return res;
+}
+
 static int sceGeDrawSyncPatched(int syncType) {
 	int res = _sceGeDrawSync(syncType);
 	if (syncType == 0) {
 		ringPush(GE_SGX_EVENT_SYNC, (u32)-1, 0, 0, 0);
+		if (res >= 0)
+			pushState();
 		waitForVita();
 	} else if (syncType == 1) {
 		ring->sync_peeks++;
@@ -237,6 +343,8 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	int res = _sceGeListSync(qid, syncType);
 	if (syncType == 0) {
 		ringPush(GE_SGX_EVENT_SYNC, (u32)qid, 0, 0, 0);
+		if (res >= 0 && geIdle())
+			pushState();
 		waitForVita();
 	} else if (syncType == 1) {
 		ring->sync_peeks++;
@@ -419,11 +527,14 @@ int GeSgxInit(void) {
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
 	_sceGeGetCmd = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xDC93CFEF);
+	_sceGeGetMtx = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x57C8945B);
+	_sceGeRestoreContext = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x0BF608FB);
 	// VRAM copied with the DMA (1) or the CPU (2)
 	const char *dmac_module = "";
 	_sceDmacMemcpy = (void *)findExport("sceDmac", 0x617F3FE6, &dmac_module);
 	u32 how = _sceDmacMemcpy ? 1 : 2;
-	log("GeSgx: VRAM copied with %d, GE registers %s\n", (int)how, _sceGeGetCmd ? "read" : "not found");
+	log("GeSgx: VRAM copied with %d, GE registers %s, matrices %s, context restore %s\n", (int)how, _sceGeGetCmd ? "read" : "not found",
+		_sceGeGetMtx ? "read" : "not found", _sceGeRestoreContext ? "hooked" : "not found");
 
 	if (!_sceGeListEnQueue || !_sceGeListEnQueueHead || !_sceGeListDeQueue || !_sceGeListUpdateStallAddr ||
 	    !_sceGeDrawSync || !_sceGeListSync || !_sceDisplaySetFrameBuf) {
@@ -455,6 +566,10 @@ int GeSgxInit(void) {
 	}
 
 	vita_stalled = 0;
+	state_full = 1;
+	state_snapshots = 0;
+	pending = 0;
+	state_busy = 0;
 
 	sctrlHENPatchSyscall((u32)_sceGeListEnQueue, sceGeListEnQueuePatched);
 	sctrlHENPatchSyscall((u32)_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
@@ -464,6 +579,8 @@ int GeSgxInit(void) {
 	sctrlHENPatchSyscall((u32)_sceGeListSync, sceGeListSyncPatched);
 	if (_sceGeSetCallback)
 		sctrlHENPatchSyscall((u32)_sceGeSetCallback, sceGeSetCallbackPatched);
+	if (_sceGeRestoreContext)
+		sctrlHENPatchSyscall((u32)_sceGeRestoreContext, sceGeRestoreContextPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 	ClearCaches();
 
