@@ -67,7 +67,8 @@ typedef struct {
 	uint32_t held;        // lists held after a handler signal
 	uint32_t hw_state;    // state values the GE had other than the walk's (geSgxWalkerHardwareState)
 	uint32_t contexts;    // lists with a context ended (their state restored)
-	uint32_t signal_events; // signal handlers reported by the PSP side (geSgxWalkerSignal)
+	uint32_t signal_events; // signal and finish handlers reported by the PSP side (geSgxWalkerSignal, geSgxWalkerFinish)
+	uint32_t unstalled;   // lists stalled here when the game's wait said the GE was done with them (geSgxWalkerSynced)
 } GeSgxStats;
 
 typedef struct {
@@ -229,6 +230,7 @@ typedef struct {
 	// Optional log for diagnostics; while trace is set, the frame is traced into it
 	void (* log_fn)(const char *fmt, ...);
 	int releasing; // geSgxWalkerRelease running: handler signals do not hold
+	int run_one; // geSgxWalkerRun walks the first list only (geSgxWalkerFinish)
 	int hold_signals; // lists stop after handler signals (on once the PSP side reports the handlers: geSgxWalkerSignal)
 	int trace;
 	uint32_t trace_lines;
@@ -291,6 +293,8 @@ void geSgxWalkerReset(GeSgxWalker *w);
 void geSgxWalkerResync(GeSgxWalker *w);
 void geSgxWalkerRelease(GeSgxWalker *w);
 void geSgxWalkerSignal(GeSgxWalker *w, uint32_t after);
+void geSgxWalkerFinish(GeSgxWalker *w);
+void geSgxWalkerSynced(GeSgxWalker *w, int qid);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value);
 

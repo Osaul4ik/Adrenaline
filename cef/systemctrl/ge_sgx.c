@@ -382,6 +382,7 @@ static int sceGeListSyncPatched(int qid, int syncType) {
 	next flip; the lists are then read when the game waits for the GE.
 */
 static u32 signal_frame_us = 0;
+static int signals_since_finish = 0;
 
 static void waitForVitaSignal(void) {
 	u32 target = ring->write;
@@ -418,9 +419,23 @@ static void waitForVitaSignal(void) {
 }
 
 static int sceKernelCallSubIntrHandlerPatched(int intr, int sub, int arg2, int arg3) {
-	if (intr == PSP_GE_INTR && !(sub & 1) && ring) {
-		ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 0, 0);
-		waitForVitaSignal();
+	/*
+		Signal callbacks (even) and finish callbacks (odd): c = 1 for a
+		finish. A finish is reported only after signals of that list: the
+		Vita side walks what came after the last one before the game's
+		finish handler runs (a list without signals is walked at the
+		game's wait for the GE, without a wait in the interrupt)
+	*/
+	if (intr == PSP_GE_INTR && ring) {
+		if (!(sub & 1)) {
+			signals_since_finish = 1;
+			ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 0, 0);
+			waitForVitaSignal();
+		} else if (signals_since_finish) {
+			signals_since_finish = 0;
+			ringPush(GE_SGX_EVENT_SIGNAL, (u32)arg2 & 0xFFFF, (u32)arg3, 1, 0);
+			waitForVitaSignal();
+		}
 	}
 	return _sceKernelCallSubIntrHandler(intr, sub, arg2, arg3);
 }

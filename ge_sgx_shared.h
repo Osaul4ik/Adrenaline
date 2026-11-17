@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 3 // the ring's layout: both sides from the same build
+#define GE_SGX_VERSION 4 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -82,7 +82,8 @@ enum GeSgxEventTypes {
 		The GE stopped at a signal whose handler is about to run (the GE
 		driver's call of the game's signal callback, sceKernelCallSubIntrHandler):
 		a = the signal's 16 bits, b = the list address after its SIGNAL/END
-		(0: not given). The PSP side waits (GE_SGX_SIGNAL_TIMEOUT_US at most)
+		(0: not given), c = 1 for the finish callback instead (the GE did
+		the list to its FINISH). The PSP side waits (GE_SGX_SIGNAL_TIMEOUT_US at most)
 		until the Vita side has walked the lists up to that signal, then lets
 		the handler run: what the handler writes for the commands after the
 		signal is read after it ran, as the GE reads it.

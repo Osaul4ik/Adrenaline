@@ -931,6 +931,47 @@ static void testSignalEvents(void) {
 	CHECK(w->count == 1 && w->lists[0].pc == afterb && geSgxReg(w, 0x9C) == 0x44000, "skipped to the reported one: pc %x fbp %x", w->count ? w->lists[0].pc : 0, geSgxReg(w, 0x9C));
 }
 
+/* The finish handler: the first list to its end past its signals, the next ones as before; the game's wait: stalls passed */
+static void testFinishAndSync(void) {
+	reset();
+	L a = { 0x08800000 };
+	emit(&a, C(0x0E, (0x01u << 16) | 1)); /* handler signal */
+	emit(&a, C(0x0C, 0));
+	emit(&a, C(0x9C, 0x11000));           /* after the last signal */
+	emit(&a, C(0x0F, 0));
+	emit(&a, C(0x0C, 0));
+	L b = { 0x08801000 };
+	emit(&b, C(0x0E, (0x01u << 16) | 2));
+	emit(&b, C(0x0C, 0));
+	emit(&b, C(0x9C, 0x22000));
+	emit(&b, C(0x0F, 0));
+	emit(&b, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerList(w, 2, 0x08801000, 0, 0);
+	geSgxWalkerSignal(w, 0x08800008);
+	CHECK(w->count == 2 && w->lists[0].held, "held at the first signal: count %d", w->count);
+	geSgxWalkerFinish(w);
+	CHECK(w->count == 1 && geSgxReg(w, 0x9C) == 0x11000 && w->lists[0].qid == 2 && !w->lists[0].started, "first list finished only: count %d fbp %x", w->count, geSgxReg(w, 0x9C));
+
+	/* a list stalled here, the game's wait says the GE is done: it goes on */
+	reset();
+	L c = { 0x08800000 };
+	emit(&c, C(0x9C, 0x33000));
+	emit(&c, C(0x9D, 0x44));
+	emit(&c, C(0x0F, 0));
+	emit(&c, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0x08800004, 0);
+	geSgxWalkerList(w, 2, 0x08800000, 0x08800000, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 2 && geSgxReg(w, 0x9D) != 0x44, "stalled: count %d", w->count);
+	geSgxWalkerSynced(w, 1);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 1 && geSgxReg(w, 0x9D) == 0x44 && w->stats.unstalled == 1, "list 1 passed its stall: count %d unstalled %u", w->count, w->stats.unstalled);
+	geSgxWalkerSynced(w, -1);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 0, "all done: count %d", w->count);
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1603,6 +1644,7 @@ int main(void) {
 	testHardwareState();
 	testListContext();
 	testSignalEvents();
+	testFinishAndSync();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 

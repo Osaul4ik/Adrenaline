@@ -1185,6 +1185,54 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 		}
 		contextEnd(w, &w->lists[0]);
 		removeList(w, 0);
+		if (w->run_one)
+			break;
+	}
+}
+
+/*
+	The GE finished a list and its finish handler is about to run
+	(GE_SGX_EVENT_SIGNAL, finish): the first list walked to its end, past
+	handler signals (the GE did all of it; what came after its last signal
+	is read before the game's finish handler, which writes the next frame's
+	commands over it). The lists after it go on as before.
+*/
+void geSgxWalkerFinish(GeSgxWalker *w) {
+	w->stats.signal_events++;
+	if (!w->count)
+		return;
+	w->lists[0].held = 0;
+	w->releasing = 1;
+	w->run_one = 1;
+	geSgxWalkerRun(w);
+	w->run_one = 0;
+	w->releasing = 0;
+}
+
+/*
+	The game waited for the GE (GE_SGX_EVENT_SYNC; qid -1: all lists): the
+	GE is done with them, so it got past their stall addresses. A stall
+	update the walker missed left a list stalled here for good, and every
+	list queued after it waited behind it (Black Rock Shooter: 58 lists
+	queued, frames without draws, the PSP's picture shown in between).
+	Those lists go on to their end.
+*/
+void geSgxWalkerSynced(GeSgxWalker *w, int qid) {
+	int i, last = -1;
+	if (qid == -1) {
+		last = w->count - 1;
+	} else {
+		for (i = 0; i < w->count; i++) {
+			if (w->lists[i].qid == qid)
+				last = i;
+		}
+	}
+	for (i = 0; i <= last; i++) {
+		if (w->lists[i].stall) {
+			if (w->lists[i].pc == w->lists[i].stall)
+				w->stats.unstalled++;
+			w->lists[i].stall = 0;
+		}
 	}
 }
 
