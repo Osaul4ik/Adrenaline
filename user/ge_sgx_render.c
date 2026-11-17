@@ -43,8 +43,8 @@ extern SceGxmContext *_vita2d_context;
 #include "ge_sgx_shader.h"
 #include "ge_sgx_tex.h"
 
-#define PATCHER_BUFFER_SIZE (64 * 1024)
-#define PATCHER_VERTEX_USSE_SIZE (64 * 1024)
+#define PATCHER_BUFFER_SIZE (128 * 1024)
+#define PATCHER_VERTEX_USSE_SIZE (256 * 1024)
 #define PATCHER_FRAGMENT_USSE_SIZE (256 * 1024)
 
 #define MAX_FRAGMENT_PROGRAMS 512
@@ -360,6 +360,35 @@ static int ngpu_programs = 0;
 volatile int ge_sgx_gpu_failed = 0;
 volatile uint32_t ge_sgx_gpu_bad[GE_SGX_GPU_BAD_MAX];
 volatile int ge_sgx_gpu_nbad = 0;
+volatile int ge_sgx_render_flush = 0;
+static uint32_t flush_frame = 0u - 1000u, render_frames = 0;
+
+/*
+	The programs made so far given back to the shader patcher: at a new game
+	(the programs of the games before filled its memory: the third game of a
+	session got 805B0023 for its vertex programs, Need for Speed Carbon's
+	cars and lighting went to the CPU transform, too many vertices for it,
+	and were not drawn), and when its memory runs out (at most every 300
+	frames; until then a vertex type without program stays on the CPU).
+	At the start of a frame, after the GPU is done with the frames before.
+*/
+static void flushPrograms(SceGxmContext *ctx) {
+	int i;
+	sceGxmFinish(ctx);
+	for (i = 0; i < ngpu_programs; i++) {
+		if (gpu_programs[i].program)
+			sceGxmShaderPatcherReleaseVertexProgram(patcher, gpu_programs[i].program);
+	}
+	for (i = 0; i < nfragment_programs; i++) {
+		if (fragment_programs[i].program)
+			sceGxmShaderPatcherReleaseFragmentProgram(patcher, fragment_programs[i].program);
+	}
+	GeSgxLog("GeSgx render: %d vertex and %d fragment programs given back to the shader patcher\n", ngpu_programs, nfragment_programs);
+	ngpu_programs = 0;
+	nfragment_programs = 0;
+	ge_sgx_gpu_nbad = 0;
+	flush_frame = render_frames;
+}
 
 static int attribute(SceGxmVertexAttribute *a, const SceGxmProgram *gxp, const char *name, uint32_t fmt_class, uint32_t fmt, uint32_t comps, uint32_t offset) {
 	const SceGxmProgramParameter *p = sceGxmProgramFindParameterByName(gxp, name);
@@ -430,6 +459,15 @@ static GpuProgram *gpuProgram(const GeSgxDraw *d, int *waiting) {
 	g->gxp = gxp;
 	g->program = NULL;
 	int res = sceGxmShaderPatcherCreateVertexProgram(patcher, id, attrs, n, &stream, 1, &g->program);
+	if (res < 0 && render_frames - flush_frame >= 300) {
+		// Out of the patcher's memory: all given back at the next frame, this draw waits
+		g->program = NULL;
+		ngpu_programs--;
+		ge_sgx_render_flush = 1;
+		*waiting = 1;
+		GeSgxLog("GeSgx render: GPU vertex program %04X vtype %06X: %08X, the programs given back at the next frame\n", (unsigned)d->vkey, (unsigned)vtype, (unsigned)res);
+		return NULL;
+	}
 	if (res < 0) {
 		g->program = NULL;
 		if (ge_sgx_gpu_nbad < GE_SGX_GPU_BAD_MAX)
@@ -1540,6 +1578,11 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 
 	if (!patcher || !vertexProgram())
 		return NULL;
+	render_frames++;
+	if (ge_sgx_render_flush) {
+		ge_sgx_render_flush = 0;
+		flushPrograms(ctx);
+	}
 	target_clock++;
 
 	// Diagnostics: a frame traced now and then (three of the race, two others)

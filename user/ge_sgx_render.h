@@ -50,6 +50,8 @@ extern volatile int ge_sgx_gpu_failed;
 // Vertex types (attribute bits) the GPU transform cannot draw (no vertex program for them)
 extern volatile uint32_t ge_sgx_gpu_bad[GE_SGX_GPU_BAD_MAX];
 extern volatile int ge_sgx_gpu_nbad;
+// Set: the renderer gives its programs back to the shader patcher at its next frame (a new game)
+extern volatile int ge_sgx_render_flush;
 
 // Draw thread, with the GXM context of vita2d. Returns < 0 on error.
 int geSgxRenderInit(void);

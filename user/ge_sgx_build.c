@@ -43,6 +43,10 @@
 #define GE_CMD_MATERIALALPHA    0x58u
 #define GE_CMD_FRAMEBUFPTR      0x9Cu
 #define GE_CMD_FRAMEBUFWIDTH    0x9Du
+// Draws reading a depth buffer through a palette drawn from the depth (render: depthView)
+#ifndef GE_SGX_DEPTH_VIEW
+#define GE_SGX_DEPTH_VIEW 0
+#endif
 #define GE_CMD_ZBUFPTR          0x9Eu
 #define GE_CMD_ZBUFWIDTH        0x9Fu
 #define GE_CMD_TEXADDR0         0xA0u
@@ -1653,7 +1657,15 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		diagDraw(w, f, &cached_d, taddr, rt);
 		cached_d.depthtex = 0;
 		cached_d.lut = 0;
-		if (zt >= 0 && f->nluts < GE_SGX_MAX_LUTS) {
+		/*
+			The depth view (GE_SGX_DEPTH_VIEW) crashed the GPU in Prince of
+			Persia Revelations once its fog's draw was found: off until it is
+			made safe. Those draws are not drawn (read from VRAM they were the
+			bloom's picture through the fog's palette: squares and a grey veil).
+		*/
+		if (zt >= 0 && !GE_SGX_DEPTH_VIEW) {
+			cached_d.texture = -1;
+		} else if (zt >= 0 && f->nluts < GE_SGX_MAX_LUTS) {
 			uint32_t *lut = f->luts[f->nluts];
 			depthLut(w, lut);
 			// The same palette as the last one: its slot

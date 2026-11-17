@@ -34,6 +34,9 @@
 #define GE_CMD_BEZIER     0x05u
 #define GE_CMD_SPLINE     0x06u
 #define GE_CMD_BOUNDINGBOX 0x07u
+#ifndef GE_SGX_BBOX_TEST
+#define GE_SGX_BBOX_TEST 0
+#endif
 #define GE_CMD_JUMP       0x08u
 #define GE_CMD_BJUMP      0x09u
 #define GE_CMD_CALL       0x0Au
@@ -458,7 +461,12 @@ static int boundingBox(GeSgxWalker *w, uint32_t count) {
 	else
 		w->vaddr = normalize(w->vaddr + count * l.size);
 
-	if ((vtype & GE_VTYPE_THROUGH) || l.morphs != 1 || l.wt_fmt || !l.pos_fmt)
+	/*
+		The box test (PPSSPP's) is off: with it The 3rd Birthday lost effects
+		(half its boxes came out hidden); every box is visible, as before
+		BOUNDINGBOX was known, a box of no vertices still makes BJUMP jump
+	*/
+	if (!GE_SGX_BBOX_TEST || (vtype & GE_VTYPE_THROUGH) || l.morphs != 1 || l.wt_fmt || !l.pos_fmt)
 		return 1;
 	// The PSP tests 0x100 vertices at most: past 0x200, the second to last 0x100
 	if (count > 0x200) {

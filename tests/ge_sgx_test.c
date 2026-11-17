@@ -743,10 +743,16 @@ static void testBoundingBox(void) {
 	emit(&a, C(0x9C, 0x222));
 	emit(&a, C(0x0C, 0));
 	L b = { 0x08800300 };
+#if GE_SGX_BBOX_TEST
 	emit(&b, C(0x07, 2));                 // both right of the screen: hidden
 	emit(&b, C(0x09, 0x800400));          // taken
 	emit(&b, C(0x0A, 0));                 // never run
 	emit(&b, C(0x0C, 0));
+#else
+	emit(&b, C(0x07, 2));                 // no test: visible, not taken (the vertices still consumed)
+	emit(&b, C(0x09, 0x800200));
+	emit(&b, C(0x08, 0x800400));
+#endif
 	L c = { 0x08800400 };
 	emit(&c, C(0x07, 0));                 // reset: BJUMP jumps
 	emit(&c, C(0x09, 0x800500));
@@ -763,7 +769,11 @@ static void testBoundingBox(void) {
 	CHECK(w->count == 0 && w->stats.bad == 0, "bbox list count %d bad %u", w->count, w->stats.bad);
 	CHECK(geSgxReg(w, 0x9D) == 0x111 && geSgxReg(w, 0x9C) == 0, "bbox jumps: fbw %x fbp %x", geSgxReg(w, 0x9D), geSgxReg(w, 0x9C));
 	CHECK(w->vaddr == v + 4 * 12, "bbox consumed the vertices: %08x", w->vaddr);
+#if GE_SGX_BBOX_TEST
 	CHECK(w->stats.bbox_visible == 1 && w->stats.bbox_hidden == 2, "bbox results %u/%u", w->stats.bbox_visible, w->stats.bbox_hidden);
+#else
+	CHECK(w->stats.bbox_visible == 2 && w->stats.bbox_hidden == 1, "bbox results %u/%u", w->stats.bbox_visible, w->stats.bbox_hidden);
+#endif
 }
 
 /* Registers from the GE: taken only when the walk never set them */
@@ -1071,6 +1081,10 @@ static void testDepthTexture(void) {
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
 
+#if !GE_SGX_DEPTH_VIEW
+	/* depth views off: the draw is not drawn, nor read from VRAM */
+	CHECK(frame.ndraws == 1 && tex_calls == 0, "depth texture skipped: draws %u lookups %d", frame.ndraws, tex_calls);
+#else
 	CHECK(frame.ndraws == 2, "depth texture draws %u", frame.ndraws);
 	if (frame.ndraws == 2) {
 		GeSgxDraw *d = &fdraws[1];
@@ -1083,6 +1097,7 @@ static void testDepthTexture(void) {
 		GeSgxVertex *cv = &fverts[d->base + 3];
 		CHECK(feq(cv->u, 1.0f) && feq(cv->v, 1.0f), "depth texture uv %f %f", cv->u, cv->v);
 	}
+#endif
 }
 
 /* A framebuffer as texture with generated coordinates (texture matrix, environment map): scaled to the texture's part too */

@@ -1119,6 +1119,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 			read = 0;
 			last_lost = 0;
 			geSgxWalkerReset(&walker);
+			// A new game: the programs of the one before given back to the shader patcher
+			if (session > 1)
+				ge_sgx_render_flush = 1;
 			if (walker.texture_fn) {
 				geSgxTexReset();
 				if (building) {
