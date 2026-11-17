@@ -916,6 +916,7 @@ void geSgxWalkerReset(GeSgxWalker *w) {
 	int gpu_transform = w->gpu_transform;
 	uint32_t direct_start = w->direct_start, direct_size = w->direct_size;
 	geSgxWalkerInit(w, w->page_fn, w->user);
+	geSgxBuildWalkerReset();
 	w->clock_fn = clock_fn;
 	w->clock_every = clock_every;
 	w->log_fn = log_fn;

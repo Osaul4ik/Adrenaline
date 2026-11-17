@@ -250,6 +250,8 @@ void geSgxBuildTraceClear(GeSgxWalker *w);
 void geSgxBuildTraceNote(GeSgxWalker *w, const char *fmt, ...);
 // Before the frame is published: copies the vertex data still pending
 void geSgxBuildFinish(GeSgxWalker *w);
+void geSgxBuildReset(void);
+void geSgxBuildWalkerReset(void);
 
 
 void geSgxVertexLayout(uint32_t vtype, GeSgxVertexLayout *layout);

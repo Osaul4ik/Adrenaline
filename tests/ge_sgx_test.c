@@ -594,6 +594,39 @@ static void testPixelMapped(void) {
 	}
 }
 
+/* A framebuffer address drawn at another buffer width: its size starts over */
+static void testFbWidthChange(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 8, 8, 0xFFFFFFFF, 8, 8);
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x1A0000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x9D, 256));
+	emit(&l, C(0xD5, (255 << 10) | 255));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	uint32_t k, fw = 0, fh = 0;
+	for (k = 0; k < frame.nfbs; k++) {
+		if (frame.fbs[k].fb == 0x1A0000) {
+			fw = frame.fbs[k].w;
+			fh = frame.fbs[k].h;
+		}
+	}
+	CHECK(fw == 256 && fh == 256, "fb size after the width change %ux%u", fw, fh);
+	geSgxBuildReset();
+}
+
 static void testBuildOther(void) {
 	resetFrame();
 	uint32_t v = 0x08900000;
@@ -1393,6 +1426,7 @@ int main(void) {
 	testTexconv();
 	testTexBufw();
 	testBoundingBox();
+	testFbWidthChange();
 	testHardwareRegs();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */

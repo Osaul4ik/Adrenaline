@@ -998,7 +998,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 	from its 960x544 rendering, and the draw thread sizes those renderings
 	by the same numbers (frame->fbs).
 */
-static struct { uint32_t fb, z; uint16_t w, h; uint32_t used, drawn; } fbreg[GE_SGX_MAX_FBS];
+static struct { uint32_t fb, z; uint16_t w, h, fbw; uint32_t used, drawn; } fbreg[GE_SGX_MAX_FBS];
 static uint32_t fbreg_clock = 0;
 static uint32_t fbreg_frame = 0; // frames built (fbreg[].drawn: the last one drawing into it)
 
@@ -1106,6 +1106,17 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 		i = oldest;
 		fbreg[i].fb = d->fb;
 		fbreg[i].w = fbreg[i].h = 0;
+		fbreg[i].fbw = (uint16_t)fbw;
+	}
+	/*
+		Another buffer width: another framebuffer at that address, its size
+		starts over (Need for Speed Carbon's blur draws 88000 as 256x256 at
+		width 256, another game's 480x272 there before: the blur read its
+		rendering as 480x272, scaled wrong, and smeared the screen)
+	*/
+	if (fbreg[i].fbw != fbw) {
+		fbreg[i].w = fbreg[i].h = 0;
+		fbreg[i].fbw = (uint16_t)fbw;
 	}
 	if (sw > fbreg[i].w)
 		fbreg[i].w = (uint16_t)sw;
@@ -1571,6 +1582,21 @@ static int timedUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLay
 	int ok = gpuUniforms(w, f, l, x);
 	f->us_vuni += (clk() - t0) * every;
 	return ok;
+}
+
+// A new game: the framebuffers known start over
+void geSgxBuildReset(void) {
+	memset(fbreg, 0, sizeof(fbreg));
+}
+
+/*
+	The walker started over (its flip count from 0): the CLUTs read in a
+	frame of before could pass for this frame's (same address, same flip
+	count) - another game's palettes on Black Rock Shooter's text
+*/
+static void clutCacheReset(void);
+void geSgxBuildWalkerReset(void) {
+	clutCacheReset();
 }
 
 void geSgxBuildFinish(GeSgxWalker *w) {
@@ -2168,6 +2194,12 @@ static struct {
 	uint32_t addr, bytes, flips, hash;
 	uint8_t data[GE_SGX_CLUT_BYTES];
 } clut_cache[CLUT_CACHE];
+
+static void clutCacheReset(void) {
+	int i;
+	for (i = 0; i < CLUT_CACHE; i++)
+		clut_cache[i].w = NULL;
+}
 
 static void readClut(GeSgxWalker *w) {
 	if (w->clut_read)
