@@ -712,6 +712,15 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 
 	if (list->held)
 		return WALK_STALLED;
+	if (!list->started && list->context) {
+		// The GE driver saves the GE's state into the list's context as the list starts
+		memcpy(w->ctx.regs, w->regs, sizeof(w->ctx.regs));
+		w->ctx.offset = w->offset;
+		w->ctx.vaddr = w->vaddr;
+		w->ctx.iaddr = w->iaddr;
+		w->ctx.mtx = w->mtx;
+		w->ctx.saved = 1;
+	}
 	list->started = 1;
 
 	while (commands < GE_SGX_MAX_COMMANDS) {
@@ -939,9 +948,7 @@ void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value) {
 	of the lists it had done (GE_SGX_EVENT_STATE): what the next lists start
 	from. Taken over the walk's values. They differ where the GE's state
 	changed outside the lists walked (a sceGeRestoreContext, a list of the
-	kernel's). Black Rock Shooter: every texture of its menu drawn magnified,
-	its texture coordinates scaled by 0.66 x 0.75, which the PSP's picture
-	of the same frame does not have.
+	kernel's), and keeps the walk in step if it missed something.
 */
 void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value) {
 	value &= 0x00FFFFFFu;
@@ -1051,10 +1058,11 @@ void geSgxWalkerRelease(GeSgxWalker *w) {
 	w->releasing = 0;
 }
 
-void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head) {
+void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int flags) {
+	int head = flags & GE_SGX_LIST_HEAD;
 	int i = findList(w, qid);
-	geSgxBuildTraceNote(w, "list: queued qid %X at %X stall %X%s (%d lists, draw %u)%s", (unsigned)qid, (unsigned)list, (unsigned)stall,
-		head ? " head" : "", w->count, w->frame ? (unsigned)w->frame->ndraws : 0u, i >= 0 ? ", replaces the unfinished one of its qid" : "");
+	geSgxBuildTraceNote(w, "list: queued qid %X at %X stall %X%s%s (%d lists, draw %u)%s", (unsigned)qid, (unsigned)list, (unsigned)stall,
+		head ? " head" : "", (flags & GE_SGX_LIST_CONTEXT) ? " context" : "", w->count, w->frame ? (unsigned)w->frame->ndraws : 0u, i >= 0 ? ", replaces the unfinished one of its qid" : "");
 	if (i >= 0)
 		removeList(w, i);
 
@@ -1079,6 +1087,7 @@ void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int
 	l->pc = normalize(list) & ~3u;
 	l->start = l->pc;
 	l->stall = stall ? (normalize(stall) & ~3u) : 0;
+	l->context = (flags & GE_SGX_LIST_CONTEXT) ? 1 : 0;
 }
 
 void geSgxWalkerStall(GeSgxWalker *w, int qid, uint32_t stall) {
@@ -1092,8 +1101,32 @@ void geSgxWalkerStall(GeSgxWalker *w, int qid, uint32_t stall) {
 void geSgxWalkerDequeue(GeSgxWalker *w, int qid) {
 	int i = findList(w, qid);
 	geSgxBuildTraceNote(w, "list: dequeued qid %X%s", (unsigned)qid, i >= 0 ? " (unfinished)" : "");
-	if (i >= 0)
+	if (i >= 0) {
+		if (w->lists[i].started && w->lists[i].context)
+			w->ctx.saved = 0;
 		removeList(w, i);
+	}
+}
+
+/*
+	A list queued with a context (PspGeListArgs) ended: the GE driver puts
+	back the GE's state it saved as the list started (PPSSPP: gstate.Save at
+	the start, Restore at the end). What the list set does not carry over to
+	the next lists. (Black Rock Shooter: the GE's state after its lists was
+	not the walk's end state, its framebuffer and texture scale were the
+	ones before them.)
+*/
+static void contextEnd(GeSgxWalker *w, GeSgxList *l) {
+	if (!l->context || !w->ctx.saved)
+		return;
+	memcpy(w->regs, w->ctx.regs, sizeof(w->regs));
+	w->offset = w->ctx.offset;
+	w->vaddr = w->ctx.vaddr;
+	w->iaddr = w->ctx.iaddr;
+	w->mtx = w->ctx.mtx;
+	w->ctx.saved = 0;
+	w->state_dirty = 1;
+	w->stats.contexts++;
 }
 
 void geSgxWalkerRun(GeSgxWalker *w) {
@@ -1125,6 +1158,7 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			w->done_calls = w->top_calls;
 			w->done_signals = w->top_signals;
 		}
+		contextEnd(w, &w->lists[0]);
 		removeList(w, 0);
 	}
 }

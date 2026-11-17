@@ -150,17 +150,22 @@ static void waitForVita(void) {
 		ring->sync_max_us = waited;
 }
 
+// A list with a context: the GE driver saves the GE's state into it when the list starts and restores it when it ends
+static u32 listContext(const PspGeListArgs *arg) {
+	return (arg && arg->size >= 8 && arg->context) ? GE_SGX_LIST_CONTEXT : 0;
+}
+
 static int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
 	int qid = _sceGeListEnQueue(list, stall, cbid, arg);
 	if (qid >= 0)
-		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, 0);
+		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, listContext(arg));
 	return qid;
 }
 
 static int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
 	int qid = _sceGeListEnQueueHead(list, stall, cbid, arg);
 	if (qid >= 0)
-		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, 1);
+		ringPush(GE_SGX_EVENT_LIST, qid, (u32)list, (u32)stall, GE_SGX_LIST_HEAD | listContext(arg));
 	return qid;
 }
 
@@ -295,7 +300,7 @@ static void pushState(void) {
 			if (_sceGeGetMtx(type, m) < 0)
 				continue;
 			for (i = 0; i < n; i++)
-				statePut(GE_SGX_STATE_MATRIX + type * 16 + i, m[i] >> 8, (0xF0 - 0x10) + (type - 8) * 16 + i);
+				statePut(GE_SGX_STATE_MATRIX + type * 16 + i, m[i], (0xF0 - 0x10) + (type - 8) * 16 + i); // the GE's 24 bits
 		}
 	}
 	pspSdkSetK1(k1);

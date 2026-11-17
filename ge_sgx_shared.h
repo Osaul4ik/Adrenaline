@@ -47,7 +47,7 @@
 
 enum GeSgxEventTypes {
 	GE_SGX_EVENT_NONE,
-	GE_SGX_EVENT_LIST,      // a = queue id, b = list address, c = stall address (0: none), d = 1 if queued at the head
+	GE_SGX_EVENT_LIST,      // a = queue id, b = list address, c = stall address (0: none), d = GE_SGX_LIST_* flags
 	GE_SGX_EVENT_STALL,     // a = queue id, b = new stall address
 	GE_SGX_EVENT_FLIP,      // a = top address, b = buffer width, c = pixel format, d = sync
 	GE_SGX_EVENT_DEQUEUE,   // a = queue id
@@ -70,7 +70,7 @@ enum GeSgxEventTypes {
 		sceGeRestoreContext): a = id, b = its value (24 bits), c = id, d =
 		value. Ids below 0x100 are commands (sceGeGetCmd); 0x100 + type * 16
 		+ index a matrix value (sceGeGetMtx, type 8 world, 9 view, 10
-		projection, 11 texture; the float's top 24 bits, as the GE keeps it).
+		projection, 11 texture; 24 bits, as the GE keeps it).
 		The Vita side walks the lists the GE has done, then takes these over
 		its own: the GE's state is what the next lists start from (state the
 		walk never saw change: a sceGeRestoreContext, a list of the kernel's).
@@ -79,6 +79,9 @@ enum GeSgxEventTypes {
 	*/
 	GE_SGX_EVENT_STATE,
 };
+
+#define GE_SGX_LIST_HEAD    1 // queued at the head
+#define GE_SGX_LIST_CONTEXT 2 // queued with a context (PspGeListArgs): the GE's state is saved at its start, restored at its end
 
 #define GE_SGX_STATE_MATRIX 0x100
 #define GE_SGX_STATE_FULL_EVERY 16

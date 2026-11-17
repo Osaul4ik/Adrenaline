@@ -31,6 +31,8 @@
 
 #include <stdint.h>
 
+#include "../ge_sgx_shared.h" // GE_SGX_LIST_*
+
 #define GE_SGX_MAX_LISTS 64
 #define GE_SGX_MAX_STACK 32
 #define GE_SGX_MAX_RECTS 256
@@ -63,6 +65,7 @@ typedef struct {
 	uint32_t hw_regs;     // registers taken from the GE (geSgxWalkerHardwareReg)
 	uint32_t held;        // lists held after a handler signal
 	uint32_t hw_state;    // state values the GE had other than the walk's (geSgxWalkerHardwareState)
+	uint32_t contexts;    // lists with a context ended (their state restored)
 } GeSgxStats;
 
 typedef struct {
@@ -81,6 +84,7 @@ typedef struct {
 	int depth;
 	uint8_t bbox; // result of the last BOUNDINGBOX (BJUMP jumps when 0)
 	uint8_t held; // stopped after a handler signal until the flip (geSgxWalkerRelease)
+	uint8_t context; // queued with a context: the GE's state saved when it starts, restored when it ends
 	uint32_t stack[GE_SGX_MAX_STACK][2]; // return address, offset
 } GeSgxList;
 
@@ -173,6 +177,13 @@ typedef struct {
 	uint32_t offset;
 	uint32_t vaddr;
 	uint32_t iaddr;
+	// The state saved at the start of the list with a context being walked
+	struct {
+		int saved;
+		uint32_t regs[256];
+		uint32_t offset, vaddr, iaddr;
+		GeSgxMatrices mtx;
+	} ctx;
 	GeSgxMatrices mtx;
 
 	// Vertex layout of regs[VERTEXTYPE], computed when first needed
@@ -281,7 +292,7 @@ void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value);
 
 // Ring events, in the order the PSP side reported them
-void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int head);
+void geSgxWalkerList(GeSgxWalker *w, int qid, uint32_t list, uint32_t stall, int flags); // GE_SGX_LIST_*
 void geSgxWalkerStall(GeSgxWalker *w, int qid, uint32_t stall);
 void geSgxWalkerDequeue(GeSgxWalker *w, int qid);
 

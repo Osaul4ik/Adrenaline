@@ -863,6 +863,29 @@ static void testHardwareState(void) {
 	CHECK(w->mtx.world[0] == 1.0f && w->mtx.proj[15] == 1.0f && w->stats.hw_state == 3, "matrices %f %f n %u", (double)w->mtx.world[0], (double)w->mtx.proj[15], w->stats.hw_state);
 }
 
+/* A list queued with a context: the state it set is put back when it ends, the next list starts from the one before it */
+static void testListContext(void) {
+	reset();
+	L a = { 0x08800000 };
+	emit(&a, C(0x48, 0x3F8000)); /* texture scale 1 */
+	emit(&a, C(0x0C, 0));
+	L b = { 0x08801000 };
+	emit(&b, C(0x48, 0x3F28F5)); /* 0.66 in the list with the context */
+	emit(&b, C(0x3A, 0));
+	emit(&b, C(0x3B, 0x400000));
+	emit(&b, C(0x0C, 0));
+	L c = { 0x08802000 };
+	emit(&c, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerList(w, 2, 0x08801000, 0x08801004, GE_SGX_LIST_CONTEXT);
+	geSgxWalkerRun(w);
+	CHECK(geSgxReg(w, 0x48) == 0x3F28F5 && w->count == 1, "inside the context list %x count %d", geSgxReg(w, 0x48), w->count);
+	geSgxWalkerStall(w, 2, 0);
+	geSgxWalkerList(w, 3, 0x08802000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(geSgxReg(w, 0x48) == 0x3F8000 && w->mtx.world[0] == 0.0f && w->stats.contexts == 1 && w->count == 0, "restored %x world %f contexts %u", geSgxReg(w, 0x48), (double)w->mtx.world[0], w->stats.contexts);
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1493,6 +1516,7 @@ int main(void) {
 	testFbWidthChange();
 	testHardwareRegs();
 	testHardwareState();
+	testListContext();
 	testPixelMapped();
 	testDepthTexture(); /* last: its framebuffer 0x88000 is 480x272 from then on */
 
