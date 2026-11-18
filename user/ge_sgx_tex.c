@@ -220,13 +220,24 @@ static uint32_t textureHash(const GeSgxTexDesc *d, const uint8_t *src, uint32_t 
 			its multiply each word (about 80 us for 64 KB, texture checks
 			were 5 ms of a 3rd Birthday frame)
 		*/
-		uint32_t h1 = h ^ 0x9E3779B9u, h2 = h ^ 0x85EBCA6Bu, h3 = h ^ 0xC2B2AE35u, q[4];
-		for (i = 0; i + 16 <= size; i += 16) {
-			memcpy(q, src + i, 16);
-			h = (h ^ q[0]) * 16777619u;
-			h1 = (h1 ^ q[1]) * 16777619u;
-			h2 = (h2 ^ q[2]) * 16777619u;
-			h3 = (h3 ^ q[3]) * 16777619u;
+		/*
+			PSP RAM is mapped uncached: read in 512 byte bursts (memcpy)
+			into a cached buffer, not a word at a time (~125 ns each)
+		*/
+		uint32_t h1 = h ^ 0x9E3779B9u, h2 = h ^ 0x85EBCA6Bu, h3 = h ^ 0xC2B2AE35u;
+		uint32_t q[128];
+		for (i = 0; i + 16 <= size;) {
+			uint32_t n = (size - i) & ~15u, k;
+			if (n > sizeof(q))
+				n = sizeof(q);
+			memcpy(q, src + i, n);
+			for (k = 0; k < n / 4; k += 4) {
+				h = (h ^ q[k]) * 16777619u;
+				h1 = (h1 ^ q[k + 1]) * 16777619u;
+				h2 = (h2 ^ q[k + 2]) * 16777619u;
+				h3 = (h3 ^ q[k + 3]) * 16777619u;
+			}
+			i += n;
 		}
 		for (; i + 4 <= size; i += 4) {
 			memcpy(&v, src + i, 4);
