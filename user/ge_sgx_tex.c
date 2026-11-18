@@ -215,11 +215,24 @@ static uint32_t textureHash(const GeSgxTexDesc *d, const uint8_t *src, uint32_t 
 	uint32_t i, v;
 
 	if (size <= FULL_HASH_BYTES || (!d->swizzle && size <= FULL_HASH_LINEAR_BYTES)) {
-		for (i = 0; i + 4 <= size; i += 4) {
+		/*
+			Four chains side by side, 16 bytes a step: one chain waits on
+			its multiply each word (about 80 us for 64 KB, texture checks
+			were 5 ms of a 3rd Birthday frame)
+		*/
+		uint32_t h1 = h ^ 0x9E3779B9u, h2 = h ^ 0x85EBCA6Bu, h3 = h ^ 0xC2B2AE35u, q[4];
+		for (i = 0; i + 16 <= size; i += 16) {
+			memcpy(q, src + i, 16);
+			h = (h ^ q[0]) * 16777619u;
+			h1 = (h1 ^ q[1]) * 16777619u;
+			h2 = (h2 ^ q[2]) * 16777619u;
+			h3 = (h3 ^ q[3]) * 16777619u;
+		}
+		for (; i + 4 <= size; i += 4) {
 			memcpy(&v, src + i, 4);
 			h = (h ^ v) * 16777619u;
 		}
-		return h;
+		return h ^ (h1 * 3u) ^ (h2 * 5u) ^ (h3 * 7u);
 	}
 	uint32_t step = (size / 64) & ~3u;
 	for (i = 0; i < 64 && step; i++) {
