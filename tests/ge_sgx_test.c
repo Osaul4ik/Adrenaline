@@ -694,6 +694,40 @@ static void testFbWidthChange(void) {
 	geSgxBuildReset();
 }
 
+/* A scissor past the next framebuffer in VRAM: the rows up to it (The 3rd Birthday's 0 with 88000 after it) */
+static void testFbRowsBounded(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 8, 8, 0xFFFFFFFF, 8, 8);
+	L l = { 0x08800000 };
+	emit(&l, C(0xD2, 3));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x9C, 0x198000));            // the one after it, 272 rows of 512 later
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x9C, 0x110000));
+	emit(&l, C(0xD5, (433 << 10) | 849));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	uint32_t k, fw = 0, fh = 0;
+	for (k = 0; k < frame.nfbs; k++) {
+		if (frame.fbs[k].fb == 0x110000) {
+			fw = frame.fbs[k].w;
+			fh = frame.fbs[k].h;
+		}
+	}
+	CHECK(fw == 512 && fh == 272, "bounded by the next one: %ux%u", fw, fh);
+	geSgxBuildReset();
+}
+
 static void testBuildOther(void) {
 	resetFrame();
 	uint32_t v = 0x08900000;
@@ -1966,6 +2000,7 @@ int main(void) {
 	testTexBufw();
 	testBoundingBox();
 	testFbWidthChange();
+	testFbRowsBounded();
 	testHardwareRegs();
 	testHardwareState();
 	testListContext();

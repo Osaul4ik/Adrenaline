@@ -781,6 +781,14 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 		} else if (oldest < 0) {
 			return NULL;
 		}
+		// One the last frame drew too: each made anew every frame in turn (slow, its rendering lost)
+		static uint32_t evict_logs = 0;
+		if (targets[oldest].used + 1 >= target_clock && evict_logs < 8) {
+			evict_logs++;
+			GeSgxLog("GeSgx render: target %X %ux%u given up for %X %dx%d, drawn the last frame too (targets %u KB of %u)\n",
+				(unsigned)targets[oldest].fb, (unsigned)targets[oldest].w, (unsigned)targets[oldest].h, (unsigned)fb, w, h,
+				(unsigned)(target_bytes / 1024), (unsigned)(MAX_TARGET_BYTES / 1024));
+		}
 		freeTarget(&targets[oldest]);
 	}
 }

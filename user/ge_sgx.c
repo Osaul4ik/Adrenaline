@@ -238,7 +238,7 @@ static int initBlockCache(void) {
 	before the game's handler wrote over them (GE_SGX_EVENT_SIGNAL's shadow):
 	put over the blocks the walker reads while it walks up to that signal
 */
-#define MAX_OVERLAYS 384 // a frame's progresses not walked to, with a signal's
+#define MAX_OVERLAYS 1024 // a frame's progresses not walked to, with a signal's
 static struct {
 	uint32_t addr, len; // PSP address (no cache bits), bytes
 	const uint8_t *data;
@@ -277,7 +277,7 @@ static void overlayBlocksStale(void) {
 	the ones not walked yet (a progress the walk could not go to: its
 	commands are walked later, with its copy), later ones over earlier ones.
 */
-#define MAX_OVERLAY_RECORDS 64
+#define MAX_OVERLAY_RECORDS 256
 static struct { uint32_t psp; uint32_t seq; } overlay_recs[MAX_OVERLAY_RECORDS]; // the record's PSP address, its seq
 static uint32_t noverlay_recs = 0;
 
@@ -1673,13 +1673,20 @@ static int GeSgxThread(SceSize args, void *argp) {
 						if (rec && takeOverlays(rec, shadow_addr + off * 4, words, e->seq)) {
 							overlays_used++;
 							overlayBlocksStale();
-							if (walk_late && walker.count && geSgxWalkerProgress(&walker, e->a)) {
-								noteListDone();
-								dropOverlays();
-								progress_walks++;
-							}
 						} else {
 							progress_stale++;
+						}
+						/*
+							Walked to even with no copy (the copies kept full, the PSP's
+							written over): the memory now is what the GE just read, the
+							nearest to it there is. Not walked, its commands were read
+							at the next signal or wait, by then perhaps the game's
+							next ones
+						*/
+						if (walk_late && walker.count && geSgxWalkerProgress(&walker, e->a)) {
+							noteListDone();
+							dropOverlays();
+							progress_walks++;
 						}
 					}
 					break;

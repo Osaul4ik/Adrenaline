@@ -1182,6 +1182,37 @@ static uint32_t fbNearest(uint32_t addr) {
 	return best;
 }
 
+/*
+	The rows framebuffer i has: its scissor's, up to the next framebuffer or
+	depth buffer in VRAM after it (rows past that are theirs; drawn there
+	on the PSP, they are drawn into). The 3rd Birthday's scissor goes to
+	row 433, its 0 framebuffer is followed by 88000's at row 272: both made
+	1024x868 here, together past the targets' budget, each made anew every
+	frame in turn (its rendering lost each time: parts of the picture black,
+	and slow).
+*/
+static uint16_t fbRows(int i, uint32_t fmt) {
+	uint32_t fb = fbreg[i].fb, rows = fbreg[i].h;
+	uint32_t row = (uint32_t)fbreg[i].fbw * (fmt == 3 ? 4 : 2);
+	int j;
+	if (!row)
+		return (uint16_t)rows;
+	for (j = 0; j < GE_SGX_MAX_FBS; j++) {
+		if (!fbreg[j].used)
+			continue;
+		uint32_t next[2] = { j != i ? fbreg[j].fb : 0, fbreg[j].z };
+		int n;
+		for (n = 0; n < 2; n++) {
+			if (next[n] > fb) {
+				uint32_t r = (next[n] - fb) / row;
+				if (r >= 16 && r < rows) // (16: not a buffer inside this one's first rows)
+					rows = r;
+			}
+		}
+	}
+	return (uint16_t)rows;
+}
+
 static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 	uint32_t s1 = reg(w, GE_CMD_SCISSOR1), s2 = reg(w, GE_CMD_SCISSOR2);
 	(void)s1;
@@ -1223,6 +1254,7 @@ static void fbNote(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxDraw *d) {
 		fbreg[i].w = (uint16_t)sw;
 	if (sh > fbreg[i].h)
 		fbreg[i].h = (uint16_t)sh;
+	fbreg[i].h = fbRows(i, d->fbfmt);
 	fbreg[i].used = ++fbreg_clock;
 	fbreg[i].drawn = fbreg_frame;
 	fbreg[i].z = (((reg(w, GE_CMD_ZBUFWIDTH) & 0x00FF0000u) << 8) | reg(w, GE_CMD_ZBUFPTR)) & 0x001FFFFFu;
