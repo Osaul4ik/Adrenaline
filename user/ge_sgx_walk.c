@@ -714,6 +714,19 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 
 	if (list->held)
 		return WALK_STALLED;
+	if (!list->started) {
+		/*
+			The state before it, put back if it is read as garbage
+			(geSgxWalkerRun): from its start, not from where this walk of it
+			starts (walked in pieces, at signals and as the GE goes on, what a
+			garbage piece set before stayed)
+		*/
+		memcpy(w->before.regs, w->regs, sizeof(w->regs));
+		w->before.offset = w->offset;
+		w->before.vaddr = w->vaddr;
+		w->before.iaddr = w->iaddr;
+		w->before.mtx = w->mtx;
+	}
 	if (!list->started && list->context) {
 		// The GE driver saves the GE's state into the list's context as the list starts
 		memcpy(w->ctx.regs, w->regs, sizeof(w->ctx.regs));
@@ -722,6 +735,17 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 		w->ctx.iaddr = w->iaddr;
 		w->ctx.mtx = w->mtx;
 		w->ctx.saved = 1;
+	}
+	if (!list->started) {
+		/*
+			Every list starts with the offset and BASE at 0 (uOFW
+			sceGeListEnQueue: oadr and base 0, set on the GE as the list
+			starts; PPSSPP: offsetAddr 0): not what the list before left
+			(an offset left by another list sent the jumps of every list
+			after a level load past RAM, the PSP's picture from then on)
+		*/
+		w->offset = 0;
+		w->regs[GE_CMD_BASE] = (uint32_t)GE_CMD_BASE << 24;
 	}
 	list->started = 1;
 
@@ -1198,13 +1222,9 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			memory) set registers from it the GE never had: an offset of
 			0x03000000 sent every call of Black Rock Shooter's next lists
 			past RAM, all of them bad from then on, the PSP's picture shown
-			for good. The state from before it is put back.
+			for good. The state from before it is put back (walkList takes
+			it as the list starts).
 		*/
-		memcpy(w->before.regs, w->regs, sizeof(w->regs));
-		w->before.offset = w->offset;
-		w->before.vaddr = w->vaddr;
-		w->before.iaddr = w->iaddr;
-		w->before.mtx = w->mtx;
 		int res = walkList(w, &w->lists[0]);
 		if (res == WALK_STALLED)
 			break;

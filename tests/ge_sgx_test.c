@@ -238,6 +238,41 @@ static void testBadListState(void) {
 	      geSgxReg(w, 0x9C), geSgxReg(w, 0x9D), w->offset);
 }
 
+/* Every list starts with the offset and BASE at 0 (the GE driver's), not the last list's */
+static void testListStartOffset(void) {
+	reset();
+	L a = { 0x08800000 };
+	emit(&a, C(0x10, 0x080000));
+	emit(&a, C(0x13, 0xFB0000));       // offset 0xFB000000, left at its end
+	emit(&a, C(0x0F, 0));
+	emit(&a, C(0x0C, 0));
+	L b2 = { 0x08810000 };
+	emit(&b2, C(0x10, 0x080000));
+	emit(&b2, C(0x08, 0x810010));      // JUMP 0x08810010
+	L t = { 0x08810010 };
+	emit(&t, C(0x9C, 0x777));
+	emit(&t, C(0x0F, 0));
+	emit(&t, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerList(w, 2, 0x08810000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->stats.bad == 0 && w->stats.lists == 2 && geSgxReg(w, 0x9C) == 0x777, "bad %u lists %u fbp %x", w->stats.bad, w->stats.lists, geSgxReg(w, 0x9C));
+
+	/* a list walked in pieces (a stall), garbage in the first, bad in the second: the state from before the list is put back */
+	reset();
+	L c = { 0x08800000 };
+	emit(&c, C(0x13, 0x030000));       // offset 0x03000000 (garbage)
+	emit(&c, C(0x9D, 0x55));
+	emit(&c, C(0x10, 0x080000));
+	emit(&c, C(0x08, 0xF00000));       // JUMP past RAM: bad
+	geSgxWalkerList(w, 1, 0x08800000, 0x08800008, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 1 && w->offset == 0x03000000, "first piece: count %d offset %x", w->count, w->offset);
+	geSgxWalkerStall(w, 1, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->stats.bad == 1 && w->offset == 0 && geSgxReg(w, 0x9D) != 0x55, "put back from the list's start: bad %u offset %x fbw %x", w->stats.bad, w->offset, geSgxReg(w, 0x9D));
+}
+
 static void testCallJumpOrigin(void) {
 	reset();
 	// main: CALL sub (relative to BASE), JUMP to tail, (skipped NOP area), tail: END
@@ -1921,6 +1956,7 @@ int main(void) {
 	testProgressCall();
 	testDoublingConstAlpha();
 	testBadListState();
+	testListStartOffset();
 	testDepthRange();
 	testCullBehind();
 	testFbTextureGenerated();
