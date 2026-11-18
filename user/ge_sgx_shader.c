@@ -102,6 +102,13 @@ uint32_t geSgxShaderKey(const GeSgxDraw *d) {
 		key |= (1 << 6) | ((uint32_t)(d->atest_func & 7) << 7);
 	if (d->flags & GE_SGX_DRAW_FOG)
 		key |= 1 << 11;
+	GeSgxBlendEmu e;
+	if (geSgxBlendEmu(d, &e)) {
+		if (e.premul)
+			key |= GE_SGX_KEY_PREMUL;
+		if (e.aout)
+			key |= GE_SGX_KEY_ALPHA_OUT;
+	}
 
 	return key;
 }

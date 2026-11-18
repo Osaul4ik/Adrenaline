@@ -58,6 +58,7 @@ typedef struct {
 	const SceGxmProgramParameter *env;
 	const SceGxmProgramParameter *fog_color;
 	const SceGxmProgramParameter *scissor; // exact scissor (x0, y0, x1, y1 in pixels)
+	const SceGxmProgramParameter *pre, *alpha_out; // fixed blend factors (geSgxBlendEmu)
 } FragmentProgram;
 
 typedef struct {
@@ -232,6 +233,14 @@ static uint32_t blendKey(const GeSgxDraw *d) {
 		return masked;
 	uint32_t src = factor(d->blend & 0xF, d->fix_a, 1);
 	uint32_t dst = factor((d->blend >> 4) & 0xF, d->fix_b, 0);
+	// Fixed factors made in the fragment program (geSgxBlendEmu)
+	GeSgxBlendEmu e;
+	if (geSgxBlendEmu(d, &e)) {
+		if (e.premul)
+			src = SCE_GXM_BLEND_FACTOR_ONE;
+		if (e.aout)
+			dst = SCE_GXM_BLEND_FACTOR_SRC_ALPHA;
+	}
 	uint32_t func = blendFunc((d->blend >> 8) & 7);
 	return 0x40000000u | masked | func | (src << 4) | (dst << 8);
 }
@@ -349,6 +358,8 @@ static FragmentProgram *fragmentProgramBlend(const GeSgxDraw *d, const SceGxmPro
 	fp->env = sceGxmProgramFindParameterByName(gxp, "uEnv");
 	fp->fog_color = sceGxmProgramFindParameterByName(gxp, "uFogColor");
 	fp->scissor = sceGxmProgramFindParameterByName(gxp, "uScissor");
+	fp->pre = sceGxmProgramFindParameterByName(gxp, "uPre");
+	fp->alpha_out = sceGxmProgramFindParameterByName(gxp, "uAlphaOut");
 	return fp;
 }
 
@@ -1569,9 +1580,17 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 			last_stencil = skey;
 		}
 
-		if (fp->alpha_ref || fp->env || fp->fog_color || fp->scissor) {
+		if (fp->alpha_ref || fp->env || fp->fog_color || fp->scissor || fp->pre || fp->alpha_out) {
 			void *uniforms = NULL;
 			sceGxmReserveFragmentDefaultUniformBuffer(ctx, &uniforms);
+			if (fp->pre || fp->alpha_out) {
+				GeSgxBlendEmu e;
+				geSgxBlendEmu(d, &e);
+				if (fp->pre)
+					sceGxmSetUniformDataF(uniforms, fp->pre, 0, 4, e.pre);
+				if (fp->alpha_out)
+					sceGxmSetUniformDataF(uniforms, fp->alpha_out, 0, 1, &e.aval);
+			}
 			if (fp->scissor) {
 				float sc[4] = { (float)sx0, (float)sy0, (float)sx1, (float)sy1 };
 				sceGxmSetUniformDataF(uniforms, fp->scissor, 0, 4, sc);

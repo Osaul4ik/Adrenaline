@@ -215,9 +215,10 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	int atest = (key >> 6) & 1;
 	int afunc = (key >> 7) & 7;
 	int sc = (key >> 12) & 1; // exact scissor (the region clip is 32x32 tiles)
+	int premul = (key >> 14) & 1, aout = (key >> 15) & 1; // blend factors made here (GE_SGX_KEY_PREMUL, _ALPHA_OUT)
 
 	int n = snprintf(buf, size,
-		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s) : COLOR\n"
+		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s%s%s) : COLOR\n"
 		"{\n"
 		"%s"
 		"	float4 v = vColor;\n"
@@ -227,6 +228,8 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		atest ? ", uniform float uAlphaRef" : "",
 		fog ? ", float vFog : TEXCOORD1, uniform float4 uFogColor" : "",
 		sc ? ", float4 wpos : WPOS, uniform float4 uScissor" : "",
+		premul ? ", uniform float4 uPre" : "",
+		aout ? ", uniform float uAlphaOut" : "",
 		// One discard at the end with the alpha test's (two made the compiler fail on the biggest programs)
 		sc ? "	bool inside = all(wpos.xy >= uScissor.xy) && all(wpos.xy < uScissor.zw);\n" : "");
 
@@ -279,6 +282,11 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		n += snprintf(buf + n, size - n, "	if (!inside)\n		discard;\n");
 	}
 
+	// The blend's source factor (after the alpha test, on the colour as blended), and a fixed destination factor
+	if (premul)
+		n += snprintf(buf + n, size - n, "	c.rgb = saturate(c.rgb) * (uPre.rgb + uPre.a * saturate(c.a));\n");
+	if (aout)
+		n += snprintf(buf + n, size - n, "	c.a = uAlphaOut;\n");
 	n += snprintf(buf + n, size - n, "	return saturate(c);\n}\n");
 	return n;
 }
@@ -321,6 +329,12 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
 						ADD(key);
 						ADD(key | (1u << 12)); // with the exact scissor
+						// Fixed blend factors (modulate and untextured, no exact scissor)
+						if (tfunc == 0 && !dbl) {
+							ADD(key | (1u << 14));
+							ADD(key | (1u << 15));
+							ADD(key | (1u << 14) | (1u << 15));
+						}
 					}
 				}
 			}

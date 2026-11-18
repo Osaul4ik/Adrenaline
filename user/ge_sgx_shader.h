@@ -25,6 +25,76 @@
 
 #include "ge_sgx_cg.h"
 
+/*
+	PSP blend factors the GPU has no constant for (FIX: the fixed colours,
+	BLENDFIXEDA/B), made in the fragment program: the source factor
+	multiplied into the colour (GE_SGX_KEY_PREMUL: rgb times uPre.rgb +
+	uPre.a * alpha, the blend's source factor then ONE), a grey fixed
+	destination factor put in the output alpha (GE_SGX_KEY_ALPHA_OUT: the
+	blend's destination factor then SRC_ALPHA; the alpha is not written to
+	the framebuffer, draws mask it). Rounded to 0 or 1 they were: The 3rd
+	Birthday's glowing chips the wrong colour.
+*/
+#define GE_SGX_KEY_PREMUL    (1u << 14)
+#define GE_SGX_KEY_ALPHA_OUT (1u << 15)
+
+typedef struct {
+	int premul, aout;
+	float pre[4];
+	float aval;
+} GeSgxBlendEmu;
+
+static inline int geSgxFixExact(uint32_t fix) {
+	fix &= 0x00FFFFFFu;
+	return fix == 0 || fix == 0x00FFFFFFu;
+}
+
+static inline int geSgxBlendEmu(const GeSgxDraw *d, GeSgxBlendEmu *e) {
+	e->premul = e->aout = 0;
+	e->pre[0] = e->pre[1] = e->pre[2] = e->pre[3] = 0.0f;
+	e->aval = 1.0f;
+	if (!(d->flags & GE_SGX_DRAW_BLEND) || (d->flags & GE_SGX_DRAW_CLEAR))
+		return 0;
+	uint32_t fs = d->blend & 0xF, fd = (d->blend >> 4) & 0xF;
+	if (((d->blend >> 8) & 7) >= 3)
+		return 0; // minimum, maximum, difference: no factors
+	uint32_t fa = d->fix_a & 0x00FFFFFFu, fb = d->fix_b & 0x00FFFFFFu;
+	int sfix = fs >= 10 && !geSgxFixExact(fa);
+	int dfix = fd >= 10 && !geSgxFixExact(fb);
+	if (dfix) {
+		int r = fb & 0xFF, g = (fb >> 8) & 0xFF, b = (fb >> 16) & 0xFF;
+		int lo = r < g ? (r < b ? r : b) : (g < b ? g : b), hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+		if (hi - lo > 3)
+			dfix = 0; // a coloured one: not made (rounded as before)
+		else
+			e->aval = (float)(r + g + b) / (3.0f * 255.0f);
+	}
+	if (dfix) {
+		// The source factor must then not use the source alpha: multiplied in
+		switch (fs) {
+			case 2: e->pre[3] = 1.0f; e->premul = 1; break;                                            // SRC_ALPHA
+			case 3: e->pre[0] = e->pre[1] = e->pre[2] = 1.0f; e->pre[3] = -1.0f; e->premul = 1; break; // 1 - SRC_ALPHA
+			case 6: e->pre[3] = 2.0f; e->premul = 1; break;                                            // 2 SRC_ALPHA
+			case 0: case 1: case 4: case 5: case 8: case 9: break;                                     // no source alpha in them
+			case 7: return 0;
+			default: // FIX
+				e->pre[0] = (fa & 0xFF) / 255.0f;
+				e->pre[1] = ((fa >> 8) & 0xFF) / 255.0f;
+				e->pre[2] = ((fa >> 16) & 0xFF) / 255.0f;
+				e->premul = 1;
+				break;
+		}
+		e->aout = 1;
+	} else if (sfix && fd >= 2) {
+		// (not with the source colour as destination factor: it would be multiplied too)
+		e->pre[0] = (fa & 0xFF) / 255.0f;
+		e->pre[1] = ((fa >> 8) & 0xFF) / 255.0f;
+		e->pre[2] = ((fa >> 16) & 0xFF) / 255.0f;
+		e->premul = 1;
+	}
+	return e->premul || e->aout;
+}
+
 // Fragment program key of a draw: the GE state the fragment shader depends on
 uint32_t geSgxShaderKey(const GeSgxDraw *d);
 
