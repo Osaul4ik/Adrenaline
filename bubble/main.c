@@ -210,6 +210,42 @@ static int failedBefore(const char *path) {
 }
 
 /*
+	The cache's stamp: the programs' version, the generator's revision and
+	the list of keys it was made for. The same as this build's: the cache is
+	complete, nothing looked at (every start looked at every program's file,
+	thousands of them: seconds). Written after a pass that went through the
+	whole list.
+*/
+#define GE_SGX_CG_STAMP GE_SGX_CG_DIR "/ready"
+
+static void stampText(const uint32_t *keys, int n, char *out, int size) {
+	uint32_t h = 2166136261u;
+	int i;
+	for (i = 0; i < n; i++)
+		h = (h ^ keys[i]) * 16777619u;
+	snprintf(out, size, "version %d revision %d keys %d %08X\n", GE_SGX_CG_VERSION, GE_SGX_CG_GEN_REV, n, (unsigned)h);
+}
+
+static int stampMatches(const char *want) {
+	char have[96];
+	SceUID fd = sceIoOpen(GE_SGX_CG_STAMP, SCE_O_RDONLY, 0);
+	if (fd < 0)
+		return 0;
+	int len = sceIoRead(fd, have, sizeof(have) - 1);
+	sceIoClose(fd);
+	have[len > 0 ? len : 0] = '\0';
+	return strcmp(have, want) == 0;
+}
+
+static void writeStamp(const char *text) {
+	SceUID fd = sceIoOpen(GE_SGX_CG_STAMP, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, text, strlen(text));
+		sceIoClose(fd);
+	}
+}
+
+/*
 	SGX renderer: libshacccg.suprx cannot be loaded inside the emulator
 	(ScePspemu), only in a normal app like this one. With the renderer on
 	(or when adrenaline_user asked for it, GE_SGX_CG_REQUEST), compile every
@@ -227,6 +263,14 @@ static void compileSgxShaders(void) {
 	int n = geSgxCgAllKeys(keys, 4096 - 256);
 	if (n > 4096 - 256)
 		n = 4096 - 256;
+	char stamp[96];
+	stampText(keys, n, stamp, sizeof(stamp));
+	int complete = stampMatches(stamp);
+	if (complete && !requested)
+		return; // made for this build already
+	// Complete: only what the renderer asked for is looked at
+	if (complete)
+		n = 0;
 	// The keys the renderer asked for (one per line, hex), not in the list
 	if (requested) {
 		static char req[4096];
@@ -330,6 +374,8 @@ static void compileSgxShaders(void) {
 		}
 		geSgxCgTerm();
 		printf("\n");
+		if (!complete)
+			writeStamp(stamp);
 		{
 			char line[96];
 			int len = snprintf(line, sizeof(line), "--- compiled %d, failed %d\n", done - failed, failed);
@@ -345,6 +391,9 @@ static void compileSgxShaders(void) {
 		}
 	}
 
+	// Nothing to make: the list's programs are all there (or known to fail)
+	if (missing == 0 && !complete)
+		writeStamp(stamp);
 	sceIoRemove(GE_SGX_CG_REQUEST);
 }
 
