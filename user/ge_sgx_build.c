@@ -66,6 +66,8 @@
 #define GE_CMD_TEXFUNC          0xC9u
 #define GE_CMD_TEXENVCOLOR      0xCAu
 #define GE_CMD_CLEARMODE        0xD3u
+#define GE_CMD_CULLFACEENABLE 0x1Du
+#define GE_CMD_CULL           0x9Bu
 #define GE_CMD_SCISSOR1         0xD4u
 #define GE_CMD_SCISSOR2         0xD5u
 #define GE_CMD_ALPHATEST        0xDBu
@@ -966,6 +968,8 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 			if ((reg(w, GE_CMD_FRAMEBUFPIXFMT) & 3) == 1)
 				stencil5551(d);
 		}
+		if (reg(w, GE_CMD_CULLFACEENABLE) & 1)
+			d->cull = (reg(w, GE_CMD_CULL) & 1) ? GE_SGX_CULL_CCW : GE_SGX_CULL_CW;
 		if (reg(w, GE_CMD_TEXTUREMAPENABLE) & 1)
 			d->flags |= GE_SGX_DRAW_TEXTURED;
 		if (reg(w, GE_CMD_ALPHABLENDENABLE) & 1)
@@ -1031,7 +1035,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
 		a->fbtex == b->fbtex && a->texfmt == b->texfmt && a->depthtex == b->depthtex && a->lut == b->lut && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
-		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops &&
+		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops && a->cull == b->cull &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
 
@@ -1829,6 +1833,9 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 			f->skipped_other++;
 			return;
 	}
+	// Culling: triangles only (rectangles are sprites, never culled)
+	if (d.prim != GE_SGX_DRAW_TRIANGLES || type == GE_PRIM_RECTANGLES)
+		d.cull = GE_SGX_CULL_NONE;
 	uint32_t nverts_max = type == GE_PRIM_RECTANGLES ? count * 2 : count;
 	if (nverts_max > GE_SGX_MAX_DRAW_VERTICES) {
 		f->skipped_other++;

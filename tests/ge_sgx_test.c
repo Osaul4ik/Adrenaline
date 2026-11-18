@@ -1226,6 +1226,50 @@ static void testStencil5551(void) {
 	}
 }
 
+/* Face culling: triangles take CULL's winding, rectangles and clear mode never cull */
+static void testCull(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 0, 0xFFFFFFFF, 480, 0);
+	spriteVertex(v + 32, 0, 272, 0xFFFFFFFF, 0, 272);
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x1D, 1));
+	emit(&l, C(0x9B, 1));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (4u << 16) | 3));     /* strip: CULL 1 */
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));     /* rectangles: never */
+	emit(&l, C(0x9B, 0));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (3u << 16) | 3));     /* triangles: CULL 0 */
+	emit(&l, C(0x1D, 0));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (3u << 16) | 3));     /* off */
+	emit(&l, C(0x1D, 1));
+	emit(&l, C(0xD3, 0x101));              /* clear mode: never */
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0xD3, 0));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 5, "draws %u", frame.ndraws);
+	if (frame.ndraws == 5) {
+		CHECK(fdraws[0].cull == GE_SGX_CULL_CCW, "strip, CULL 1: %u", fdraws[0].cull);
+		CHECK(fdraws[1].cull == GE_SGX_CULL_NONE, "rectangles: %u", fdraws[1].cull);
+		CHECK(fdraws[2].cull == GE_SGX_CULL_CW, "triangles, CULL 0: %u", fdraws[2].cull);
+		CHECK(fdraws[3].cull == GE_SGX_CULL_NONE, "culling off: %u", fdraws[3].cull);
+		CHECK(fdraws[4].cull == GE_SGX_CULL_NONE, "clear: %u", fdraws[4].cull);
+	}
+}
+
 /* Framebuffers as textures, stencil, colour mask, stencil clear */
 static void testFbTexture(void) {
 	resetFrame();
@@ -1634,6 +1678,7 @@ int main(void) {
 	testGpuDirect();
 	testFbTexture();
 	testStencil5551();
+	testCull();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();

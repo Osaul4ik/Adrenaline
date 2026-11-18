@@ -870,7 +870,7 @@ static void stencilToAlpha(SceGxmContext *ctx, int tw, int th, int fmt5551) {
 int ge_sgx_debug_mode = 0;
 volatile int ge_sgx_trace_render = 0, ge_sgx_trace_walker = 0;
 const char *const ge_sgx_debug_names[GE_SGX_DEBUG_MODES] = { "normal", "no alpha test", "no fog", "no depth test",
-	"no textures", "no stencil" };
+	"no textures", "no stencil", "no culling" };
 
 /*
 	Draws not drawn: each reason with its keys logged the first time, and
@@ -920,11 +920,11 @@ static void runFlush(void) {
 		return;
 	run.active = 0;
 	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
-		" | flags %04X ztest %u cmask %u prim %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X %08X %08X %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
+		" | flags %04X ztest %u cmask %u prim %u cull %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X %08X %08X %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
 		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex & 0x40000000u) ? "depth of fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x3FFFFFFFu),
-		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xFF),
+		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xF), (unsigned)((run.zs >> 20) & 0xF),
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
 		(unsigned)(run.scissor & 0xFF) * 8, (unsigned)((run.scissor >> 8) & 0xFF) * 8, (unsigned)((run.scissor >> 16) & 0xFF) * 8,
 		(unsigned)(run.scissor >> 24) * 8, (int)(run.z0 * 65535.0f), (int)(run.z1 * 65535.0f), (int)run.x0, (int)run.y0, (int)run.x1, (int)run.y1,
@@ -957,7 +957,7 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 	}
 	if (!rtrace)
 		return;
-	uint32_t zs = (uint32_t)d->ztest | ((uint32_t)d->cmask << 8) | ((uint32_t)d->prim << 16) | ((uint32_t)d->tex_mode << 24);
+	uint32_t zs = (uint32_t)d->ztest | ((uint32_t)d->cmask << 8) | ((uint32_t)(d->prim | (d->cull << 4)) << 16) | ((uint32_t)d->tex_mode << 24);
 	uint32_t st = d->sfunc == 0xFF ? 0xFFFFFFFFu :
 		((uint32_t)d->sfunc << 28) | ((uint32_t)(d->sops & 0xFFF) << 16) | ((uint32_t)d->sref << 8) | (uint32_t)d->swmask;
 	#define SC8(v) ((uint32_t)((v) < 0 ? 0 : (v) / 8 > 255 ? 255 : (v) / 8))
@@ -1386,6 +1386,7 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
 	int last_zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS, last_zwrite = 0;
 	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+	int last_cull = GE_SGX_CULL_NONE;
 	sceGxmSetFrontPointLineWidth(ctx, GE_SGX_SCALE);
 	// Lines and points are drawn only in their polygon mode (in fill mode GXM draws nothing of them)
 	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
@@ -1423,6 +1424,8 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 				last_zwrite = 0;
 				sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
 				last_poly = SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
+				sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
+				last_cull = GE_SGX_CULL_NONE;
 				last_vp = vertex_program;
 				last_stencil = 0xFFFFFFFFu;
 				last_scissor[0] = last_scissor[1] = last_scissor[2] = last_scissor[3] = -1;
@@ -1621,6 +1624,15 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 		if (poly != last_poly) {
 			sceGxmSetFrontPolygonMode(ctx, poly);
 			last_poly = poly;
+		}
+		/*
+			Culling: the viewport turns the PSP's screen (y down) the GPU's
+			way up, so its clockwise is the one seen on the screen
+		*/
+		int cull = ge_sgx_debug_mode == 6 ? GE_SGX_CULL_NONE : d->cull;
+		if (cull != last_cull) {
+			sceGxmSetCullMode(ctx, cull == GE_SGX_CULL_CW ? SCE_GXM_CULL_CW : cull == GE_SGX_CULL_CCW ? SCE_GXM_CULL_CCW : SCE_GXM_CULL_NONE);
+			last_cull = cull;
 		}
 		sceGxmDraw(ctx, primitive(d->prim), SCE_GXM_INDEX_FORMAT_U16, &frame->indices_gpu[d->first], d->count);
 

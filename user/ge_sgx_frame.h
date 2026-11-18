@@ -81,6 +81,19 @@ enum GeSgxDrawFlags {
 	GE_SGX_DRAW_FB_ALPHA     = 1 << 10, // the framebuffer has alpha (not 565): clears write it
 };
 
+/*
+	Face culling (CULLFACEENABLE, CULL), as the PSP does it (PPSSPP's
+	software renderer): triangles, strips and fans, not rectangles or clear
+	mode, through mode included. CULL 1 draws the triangles clockwise on
+	the screen, 0 the counterclockwise ones. Not done, The 3rd Birthday's
+	shop drew a grey quad turned away over its background.
+*/
+enum GeSgxDrawCull {
+	GE_SGX_CULL_NONE,
+	GE_SGX_CULL_CW,  // clockwise ones not drawn (CULL 0)
+	GE_SGX_CULL_CCW, // counterclockwise ones not drawn (CULL 1)
+};
+
 enum GeSgxTexModes {
 	GE_SGX_TEX_CLAMP_U    = 1 << 0,
 	GE_SGX_TEX_CLAMP_V    = 1 << 1,
@@ -130,6 +143,7 @@ typedef struct {
 	uint8_t direct;     // base is an offset in PSP RAM, which the GPU reads where it is
 	uint8_t fbfmt;      // the framebuffer's pixel format (FRAMEBUFPIXFMT: 0 565, 1 5551, 2 4444, 3 8888)
 	uint8_t texfmt;     // framebuffer texture (fbtex): the texture format it is read with (0: 5650, alpha 1)
+	uint8_t cull;       // GeSgxDrawCull: triangles of one winding not drawn
 	uint16_t vkey;      // vertex program key (GE_SGX_VS_*)
 	uint32_t vtype;     // GE vertex type: the attribute formats and offsets
 	uint32_t ucommon;   // byte offsets of its uniform buffers in the uniform arena
