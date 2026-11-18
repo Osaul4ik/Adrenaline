@@ -1199,8 +1199,11 @@ void GeSgxLog(const char *fmt, ...) {
 	va_end(ap);
 	if (n <= 0)
 		return;
-	if (n >= (int)sizeof(buf))
+	if (n >= (int)sizeof(buf)) {
+		// Cut: the line still ends (the next one is not run into it)
 		n = sizeof(buf) - 1;
+		buf[n - 1] = '\n';
+	}
 
 	SceUID fd = sceIoOpen(LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
 	if (fd >= 0) {
@@ -1823,7 +1826,7 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB), asked at the waits %u (%u us, failed %u) | GE progress %u: walked to %u, no copy %u, walker %u, copies overwritten %u\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
@@ -1831,10 +1834,12 @@ per_second:;
 					(unsigned)frame_stats.clears, (unsigned)frame_stats.signals, (unsigned)frame_stats.held, (unsigned)frame_stats.bad, (unsigned)frame_stats.bbox_visible, (unsigned)frame_stats.bbox_hidden, (unsigned)frame_stats.hw_regs, (unsigned)frame_stats.hw_state, (unsigned)frame_stats.contexts, (unsigned)frame_stats.signal_events, (unsigned)frame_stats.unstalled,
 					(unsigned)rates.sync_waits, (unsigned)rates.sync_timeouts, (unsigned)rates.sync_max_us, (unsigned)rates.resyncs,
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
-					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped, (unsigned)overlays_used, (unsigned)overlays_stale,
+					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped, (unsigned)overlays_used, (unsigned)overlays_stale);
+				// (a line of the log is 512 bytes at most)
+				GeSgxLog("GeSgx t (cont): VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB), asked at the waits %u (%u us, failed %u) | GE progress %u: walked to %u, no copy %u, walker %u, copies overwritten %u | finishes of lists done here %u\n",
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
 					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024), (unsigned)vram_requests, (unsigned)vram_request_us, (unsigned)vram_request_fails,
-					(unsigned)ring->progress_events, (unsigned)progress_walks, (unsigned)progress_stale, (unsigned)walker.stats.progress, (unsigned)overlays_overwritten);
+					(unsigned)ring->progress_events, (unsigned)progress_walks, (unsigned)progress_stale, (unsigned)walker.stats.progress, (unsigned)overlays_overwritten, (unsigned)walker.finishes_gone);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {

@@ -1158,6 +1158,35 @@ static void contextEnd(GeSgxWalker *w, GeSgxList *l) {
 	w->stats.contexts++;
 }
 
+static void goneAdd(GeSgxWalker *w, uint32_t start, uint32_t end) {
+	if (w->gone_n >= GE_SGX_GONE) {
+		// The oldest: a list without a finish handler (its finish never comes)
+		memmove(&w->gone[0], &w->gone[1], sizeof(w->gone[0]) * (GE_SGX_GONE - 1));
+		w->gone_n = GE_SGX_GONE - 1;
+	}
+	w->gone[w->gone_n].start = start;
+	w->gone[w->gone_n].end = end;
+	w->gone_n++;
+}
+
+/*
+	A finish (the GE past a list's END, at a) for a list the walk is done
+	with: it and the ones before it (finished before it, or without a
+	finish handler) taken off. 1 if it was one of them.
+*/
+static int goneFinish(GeSgxWalker *w, uint32_t a) {
+	uint32_t i;
+	for (i = 0; i < w->gone_n; i++) {
+		const uint32_t start = w->gone[i].start, end = w->gone[i].end;
+		if (end ? a == end + 4 : (a > start && a - start <= GE_SGX_FINISH_SPAN)) {
+			memmove(&w->gone[0], &w->gone[i + 1], sizeof(w->gone[0]) * (w->gone_n - i - 1));
+			w->gone_n -= i + 1;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 void geSgxWalkerRun(GeSgxWalker *w) {
 	// Memory may have changed since the last run: fetch pages again
 	w->page = NO_PAGE;
@@ -1195,6 +1224,9 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			w->iaddr = w->before.iaddr;
 			w->mtx = w->before.mtx;
 			w->state_dirty = 1;
+			// Its finish still to come (not the one being handled): not the next list's
+			if (!w->run_one)
+				goneAdd(w, l->start, 0);
 		}
 		else {
 			w->stats.lists++;
@@ -1204,6 +1236,8 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			w->done_prims = w->top_prims;
 			w->done_calls = w->top_calls;
 			w->done_signals = w->top_signals;
+			if (!w->run_one)
+				goneAdd(w, w->done_start, w->done_end);
 		}
 		contextEnd(w, &w->lists[0]);
 		removeList(w, 0);
@@ -1221,9 +1255,24 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 */
 void geSgxWalkerFinish(GeSgxWalker *w, uint32_t after) {
 	w->stats.signal_events++;
+	/*
+		A list the walk already finished (its END just before after) or
+		dropped as bad: nothing more to do (taken off even with no list
+		here). Not the first list's: a game that queues the next frame's
+		list where the last one was (at its start, nothing given yet)
+		before the GE is done with the last one: the last one's finish (its
+		END further on) made the GE look past the new one's stall, the walk
+		read the commands being written there, bad, and so every frame
+		after it (the PSP's picture from then on).
+	*/
+	if (after && goneFinish(w, normalize(after) & ~3u)) {
+		w->finishes_gone++;
+		geSgxBuildTraceNote(w, "list: finish at %X: a list done here", (unsigned)after);
+		return;
+	}
 	if (!w->count)
 		return;
-	// The list the walk already finished (its END just before after): nothing more to do
+	// The same finish again, for the list the finish before it ended
 	if (after && w->done_count && (normalize(after) & ~3u) == w->done_end + 4)
 		return;
 	GeSgxList *l = &w->lists[0];

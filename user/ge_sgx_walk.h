@@ -34,6 +34,7 @@
 #include "../ge_sgx_shared.h" // GE_SGX_LIST_*
 
 #define GE_SGX_MAX_LISTS 64
+#define GE_SGX_GONE 8 // lists done here the GE's finish is still to come for (GeSgxWalker.gone)
 #define GE_SGX_FINISH_SPAN (1024 * 1024) // a finished list's end at most this far past where the walk is
 // geSgxWalkerProgress: how far ahead of the walk the GE may be (a list's part between two progresses), and past it the stop
 #define GE_SGX_PROGRESS_SPAN (64 * 1024)
@@ -215,6 +216,17 @@ typedef struct {
 	} last_bad;
 	// The last list walked to its end (diagnostics): first and END's address, a count of them
 	uint32_t done_start, done_end, done_count;
+	/*
+		Lists the walk ended or dropped as bad before the GE's finish for
+		them came, oldest first (end: END's address, 0 for a bad one, where
+		it ends not known). The GE finishes lists in order: a finish is the
+		first of these it matches, not the first list's (geSgxWalkerFinish).
+	*/
+	struct {
+		uint32_t start, end;
+	} gone[GE_SGX_GONE];
+	uint32_t gone_n;
+	uint32_t finishes_gone; // finishes that were theirs so far (diagnostics)
 	uint32_t top_prims, top_calls, top_signals; // the list's top level as walked (traced frames)
 	uint32_t done_prims, done_calls, done_signals;
 

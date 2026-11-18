@@ -993,6 +993,54 @@ static void testFinishAndSync(void) {
 	/* the same finish reported again (a list the walk had finished): the next list (same address, stalled at its start) keeps its stall */
 	geSgxWalkerFinish(w, 0x48800010);
 	CHECK(w->count == 1 && w->lists[0].stall == 0x08800000, "next list not passed: count %d stall %x", w->count, w->count ? w->lists[0].stall : 0);
+
+	/*
+		A list dropped as bad, the next frame's queued where it was (at its
+		start, nothing given yet), then the GE's finish of the bad one: the
+		new list keeps its stall (it was walked into the commands being
+		written there, bad, and so every frame after)
+	*/
+	reset();
+	L d = { 0x08800000 };
+	emit(&d, C(0x10, 0x080000));
+	emit(&d, C(0x13, 0x030000));
+	emit(&d, C(0x08, 0xF00000));          /* JUMP past RAM: bad */
+	emit(&d, C(0x0F, 0));
+	emit(&d, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 0 && w->stats.bad == 1, "dropped: count %d bad %u", w->count, w->stats.bad);
+	geSgxWalkerList(w, 2, 0x48800000, 0x48800000, 0);
+	geSgxWalkerFinish(w, 0x48800014);
+	CHECK(w->count == 1 && w->lists[0].stall == 0x08800000 && w->stats.bad == 1 && w->finishes_gone == 1,
+	      "bad one's finish: count %d stall %x bad %u gone %u", w->count, w->count ? w->lists[0].stall : 0, w->stats.bad, w->finishes_gone);
+	/* the new list's commands, then its own finish: walked to its end */
+	L e2 = { 0x08800000 };
+	emit(&e2, C(0x9C, 0x55000));
+	emit(&e2, C(0x0F, 0));
+	emit(&e2, C(0x0C, 0));
+	geSgxWalkerStall(w, 2, 0x48800004);
+	geSgxWalkerFinish(w, 0x4880000C);
+	CHECK(w->count == 0 && geSgxReg(w, 0x9C) == 0x55000 && w->stats.bad == 1, "its own finish: count %d fbp %x bad %u", w->count, geSgxReg(w, 0x9C), w->stats.bad);
+
+	/* two lists the walk ended, the GE's finish of the older one after the next frame's is queued there: not the new one's */
+	reset();
+	L f = { 0x08800000 };
+	emit(&f, C(0x9C, 0x66000));
+	emit(&f, C(0x0F, 0));
+	emit(&f, C(0x0C, 0));
+	L g = { 0x08801000 };
+	emit(&g, C(0x0F, 0));
+	emit(&g, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerList(w, 2, 0x08801000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->count == 0 && w->stats.lists == 2, "both ended: count %d", w->count);
+	geSgxWalkerList(w, 3, 0x08800000, 0x08800000, 0);
+	geSgxWalkerFinish(w, 0x4880000C);
+	geSgxWalkerFinish(w, 0x48801008);
+	CHECK(w->count == 1 && w->lists[0].stall == 0x08800000 && w->finishes_gone == 2 && w->stats.unstalled == 0,
+	      "older finishes: count %d stall %x gone %u", w->count, w->count ? w->lists[0].stall : 0, w->finishes_gone);
 }
 
 /* Depth range: a small 3D primitive with every vertex past MAXZ draws nothing; with the full range it is drawn */
