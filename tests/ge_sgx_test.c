@@ -972,6 +972,37 @@ static void testFinishAndSync(void) {
 	CHECK(w->count == 1 && w->lists[0].stall == 0x08800000, "next list not passed: count %d stall %x", w->count, w->count ? w->lists[0].stall : 0);
 }
 
+/* Depth range: a small 3D primitive with every vertex past MAXZ draws nothing; with the full range it is drawn */
+static void testDepthRange(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	static const float pos[4][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 }, { 1, -1, -4 } };
+	int i;
+	for (i = 0; i < 4; i++) {
+		wf(v + i * 24, 0.25f);
+		wf(v + i * 24 + 4, 0.75f);
+		w32(v + i * 24 + 8, 0x80FF0000u);
+		wf(v + i * 24 + 12, pos[i][0]);
+		wf(v + i * 24 + 16, pos[i][1]);
+		wf(v + i * 24 + 20, pos[i][2]);
+	}
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0xD6, 0));
+	emit(&l, C(0xD7, 1));                 // range 0-1: past it
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (4u << 16) | 4));
+	emit(&l, C(0xD7, 0xFFFF));            // full range
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (4u << 16) | 4));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 1 && frame.skipped_range == 1, "depth range: draws %u past %u", frame.ndraws, frame.skipped_range);
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1679,6 +1710,7 @@ int main(void) {
 	testFbTexture();
 	testStencil5551();
 	testCull();
+	testDepthRange();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();

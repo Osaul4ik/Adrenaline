@@ -108,6 +108,8 @@ uint32_t geSgxShaderKey(const GeSgxDraw *d) {
 			key |= GE_SGX_KEY_PREMUL;
 		if (e.aout)
 			key |= GE_SGX_KEY_ALPHA_OUT;
+		if (e.a2x)
+			key |= GE_SGX_KEY_ALPHA2X;
 	}
 
 	return key;

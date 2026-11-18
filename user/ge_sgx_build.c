@@ -68,6 +68,8 @@
 #define GE_CMD_CLEARMODE        0xD3u
 #define GE_CMD_CULLFACEENABLE 0x1Du
 #define GE_CMD_CULL           0x9Bu
+#define GE_CMD_MINZ           0xD6u
+#define GE_CMD_MAXZ           0xD7u
 #define GE_CMD_SCISSOR1         0xD4u
 #define GE_CMD_SCISSOR2         0xD5u
 #define GE_CMD_ALPHATEST        0xDBu
@@ -1894,6 +1896,40 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		morphing and 32 bit indices stay on the CPU path.
 	*/
 	/*
+		The depth range (MINZ, MAXZ): outside 3D draws (not through mode)
+		the PSP draws no pixel whose depth is past it, depth test on or off
+		(PPSSPP's software renderer). A small primitive (up to 16 vertices)
+		with every vertex past the same end has no pixel inside: not drawn.
+		The 3rd Birthday's shop: a grey quad at depth 30 over its background.
+	*/
+	if (!xp->through && count <= 16) {
+		uint32_t minz = reg(w, GE_CMD_MINZ) & 0xFFFF, maxz = reg(w, GE_CMD_MAXZ) & 0xFFFF;
+		// (not set: both 0, a list started without them)
+		if (maxz > minz && (minz > 0 || maxz < 0xFFFF)) {
+			int below = 1, above = 1;
+			uint32_t k;
+			bulk_count = 0;
+			for (k = 0; k < count && (below || above); k++) {
+				GeSgxVertex tv;
+				if (!vertexOut(w, xp, prim_index[k], &tv) || !(tv.w > 0.0f)) {
+					below = above = 0;
+					break;
+				}
+				float z = tv.z / tv.w * 65535.0f;
+				if (!(z < (float)minz))
+					below = 0;
+				if (!(z > (float)maxz))
+					above = 0;
+			}
+			bulk_count = 0;
+			if (below || above) {
+				f->skipped_range++;
+				return;
+			}
+		}
+	}
+
+	/*
 		Diagnostics (traced frames): the depth of the first vertex of a few
 		3D draws with the depth test and a scissor smaller than the screen
 		(the minimap, drawn behind a mask written into the depth buffer),
@@ -1925,8 +1961,9 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	*/
 	if (w->trace && !xp->through && trace_vertex_lines < 360 && count) {
 		char line[400];
-		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X |", (unsigned)f->ndraws, (unsigned)type,
-			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF));
+		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X z range %u-%u cull %u/%u |", (unsigned)f->ndraws, (unsigned)type,
+			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF), (unsigned)(reg(w, GE_CMD_MINZ) & 0xFFFF),
+			(unsigned)(reg(w, GE_CMD_MAXZ) & 0xFFFF), (unsigned)(reg(w, GE_CMD_CULLFACEENABLE) & 1), (unsigned)(reg(w, GE_CMD_CULL) & 1));
 		uint32_t k;
 		bulk_count = 0;
 		for (k = 0; k < 3 && k < count && n > 0 && n < (int)sizeof(line) - 100; k++) {

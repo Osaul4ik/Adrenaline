@@ -37,9 +37,18 @@
 */
 #define GE_SGX_KEY_PREMUL    (1u << 14)
 #define GE_SGX_KEY_ALPHA_OUT (1u << 15)
+/*
+	Doubled source alpha factors (DOUBLESRCALPHA, DOUBLEINVSRCALPHA: 2a and
+	1 - 2a) when no factor takes the plain source alpha: the output alpha
+	doubled (to at most 1, as PPSSPP does), the blend's factors then the
+	plain ones. Prince of Persia's last pass, a grey quad at alpha 0.6 with
+	1 - 2a and 2a (no change on the PSP), blended at 0.4 and 0.6 was a grey
+	veil over the picture.
+*/
+#define GE_SGX_KEY_ALPHA2X   (1u << 16)
 
 typedef struct {
-	int premul, aout;
+	int premul, aout, a2x;
 	float pre[4];
 	float aval;
 } GeSgxBlendEmu;
@@ -50,7 +59,7 @@ static inline int geSgxFixExact(uint32_t fix) {
 }
 
 static inline int geSgxBlendEmu(const GeSgxDraw *d, GeSgxBlendEmu *e) {
-	e->premul = e->aout = 0;
+	e->premul = e->aout = e->a2x = 0;
 	e->pre[0] = e->pre[1] = e->pre[2] = e->pre[3] = 0.0f;
 	e->aval = 1.0f;
 	if (!(d->flags & GE_SGX_DRAW_BLEND) || (d->flags & GE_SGX_DRAW_CLEAR))
@@ -92,7 +101,13 @@ static inline int geSgxBlendEmu(const GeSgxDraw *d, GeSgxBlendEmu *e) {
 		e->pre[2] = ((fa >> 16) & 0xFF) / 255.0f;
 		e->premul = 1;
 	}
-	return e->premul || e->aout;
+	if (!e->aout) {
+		int plain = fs == 2 || fs == 3 || fd == 2 || fd == 3;
+		int dbl = fs == 6 || fs == 7 || fd == 6 || fd == 7;
+		if (dbl && !plain)
+			e->a2x = 1;
+	}
+	return e->premul || e->aout || e->a2x;
 }
 
 // Fragment program key of a draw: the GE state the fragment shader depends on

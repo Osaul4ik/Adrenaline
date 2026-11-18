@@ -216,6 +216,7 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 	int afunc = (key >> 7) & 7;
 	int sc = (key >> 12) & 1; // exact scissor (the region clip is 32x32 tiles)
 	int premul = (key >> 14) & 1, aout = (key >> 15) & 1; // blend factors made here (GE_SGX_KEY_PREMUL, _ALPHA_OUT)
+	int a2x = (key >> 16) & 1;                             // doubled source alpha factors (GE_SGX_KEY_ALPHA2X)
 
 	int n = snprintf(buf, size,
 		"float4 main(float2 vTexcoord : TEXCOORD0, float4 vColor : COLOR%s%s%s%s%s%s%s) : COLOR\n"
@@ -287,6 +288,8 @@ int geSgxCgSource(uint32_t key, char *buf, int size) {
 		n += snprintf(buf + n, size - n, "	c.rgb = saturate(c.rgb) * (uPre.rgb + uPre.a * saturate(c.a));\n");
 	if (aout)
 		n += snprintf(buf + n, size - n, "	c.a = uAlphaOut;\n");
+	else if (a2x)
+		n += snprintf(buf + n, size - n, "	c.a = saturate(c.a * 2.0);\n");
 	n += snprintf(buf + n, size - n, "	return saturate(c);\n}\n");
 	return n;
 }
@@ -334,6 +337,7 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 							ADD(key | (1u << 14));
 							ADD(key | (1u << 15));
 							ADD(key | (1u << 14) | (1u << 15));
+							ADD(key | (1u << 16));
 						}
 					}
 				}
