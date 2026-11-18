@@ -1859,7 +1859,7 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u, past the depth range %u, culling: vertex behind the camera %u, culled here %u (triangles dropped %u), vertices looked at in %u (%u)\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u, past the depth range %u, culling: drawn without %u, culled here %u (triangles dropped %u), past the format's box %u (vertices read %u)\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
 					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
 					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other, (unsigned)frame_stats_range, (unsigned)frame_stats_cull_off,

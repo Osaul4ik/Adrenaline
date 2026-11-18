@@ -195,9 +195,9 @@ typedef struct {
 	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t skipped_range; // primitives past the depth range (MINZ, MAXZ): no pixel drawn
-	uint32_t cull_off;      // culled primitives with a vertex behind the camera: culled here (cull_cpu), else drawn without culling
-	uint32_t cull_checked;  // culled primitives the bound of their vertex format could not put in front of the camera: every vertex looked at
-	uint32_t cull_vertices; // their vertices
+	uint32_t cull_off;      // culled primitives drawn without culling (a vertex maybe where the GPU culls wrong, too big to look at)
+	uint32_t cull_checked;  // culled primitives their format's box could not put where the GPU culls right
+	uint32_t cull_vertices; // vertices read for them (boxes made, small ones looked at)
 	uint32_t cull_cpu;      // primitives culled here triangle by triangle (as the PSP), the GPU's culling off
 	uint32_t cull_dropped;  // their triangles not drawn
 	uint32_t us_cull;       // looking at their vertices (sampled, as the other us_)

@@ -1172,7 +1172,7 @@ static void cullBehindRun(int clip, int big) {
 		for (t = 0; t < 201; t++) {
 			int k;
 			for (k = 0; k < 3; k++) {
-				int src = t < 200 ? k : 6 + k; /* counterclockwise ones in front (culled), then (v1, v0, v2) */
+				int src = t < 200 || big == 2 ? k : 6 + k; /* counterclockwise ones in front (culled), then (v1, v0, v2) */
 				wf(vb + nb * 24, 0.25f);
 				wf(vb + nb * 24 + 4, 0.75f);
 				w32(vb + nb * 24 + 8, 0x80FF0000u);
@@ -1209,15 +1209,22 @@ static void cullBehindRun(int clip, int big) {
 static void testCullBehind(void) {
 	cullBehindRun(1, 0);
 	CHECK(frame.ndraws == 2 && fdraws[0].cull == GE_SGX_CULL_CCW && fdraws[1].cull == GE_SGX_CULL_NONE && fdraws[1].count == 3 &&
-	      frame.cull_off == 2 && frame.cull_cpu == 2 && frame.cull_dropped == 1,
+	      frame.cull_off == 0 && frame.cull_cpu == 2 && frame.cull_dropped == 1,
 	      "clip on: draws %u cull %u %u count %u off %u cpu %u dropped %u", frame.ndraws, frame.ndraws > 0 ? fdraws[0].cull : 9,
 	      frame.ndraws > 1 ? fdraws[1].cull : 9, frame.ndraws > 1 ? fdraws[1].count : 0, frame.cull_off, frame.cull_cpu, frame.cull_dropped);
 	cullBehindRun(0, 0);
 	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_dropped == 2,
 	      "clip off: draws %u dropped %u", frame.ndraws, frame.cull_dropped);
+	/* big, one crossing the camera (a sample of the vertices missed it): its box shows it, drawn without culling */
 	cullBehindRun(1, 1);
-	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_NONE && fdraws[0].count == 3 && frame.cull_dropped == 200,
-	      "big: draws %u cull %u count %u dropped %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.ndraws ? fdraws[0].count : 0, frame.cull_dropped);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_NONE && fdraws[0].count == 603 && frame.cull_off == 1 && frame.cull_cpu == 0,
+	      "big: draws %u cull %u count %u off %u cpu %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.ndraws ? fdraws[0].count : 0, frame.cull_off, frame.cull_cpu);
+	/* big, all in front: its box made once (its vertices read), then known; culled by the GPU */
+	cullBehindRun(1, 2);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_off == 0 && frame.cull_vertices == 603,
+	      "big in front: draws %u cull %u off %u read %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.cull_off, frame.cull_vertices);
+	cullBehindRun(1, 2);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_vertices == 0, "box known: cull %u read %u", frame.ndraws ? fdraws[0].cull : 9, frame.cull_vertices);
 }
 
 /* 16 bit positions: in front of the camera by their bound alone (no vertex looked at), or looked at when near it */
