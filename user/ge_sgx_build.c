@@ -720,7 +720,7 @@ static int vertexModel(GeSgxWalker *w, const Xform *x, uint32_t index, float *mp
 
 /*
 	A vertex's position on the screen times its clip w (out[0], out[1]: the
-	PSP's pixels, scaled, times w) and its w (out[2]): the triangle's
+	PSP's pixels, scaled, times w), its w (out[2]) and clip z (out[3]): the triangle's
 	winding seen on the screen is the sign of the determinant of its three
 	(the part in front of the camera too, of one crossing it: homogeneous
 	rasterization, Olano and Greer)
@@ -736,212 +736,154 @@ static int vertexClip(GeSgxWalker *w, const Xform *x, uint32_t index, float *out
 	out[0] = x->vp_x[0] * cx + x->vp_x[1] * cw;
 	out[1] = x->vp_y[0] * cy + x->vp_y[1] * cw;
 	out[2] = cw;
+	out[3] = p[0] * M[2] + p[1] * M[6] + p[2] * M[10] + M[14];
 	return 1;
 }
 
 /*
-	Where the GPU culls a triangle as the PSP does: its vertices in front of
-	the camera (clip w > 0) and their screen positions near the screen
-	(CULL_RANGE pixels past its sides, the PSP's 4096 range about it; a w
-	near 0 throws them far off). Past that the GPU's culling goes wrong
-	(The 3rd Birthday: the screen black at places with culling on).
+	Culling of a primitive crossing the near plane, as PPSSPP does it on a
+	GPU without clip distances (DrawEngineCommon: TestBoundingBoxFast, then
+	CpuCull / SoftClipCull): every vertex's clip position from the
+	positions alone, one pass; a vertex past the near plane (z < -w), and
+	the GPU's culling is not the GE's for it (The 3rd Birthday's screen
+	black at places, Aya by the camera): the triangles
+	are culled here as the GE does (Clipper.cpp ProcessTriangle), the GPU's
+	culling off. 8 and 16 bit positions in front of the near plane by their
+	format's bound alone are not read.
 */
-#define CULL_RANGE 3584.0f // pixels of the 960x544 screen past its sides
-
-// The 5 linear functions of a model position (after skinning) that are all >= 0 (w > 0) where it is so: w, x + R w, (960 + R) w - x, the same for y
-static void cullForms(const Xform *x, float F[5][4]) {
-	const float *M = x->mvp;
-	int i;
-	for (i = 0; i < 4; i++) {
-		float cx = M[i * 4 + 0], cy = M[i * 4 + 1], cw = M[i * 4 + 3];
-		float X = x->vp_x[0] * cx + x->vp_x[1] * cw, Y = x->vp_y[0] * cy + x->vp_y[1] * cw;
-		F[0][i] = cw;
-		F[1][i] = X + CULL_RANGE * cw;
-		F[2][i] = (960.0f + CULL_RANGE) * cw - X;
-		F[3][i] = Y + CULL_RANGE * cw;
-		F[4][i] = (544.0f + CULL_RANGE) * cw - Y;
-	}
-}
-
-// The lowest of f.p + c over the box lo..hi
-static inline float boxMin(const float *f, float c, const float *lo, const float *hi) {
-	return c + (f[0] > 0.0f ? f[0] * lo[0] : f[0] * hi[0]) + (f[1] > 0.0f ? f[1] * lo[1] : f[1] * hi[1]) +
-	       (f[2] > 0.0f ? f[2] * lo[2] : f[2] * hi[2]);
-}
-
-/*
-	Every vertex where the GPU culls right, by a box of the vertices'
-	positions (before morphing and skinning: every morph target's in it).
-	Morphed: the box the weighted sum is in. Skinned: each form is its
-	translation plus the sum of weight times the bone's form (each bone's at
-	its lowest over the box, weights 0..2 for 8 and 16 bit ones; float
-	weights: no bound).
-*/
-static int safeInBox(const Xform *x, const float *blo, const float *bhi) {
-	const GeSgxVertexLayout *l = x->l;
-	float lo[3], hi[3], F[5][4];
-	uint32_t k, j;
-	int i;
-	if (l->morphs > 1) {
-		lo[0] = lo[1] = lo[2] = hi[0] = hi[1] = hi[2] = 0.0f;
-		for (k = 0; k < l->morphs; k++) {
-			float mw = x->morph[k];
-			for (j = 0; j < 3; j++) {
-				lo[j] += mw > 0.0f ? mw * blo[j] : mw * bhi[j];
-				hi[j] += mw > 0.0f ? mw * bhi[j] : mw * blo[j];
-			}
-		}
-	} else {
-		memcpy(lo, blo, sizeof(lo));
-		memcpy(hi, bhi, sizeof(hi));
-	}
-	cullForms(x, F);
-	if (!x->skinning) {
-		for (i = 0; i < 5; i++) {
-			float m = boxMin(F[i], F[i][3], lo, hi);
-			if (!(i == 0 ? m > 0.0f : m >= 0.0f))
-				return 0;
-		}
-		return 1;
-	}
-	if (l->wt_fmt != 1 && l->wt_fmt != 2)
-		return 0;
-	float wmax = l->wt_fmt == 1 ? 255.0f / 128.0f : 65535.0f / 32768.0f;
-	for (i = 0; i < 5; i++) {
-		float low = F[i][3];
-		for (j = 0; j < l->weights; j++) {
-			const float *b = &x->m->bone[j * 12];
-			float f[3] = {
-				F[i][0] * b[0] + F[i][1] * b[1] + F[i][2] * b[2],
-				F[i][0] * b[3] + F[i][1] * b[4] + F[i][2] * b[5],
-				F[i][0] * b[6] + F[i][1] * b[7] + F[i][2] * b[8],
-			};
-			float g = boxMin(f, F[i][0] * b[9] + F[i][1] * b[10] + F[i][2] * b[11], lo, hi);
-			if (g < 0.0f)
-				low += wmax * g;
-		}
-		if (!(i == 0 ? low > 0.0f : low >= 0.0f))
-			return 0;
-	}
-	return 1;
-}
-
-/*
-	The boxes of vertex ranges (a model's, a level's: the same every frame),
-	made once from all their vertices, known unchanged by 8 words of them;
-	one changed two frames running is taken for one written every frame
-	(no box: not read again)
-*/
-#define CULL_BOXES 512
-typedef struct {
-	uint32_t addr, bytes, vtype, sample, flips;
-	float lo[3], hi[3];
-	uint8_t used, changed, moving;
-} CullBox;
-static CullBox cull_boxes[CULL_BOXES];
-
-static uint32_t boxSample(GeSgxWalker *w, uint32_t addr, uint32_t bytes) {
-	uint32_t h = 2166136261u, k;
-	for (k = 0; k < 8; k++) {
-		uint32_t v = 0, off = (uint32_t)(((uint64_t)(bytes - 4) * k / 7) & ~3u);
-		geSgxRead(w, addr + off, &v, 4);
-		h = (h ^ v) * 16777619u;
-	}
-	return h;
-}
-
-// 1: the box of the vertices first..first+count-1 (lo, hi); its vertices read when made (*read)
-static int cullBox(GeSgxWalker *w, const GeSgxVertexLayout *l, uint32_t first, uint32_t count, float *lo, float *hi, uint32_t *read) {
-	uint32_t addr = w->vaddr + first * l->size, bytes = count * l->size, vtype = reg(w, 0x12u) & 0xFFFFFFu;
-	if (bytes < 8 || bytes > BULK_BYTES)
-		return 0;
-	uint32_t h = (addr ^ (bytes * 2654435761u) ^ vtype) % CULL_BOXES, k, j, m;
-	CullBox *b = NULL, *empty = NULL;
-	for (k = 0; k < 4; k++) {
-		CullBox *e = &cull_boxes[(h + k) % CULL_BOXES];
-		if (e->used && e->addr == addr && e->bytes == bytes && e->vtype == vtype) {
-			b = e;
-			break;
-		}
-		if (!empty && (!e->used || e->flips + 120 < w->flips))
-			empty = e;
-	}
-	uint32_t sample = boxSample(w, addr, bytes);
-	if (b) {
-		if (b->sample == sample) {
-			b->flips = w->flips;
-			b->changed = b->moving = 0;
-			memcpy(lo, b->lo, sizeof(b->lo));
-			memcpy(hi, b->hi, sizeof(b->hi));
-			return 1;
-		}
-		// (one written every frame tried again after 120 frames: a level loaded where it was)
-		if (b->moving && b->flips + 120 >= w->flips)
-			return 0;
-		if (!b->moving && b->changed && b->flips + 1 >= w->flips) {
-			b->moving = 1;
-			b->flips = w->flips;
-			return 0;
-		}
-	} else {
-		b = empty ? empty : &cull_boxes[h];
-		memset(b, 0, sizeof(*b));
-	}
-	bulk_count = 0;
-	if (!bulkLoad(w, l, first, count))
-		return 0;
-	float blo[3] = { 1e30f, 1e30f, 1e30f }, bhi[3] = { -1e30f, -1e30f, -1e30f };
-	for (k = 0; k < count; k++) {
-		const uint8_t *v = bulk + k * l->size;
-		for (m = 0; m < l->morphs; m++) {
-			for (j = 0; j < 3; j++) {
-				float c = comp(v + m * l->stride + l->pos_off, l->pos_fmt, j, 1);
-				if (!(c >= blo[j]))
-					blo[j] = c;
-				if (!(c <= bhi[j]))
-					bhi[j] = c;
-			}
-		}
-	}
-	bulk_count = 0;
-	*read += count;
-	int changed = b->used;
-	b->used = 1;
-	b->changed = (uint8_t)changed;
-	b->addr = addr;
-	b->bytes = bytes;
-	b->vtype = vtype;
-	b->sample = sample;
-	b->flips = w->flips;
-	memcpy(b->lo, blo, sizeof(blo));
-	memcpy(b->hi, bhi, sizeof(bhi));
-	memcpy(lo, blo, sizeof(blo));
-	memcpy(hi, bhi, sizeof(bhi));
-	return 1;
-}
-
-// A vertex where the GPU culls right (out: vertexClip's)
-static inline int clipSafe(const float *c) {
-	return c[2] > 0.0f && c[0] >= -CULL_RANGE * c[2] && c[0] <= (960.0f + CULL_RANGE) * c[2] &&
-	       c[1] >= -CULL_RANGE * c[2] && c[1] <= (544.0f + CULL_RANGE) * c[2];
-}
-
-/*
-	The triangles of a small primitive with a vertex where the GPU culls
-	wrong, culled here as the PSP does (PPSSPP's software renderer): all
-	behind the camera, or any with the depth clip off (the depth clamped),
-	none drawn; else culled by their winding on the screen (with each
-	vertex's position times w: cull_clip, by the primitive's vertex). The
-	GPU's culling off for it.
-*/
-#define CULL_SMALL 96 // vertices: a primitive this small looked at vertex by vertex
-static float cull_clip[CULL_SMALL][3];
+#define CULL_STORE 16384 // vertices of a primitive culled here at most (bigger ones: drawn without culling)
+static float cull_clip[CULL_STORE][4]; // by the primitive's vertex: vertexClip's
 static uint16_t cull_local[GE_SGX_MAX_DRAW_VERTICES]; // a local vertex's primitive vertex
 
-// 1: the triangle drawn (cull: GE_SGX_CULL_CW culls the ones clockwise on the screen, CCW the others)
+// z + w (the near plane's side) >= 0 for every position in -1..1 (times the morph weights), unskinned
+static int nearByFormat(const Xform *x) {
+	const GeSgxVertexLayout *l = x->l;
+	if ((l->pos_fmt != 1 && l->pos_fmt != 2) || x->skinning)
+		return 0;
+	float sp = 0.0f;
+	uint32_t k;
+	for (k = 0; k < l->morphs; k++)
+		sp += fabsf(l->morphs > 1 ? x->morph[k] : 1.0f);
+	const float *M = x->mvp;
+	return (M[14] + M[15]) - sp * (fabsf(M[2] + M[3]) + fabsf(M[6] + M[7]) + fabsf(M[10] + M[11])) > 0.0f;
+}
+
+static inline void posRead(const uint8_t *p, uint32_t fmt, float *o) {
+	if (fmt == 3) {
+		memcpy(o, p, 12);
+	} else if (fmt == 2) {
+		int16_t v[3];
+		memcpy(v, p, 6);
+		o[0] = v[0] * (1.0f / 32768.0f);
+		o[1] = v[1] * (1.0f / 32768.0f);
+		o[2] = v[2] * (1.0f / 32768.0f);
+	} else {
+		o[0] = (int8_t)p[0] * (1.0f / 128.0f);
+		o[1] = (int8_t)p[1] * (1.0f / 128.0f);
+		o[2] = (int8_t)p[2] * (1.0f / 128.0f);
+	}
+}
+
+/*
+	The pass: 1 if a vertex is past the near plane. store: each vertex's
+	vertexClip into cull_clip (by the primitive's vertex). Unskinned single
+	positions straight from the vertex range read in one go; others through
+	vertexClip.
+*/
+static int nearPass(GeSgxWalker *w, const Xform *x, const uint32_t *idx, uint32_t count, uint32_t imin, uint32_t range, int store) {
+	const GeSgxVertexLayout *l = x->l;
+	const float *M = x->mvp;
+	int past = 0;
+	uint32_t k;
+	bulk_count = 0;
+	if (!x->skinning && l->morphs == 1 && range * l->size <= BULK_BYTES && bulkLoad(w, l, imin, range)) {
+		const float Mx[4] = { x->vp_x[0] * M[0] + x->vp_x[1] * M[3], x->vp_x[0] * M[4] + x->vp_x[1] * M[7],
+		                      x->vp_x[0] * M[8] + x->vp_x[1] * M[11], x->vp_x[0] * M[12] + x->vp_x[1] * M[15] };
+		const float My[4] = { x->vp_y[0] * M[1] + x->vp_y[1] * M[3], x->vp_y[0] * M[5] + x->vp_y[1] * M[7],
+		                      x->vp_y[0] * M[9] + x->vp_y[1] * M[11], x->vp_y[0] * M[13] + x->vp_y[1] * M[15] };
+		const uint8_t *base = bulk + l->pos_off;
+		const uint32_t size = l->size, fmt = l->pos_fmt;
+		for (k = 0; k < count; k++) {
+			float p[3];
+			posRead(base + (idx[k] - imin) * size, fmt, p);
+			float cz = p[0] * M[2] + p[1] * M[6] + p[2] * M[10] + M[14];
+			float cw = p[0] * M[3] + p[1] * M[7] + p[2] * M[11] + M[15];
+			if (!(cz + cw >= 0.0f))
+				past = 1;
+			if (store) {
+				float *c = cull_clip[k];
+				c[0] = p[0] * Mx[0] + p[1] * Mx[1] + p[2] * Mx[2] + Mx[3];
+				c[1] = p[0] * My[0] + p[1] * My[1] + p[2] * My[2] + My[3];
+				c[2] = cw;
+				c[3] = cz;
+			}
+		}
+	} else if (x->skinning && l->morphs == 1 && range * l->size <= BULK_BYTES && bulkLoad(w, l, imin, range)) {
+		// Each bone and the transform as one: clip = M (sum of weight * bone * p) + M's translation
+		float B[8][4][4];
+		uint32_t j, r, i;
+		for (j = 0; j < l->weights; j++) {
+			const float *b = &x->m->bone[j * 12];
+			for (i = 0; i < 4; i++) {
+				for (r = 0; r < 4; r++)
+					B[j][i][r] = M[i] * b[r * 3] + M[4 + i] * b[r * 3 + 1] + M[8 + i] * b[r * 3 + 2];
+			}
+		}
+		const uint8_t *base = bulk;
+		const uint32_t size = l->size, fmt = l->pos_fmt, nw = l->weights;
+		for (k = 0; k < count; k++) {
+			const uint8_t *v = base + (idx[k] - imin) * size;
+			float p[3], c[4] = { M[12], M[13], M[14], M[15] };
+			posRead(v + l->pos_off, fmt, p);
+			for (j = 0; j < nw; j++) {
+				float wt = comp(v, l->wt_fmt, j, 0);
+				if (wt == 0.0f)
+					continue;
+				for (i = 0; i < 4; i++)
+					c[i] += wt * (B[j][i][0] * p[0] + B[j][i][1] * p[1] + B[j][i][2] * p[2] + B[j][i][3]);
+			}
+			if (!(c[2] + c[3] >= 0.0f))
+				past = 1;
+			if (store) {
+				float *o = cull_clip[k];
+				o[0] = x->vp_x[0] * c[0] + x->vp_x[1] * c[3];
+				o[1] = x->vp_y[0] * c[1] + x->vp_y[1] * c[3];
+				o[2] = c[3];
+				o[3] = c[2];
+			}
+		}
+	} else {
+		if (range * l->size <= BULK_BYTES)
+			bulkLoad(w, l, imin, range);
+		for (k = 0; k < count; k++) {
+			float c[4];
+			if (!vertexClip(w, x, idx[k], c)) {
+				c[0] = c[1] = c[3] = 0.0f;
+				c[2] = 1.0f;
+			}
+			if (!(c[3] + c[2] >= 0.0f))
+				past = 1;
+			if (store)
+				memcpy(cull_clip[k], c, sizeof(c));
+		}
+	}
+	bulk_count = 0;
+	return past;
+}
+
+/*
+	1: the triangle drawn (cull: GE_SGX_CULL_CW culls the ones clockwise on
+	the screen, CCW the others). The GE: all past the near plane, none of
+	it drawn; the depth clip off, a vertex behind the camera (w <= 0)
+	culls it; else culled by its winding on the screen after clipping at
+	the near plane: the sign of the determinant of its vertices' screen
+	positions times w and w (the same for any part of it in front of the
+	camera: homogeneous rasterization)
+*/
 static int cullKeep(const float *a, const float *b, const float *c, int cull, int clip) {
-	int behind = !(a[2] > 0.0f) + !(b[2] > 0.0f) + !(c[2] > 0.0f);
-	if (behind == 3 || (behind && !clip))
+	if (!(a[3] + a[2] >= 0.0f) && !(b[3] + b[2] >= 0.0f) && !(c[3] + c[2] >= 0.0f))
+		return 0;
+	if (!clip && !(a[2] > 0.0f && b[2] > 0.0f && c[2] > 0.0f))
 		return 0;
 	// The screen's y goes down: positive is clockwise
 	float det = a[0] * (b[1] * c[2] - c[1] * b[2]) - a[1] * (b[0] * c[2] - c[0] * b[2]) + a[2] * (b[0] * c[1] - c[0] * b[1]);
@@ -1984,7 +1926,6 @@ void geSgxBuildReset(void) {
 static void clutCacheReset(void);
 void geSgxBuildWalkerReset(void) {
 	clutCacheReset();
-	memset(cull_boxes, 0, sizeof(cull_boxes));
 }
 
 void geSgxBuildFinish(GeSgxWalker *w) {
@@ -2258,47 +2199,17 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		}
 	}
 
-	/*
-		Culling of a primitive that may have a vertex where the GPU culls
-		wrong (behind the camera, far off the screen): its format's box
-		(8 and 16 bit positions), else the box of its vertices (made once),
-		puts them all where it culls right; else a small one's vertices are
-		all looked at, its triangles culled here as the PSP does if one is
-		not (cullKeep); a big one drawn without culling (looking at every
-		vertex of every one was 26 ms a frame in The 3rd Birthday; 48 of
-		them spread missed the few behind the camera: the screen black).
-	*/
+	// Culling of a primitive crossing the near plane: culled here (nearPass)
 	int cpu_cull = 0, cull_mode = d.cull, depth_clip = reg(w, 0x1Cu) & 1;
-	if (d.cull != GE_SGX_CULL_NONE && !xp->through) {
-		static const float unit_lo[3] = { -1.0f, -1.0f, -1.0f }, unit_hi[3] = { 1.0f, 1.0f, 1.0f };
+	if (d.cull != GE_SGX_CULL_NONE && !xp->through && !nearByFormat(xp)) {
 		uint32_t t_cull = clk ? clk() : 0;
-		float lo[3], hi[3];
-		int safe = (l->pos_fmt == 1 || l->pos_fmt == 2) && safeInBox(xp, unit_lo, unit_hi);
-		if (!safe) {
-			f->cull_checked++;
-			safe = cullBox(w, l, imin, range, lo, hi, &f->cull_vertices) && safeInBox(xp, lo, hi);
-		}
-		if (!safe && count <= CULL_SMALL) {
-			uint32_t k;
-			int unread = 0;
-			safe = 1;
-			bulk_count = 0;
-			for (k = 0; k < count; k++) {
-				float *c = cull_clip[k];
-				if (!vertexClip(w, xp, prim_index[k], c)) {
-					unread = 1;
-					c[0] = c[1] = 0.0f;
-					c[2] = 1.0f;
-				}
-				if (!clipSafe(c))
-					safe = 0;
-			}
-			f->cull_vertices += count;
-			cpu_cull = !safe && !unread;
-		}
-		if (!safe) {
+		int store = count <= CULL_STORE;
+		f->cull_checked++;
+		f->cull_vertices += count;
+		if (nearPass(w, xp, prim_index, count, imin, range, store)) {
 			d.cull = GE_SGX_CULL_NONE;
-			if (!cpu_cull)
+			cpu_cull = store;
+			if (!store)
 				f->cull_off++;
 		}
 		if (clk)

@@ -1150,6 +1150,9 @@ static void testDepthRange(void) {
 	v2 behind; (v0, v1, v2) is counterclockwise on the screen, culled by
 	CULL 1, (v1, v0, v2) drawn. Depth clip off: none of them drawn.
 */
+/* A perspective projection, near 1, far 100 (w = -z, the near plane at z = -1) */
+static const float persp[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -101.0f / 99.0f, -1, 0, 0, -200.0f / 99.0f, 0 };
+
 static void cullBehindRun(int clip, int big) {
 	resetFrame();
 	uint32_t v = 0x08900000;
@@ -1185,6 +1188,7 @@ static void cullBehindRun(int clip, int big) {
 	}
 	L l = { 0x08800000 };
 	setup3D(&l);
+	matrix(&l, 0x3E, persp, 16);
 	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
 	emit(&l, C(0x10, 0x080000));
 	emit(&l, C(0x1C, clip));
@@ -1215,19 +1219,53 @@ static void testCullBehind(void) {
 	cullBehindRun(0, 0);
 	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_dropped == 2,
 	      "clip off: draws %u dropped %u", frame.ndraws, frame.cull_dropped);
-	/* big, one crossing the camera (a sample of the vertices missed it): its box shows it, drawn without culling */
+	/* big, one crossing the camera (a sample of the vertices missed it): every vertex looked at, culled here */
 	cullBehindRun(1, 1);
-	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_NONE && fdraws[0].count == 603 && frame.cull_off == 1 && frame.cull_cpu == 0,
-	      "big: draws %u cull %u count %u off %u cpu %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.ndraws ? fdraws[0].count : 0, frame.cull_off, frame.cull_cpu);
-	/* big, all in front: its box made once (its vertices read), then known; culled by the GPU */
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_NONE && fdraws[0].count == 3 && frame.cull_cpu == 1 && frame.cull_dropped == 200,
+	      "big: draws %u cull %u count %u cpu %u dropped %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.ndraws ? fdraws[0].count : 0, frame.cull_cpu, frame.cull_dropped);
+	/* big, all in front of the near plane: culled by the GPU */
 	cullBehindRun(1, 2);
-	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_off == 0 && frame.cull_vertices == 603,
-	      "big in front: draws %u cull %u off %u read %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.cull_off, frame.cull_vertices);
-	cullBehindRun(1, 2);
-	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_vertices == 0, "box known: cull %u read %u", frame.ndraws ? fdraws[0].cull : 9, frame.cull_vertices);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_cpu == 0 && frame.cull_vertices == 603,
+	      "big in front: draws %u cull %u cpu %u read %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.cull_cpu, frame.cull_vertices);
 }
 
-/* 16 bit positions: in front of the camera by their bound alone (no vertex looked at), or looked at when near it */
+/* The same as cullBehindRun's small ones, skinned (a bone moving them by -1 in z, the positions +1) */
+static void testCullSkinned(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	static const float pos[9][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 },
+	                                 { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, 3 },
+	                                 { 1, 1, -2 }, { 0, 0, -2 }, { -1, 1, 3 } };
+	int i;
+	for (i = 0; i < 9; i++) {
+		w32(v + i * 16, 128);                   // weight 1.0
+		wf(v + i * 16 + 4, pos[i][0]);
+		wf(v + i * 16 + 8, pos[i][1]);
+		wf(v + i * 16 + 12, pos[i][2] + 1.0f);
+	}
+	static const float bone[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1 };
+	L l = { 0x08800000 };
+	setup3D(&l);
+	matrix(&l, 0x3E, persp, 16);
+	matrix(&l, 0x2A, bone, 12);
+	emit(&l, C(0x12, VT_WT8 | VT_POSF));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x1C, 1));
+	emit(&l, C(0x1D, 1));
+	emit(&l, C(0x9B, 1));
+	for (i = 0; i < 3; i++) {
+		emit(&l, C(0x01, 0x900000 + i * 48));
+		emit(&l, C(0x04, (3u << 16) | 3));
+	}
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 2 && fdraws[0].cull == GE_SGX_CULL_CCW && fdraws[1].cull == GE_SGX_CULL_NONE && frame.cull_cpu == 2 && frame.cull_dropped == 1,
+	      "skinned: draws %u cull %u %u cpu %u dropped %u", frame.ndraws, frame.ndraws > 0 ? fdraws[0].cull : 9,
+	      frame.ndraws > 1 ? fdraws[1].cull : 9, frame.cull_cpu, frame.cull_dropped);
+}
+
+/* 16 bit positions: in front of the near plane by their bound alone (no vertex looked at), or looked at when near it */
 static void testCullFormatBound(void) {
 	int near;
 	for (near = 0; near < 2; near++) {
@@ -1238,9 +1276,10 @@ static void testCullFormatBound(void) {
 		for (i = 0; i < 3; i++)
 			for (k = 0; k < 3; k++)
 				w16(v + i * 6 + k * 2, (uint16_t)pos[i][k]);
-		const float world[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, near ? -0.5f : -10.0f };
+		const float world[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, near ? -1.2f : -10.0f };
 		L l = { 0x08800000 };
 		setup3D(&l);
+		matrix(&l, 0x3E, persp, 16);
 		matrix(&l, 0x3A, world, 12);
 		emit(&l, C(0x12, VT_POS16));
 		emit(&l, C(0x10, 0x080000));
@@ -2077,6 +2116,7 @@ int main(void) {
 	testDepthRange();
 	testCullBehind();
 	testCullFormatBound();
+	testCullSkinned();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();

@@ -195,10 +195,10 @@ typedef struct {
 	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t skipped_range; // primitives past the depth range (MINZ, MAXZ): no pixel drawn
-	uint32_t cull_off;      // culled primitives drawn without culling (a vertex maybe where the GPU culls wrong, too big to look at)
-	uint32_t cull_checked;  // culled primitives their format's box could not put where the GPU culls right
-	uint32_t cull_vertices; // vertices read for them (boxes made, small ones looked at)
-	uint32_t cull_cpu;      // primitives culled here triangle by triangle (as the PSP), the GPU's culling off
+	uint32_t cull_off;      // culled primitives crossing the near plane drawn without culling (too big to cull here)
+	uint32_t cull_checked;  // culled primitives their format's bound could not put in front of the near plane: every vertex's clip position
+	uint32_t cull_vertices; // their vertices
+	uint32_t cull_cpu;      // primitives crossing the near plane culled here triangle by triangle (as the GE), the GPU's culling off
 	uint32_t cull_dropped;  // their triangles not drawn
 	uint32_t us_cull;       // looking at their vertices (sampled, as the other us_)
 	uint32_t asked; // the frame of an asked trace (L + SELECT): its number, the renderer traces it too
