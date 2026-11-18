@@ -332,13 +332,11 @@ int geSgxCgAllKeys(uint32_t *keys, int max) {
 							key |= (1u << 6) | ((uint32_t)atests[atest] << 7);
 						ADD(key);
 						ADD(key | (1u << 12)); // with the exact scissor
-						// Fixed blend factors (modulate and untextured, no exact scissor)
-						if (tfunc == 0 && !dbl) {
-							ADD(key | (1u << 14));
-							ADD(key | (1u << 15));
-							ADD(key | (1u << 14) | (1u << 15));
-							ADD(key | (1u << 16));
-						}
+						// Blend factors made in the program: fixed colours, doubled source alpha
+						ADD(key | (1u << 14));
+						ADD(key | (1u << 15));
+						ADD(key | (1u << 14) | (1u << 15));
+						ADD(key | (1u << 16)); // (rarer ones are asked for by the renderer: GE_SGX_CG_REQUEST)
 					}
 				}
 			}

@@ -223,8 +223,34 @@ static void compileSgxShaders(void) {
 	if (!requested && sgxRendererOption() < 2)
 		return;
 
-	static uint32_t keys[1024];
-	int n = geSgxCgAllKeys(keys, 1024);
+	static uint32_t keys[4096];
+	int n = geSgxCgAllKeys(keys, 4096 - 256);
+	if (n > 4096 - 256)
+		n = 4096 - 256;
+	// The keys the renderer asked for (one per line, hex), not in the list
+	if (requested) {
+		static char req[4096];
+		SceUID rfd = sceIoOpen(GE_SGX_CG_REQUEST, SCE_O_RDONLY, 0);
+		int len = rfd >= 0 ? sceIoRead(rfd, req, sizeof(req) - 1) : 0;
+		if (rfd >= 0)
+			sceIoClose(rfd);
+		req[len > 0 ? len : 0] = '\0';
+		char *s = req;
+		while (*s && n < 4096) {
+			char *end;
+			uint32_t k = (uint32_t)strtoul(s, &end, 16);
+			if (end == s) {
+				s++;
+				continue;
+			}
+			s = end;
+			int j, have = 0;
+			for (j = 0; j < n && !have; j++)
+				have = keys[j] == k;
+			if (!have && k != 0 && k != 1)
+				keys[n++] = k;
+		}
+	}
 	int i, missing = 0;
 	char path[96], mark[104];
 	/*

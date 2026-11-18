@@ -188,6 +188,12 @@ typedef struct {
 		uint32_t offset, vaddr, iaddr;
 		GeSgxMatrices mtx;
 	} ctx;
+	// The state before the walk of the first list went on (put back when it turns out bad)
+	struct {
+		uint32_t regs[256];
+		uint32_t offset, vaddr, iaddr;
+		GeSgxMatrices mtx;
+	} before;
 	GeSgxMatrices mtx;
 
 	// Vertex layout of regs[VERTEXTYPE], computed when first needed

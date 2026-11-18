@@ -1160,6 +1160,18 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 	w->page_ptr = NULL;
 
 	while (w->count > 0) {
+		/*
+			A list read as garbage (rewritten, or an address past the
+			memory) set registers from it the GE never had: an offset of
+			0x03000000 sent every call of Black Rock Shooter's next lists
+			past RAM, all of them bad from then on, the PSP's picture shown
+			for good. The state from before it is put back.
+		*/
+		memcpy(w->before.regs, w->regs, sizeof(w->regs));
+		w->before.offset = w->offset;
+		w->before.vaddr = w->vaddr;
+		w->before.iaddr = w->iaddr;
+		w->before.mtx = w->mtx;
 		int res = walkList(w, &w->lists[0]);
 		if (res == WALK_STALLED)
 			break;
@@ -1173,6 +1185,12 @@ void geSgxWalkerRun(GeSgxWalker *w) {
 			w->last_bad.start = l->start;
 			w->last_bad.pc = l->pc;
 			w->last_bad.depth = (uint32_t)l->depth;
+			memcpy(w->regs, w->before.regs, sizeof(w->regs));
+			w->offset = w->before.offset;
+			w->vaddr = w->before.vaddr;
+			w->iaddr = w->before.iaddr;
+			w->mtx = w->before.mtx;
+			w->state_dirty = 1;
 		}
 		else {
 			w->stats.lists++;

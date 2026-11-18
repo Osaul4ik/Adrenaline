@@ -912,6 +912,7 @@ static struct {
 	uint32_t aref, color, tfmt; // alpha test reference; first CPU vertex colour; texture format
 	uint32_t colors[3];         // the next three vertices' colours
 	uint32_t tsize, topaque;    // texture: w | h << 16; texels with alpha > 0 (palette textures)
+	uint32_t pblend, fix_a, fix_b; // the PSP's BLENDMODE and fixed colours
 	int active;
 } run;
 
@@ -919,10 +920,11 @@ static void runFlush(void) {
 	if (!run.active)
 		return;
 	run.active = 0;
-	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X | vertex %s%04X | texture %s%X"
+	rtraceAdd("GeSgx R:   draws %u-%u (%u, %u gpu, %u vertices): %s | fragment %04X blend %08X (psp %03X fix %06X %06X) | vertex %s%04X | texture %s%X"
 		" | flags %04X ztest %u cmask %u prim %u cull %u texmode %X | stencil %08X | scissor %u,%u-%u,%u | z %d-%d xy %d,%d-%d,%d | aref %u colour %08X %08X %08X %08X tex format %08X %ux%u, alpha > 0 in %u texels\n",
 		(unsigned)run.first, (unsigned)run.last, (unsigned)(run.last - run.first + 1), (unsigned)run.n3d, (unsigned)run.verts,
-		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
+		outcome_names[run.outcome], (unsigned)run.fkey, (unsigned)run.blend, (unsigned)(run.pblend & 0xFFF), (unsigned)(run.fix_a & 0xFFFFFF),
+		(unsigned)(run.fix_b & 0xFFFFFF), run.vkey ? "gpu " : "cpu", (unsigned)run.vkey,
 		(run.tex & 0x80000000u) ? "fb " : (run.tex & 0x40000000u) ? "depth of fb " : (run.tex ? "id " : "none "), (unsigned)(run.tex & 0x3FFFFFFFu),
 		(unsigned)run.flags, (unsigned)(run.zs & 0xFF), (unsigned)((run.zs >> 8) & 0xFF), (unsigned)((run.zs >> 16) & 0xF), (unsigned)((run.zs >> 20) & 0xF),
 		(unsigned)(run.zs >> 24), (unsigned)run.stencil,
@@ -986,6 +988,9 @@ static void drawOutcome(GeSgxRenderStats *stats, uint32_t outcome, const GeSgxDr
 		run.colors[0] = run.colors[1] = run.colors[2] = 0;
 		run.tfmt = 0;
 		run.tsize = run.topaque = 0;
+		run.pblend = (d->flags & GE_SGX_DRAW_BLEND) ? d->blend : 0;
+		run.fix_a = d->fix_a;
+		run.fix_b = d->fix_b;
 		if ((d->flags & GE_SGX_DRAW_TEXTURED) && !d->fbtex) {
 			const SceGxmTexture *gt = geSgxTexGet(d->texture);
 			if (gt) {

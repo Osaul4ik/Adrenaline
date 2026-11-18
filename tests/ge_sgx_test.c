@@ -215,6 +215,29 @@ static void testStall(void) {
 	CHECK(n == 1 && st.lists == 2, "rects %d lists %u", n, st.lists);
 }
 
+/* A bad list's registers are not kept: its garbage offset sent the next list's calls past RAM (Black Rock Shooter) */
+static void testBadListState(void) {
+	reset();
+	L a = { 0x08800000 };
+	emit(&a, C(0x10, 0x080000));
+	emit(&a, C(0x13, 0x030000));       // offset 0x03000000 (garbage)
+	emit(&a, C(0x9D, 0x77));
+	emit(&a, C(0x08, 0xF00000));       // JUMP 0x08F00000 + offset: past RAM
+	L b = { 0x08810000 };
+	emit(&b, C(0x10, 0x080000));
+	emit(&b, C(0x0A, 0x820000));       // CALL 0x08820000
+	emit(&b, C(0x0C, 0));
+	L sub = { 0x08820000 };
+	emit(&sub, C(0x9C, 0x123));
+	emit(&sub, C(0x0B, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerList(w, 2, 0x08810000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(w->stats.bad == 1 && w->stats.lists == 1, "bad %u lists %u", w->stats.bad, w->stats.lists);
+	CHECK(geSgxReg(w, 0x9C) == 0x123 && geSgxReg(w, 0x9D) != 0x77 && w->offset == 0, "next list called: fbp %x fbw %x offset %x",
+	      geSgxReg(w, 0x9C), geSgxReg(w, 0x9D), w->offset);
+}
+
 static void testCallJumpOrigin(void) {
 	reset();
 	// main: CALL sub (relative to BASE), JUMP to tail, (skipped NOP area), tail: END
@@ -1710,6 +1733,7 @@ int main(void) {
 	testFbTexture();
 	testStencil5551();
 	testCull();
+	testBadListState();
 	testDepthRange();
 	testFbTextureGenerated();
 	testTransferAlias();

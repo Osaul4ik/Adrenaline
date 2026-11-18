@@ -177,16 +177,24 @@ static SceGxmProgram *compile(uint32_t key) {
 	return program;
 }
 
-// The compiler cannot be loaded here: the Adrenaline app compiles at its next start
-static void requestCompile(void) {
+/*
+	The compiler cannot be loaded here: the Adrenaline app compiles at its
+	next start. The keys it has no program for are written into the request
+	(one per line, in hex): it compiles them along with its own list (a key
+	missing from that list was never made: The 3rd Birthday's shop
+	background, drawn with doubled alpha factors, was left out).
+*/
+static void requestCompile(uint32_t key) {
 	sceIoMkdir("ux0:data/adrenaline", 0777);
 	sceIoMkdir(GE_SGX_CG_DIR, 0777);
-	SceUID fd = sceIoOpen(GE_SGX_CG_REQUEST, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+	SceUID fd = sceIoOpen(GE_SGX_CG_REQUEST, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
 	if (fd >= 0) {
-		sceIoWrite(fd, "1", 1);
+		char line[16];
+		int len = snprintf(line, sizeof(line), "%X\n", (unsigned)key);
+		sceIoWrite(fd, line, len);
 		sceIoClose(fd);
 	}
-	GeSgxLog("GeSgx shader: shaders requested from the Adrenaline app (restart Adrenaline once)\n");
+	GeSgxLog("GeSgx shader %04X: requested from the Adrenaline app (restart Adrenaline once)\n", (unsigned)key);
 }
 
 static Program *find(uint32_t key) {
@@ -228,10 +236,10 @@ static int CompilerThread(SceSize args, void *argp) {
 					int r = loadCompiler();
 					stats.compiler = r == 1 ? 1 : r;
 					GeSgxLog("GeSgx shader: compiler load %08X\n", (unsigned)r);
-					if (r != 1 && !compile_requested) {
-						compile_requested = 1;
-						requestCompile();
-					}
+				}
+				if (stats.compiler != 1 && compile_requested < 64) {
+					compile_requested++;
+					requestCompile(key);
 				}
 
 				SceGxmProgram *program = NULL;

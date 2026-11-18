@@ -1959,7 +1959,8 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		GPU path's draws included: what the trace of the renderer cannot know
 		of them (The 3rd Birthday's HUD and fog, drawn but not seen)
 	*/
-	if (w->trace && !xp->through && trace_vertex_lines < 360 && count) {
+	// (the first 120 draws, then small ones: HUD quads, particles, the full screen passes)
+	if (w->trace && !xp->through && (trace_vertex_lines < 120 || (count <= 8 && trace_vertex_lines < 380)) && count) {
 		char line[400];
 		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X z range %u-%u cull %u/%u |", (unsigned)f->ndraws, (unsigned)type,
 			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF), (unsigned)(reg(w, GE_CMD_MINZ) & 0xFFFF),
