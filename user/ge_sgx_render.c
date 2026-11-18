@@ -788,7 +788,7 @@ static Target *getTarget(uint32_t fb, int w, int h) {
 */
 static void setViewport(SceGxmContext *ctx);
 
-static void stencilToAlpha(SceGxmContext *ctx, const Target *t, int fmt5551) {
+static void stencilToAlpha(SceGxmContext *ctx, int tw, int th, int fmt5551) {
 	GeSgxDraw d;
 	memset(&d, 0, sizeof(d)); // untextured, the vertex colour
 	FragmentProgram *set = fragmentProgramBlend(&d, vertex_gxp, 0, BLEND_ALPHA_SET);
@@ -833,7 +833,7 @@ static void stencilToAlpha(SceGxmContext *ctx, const Target *t, int fmt5551) {
 	sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
 	sceGxmSetCullMode(ctx, SCE_GXM_CULL_NONE);
 	sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
-	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, t->w - 1, t->h - 1);
+	sceGxmSetRegionClip(ctx, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, tw - 1, th - 1);
 	sceGxmSetVertexProgram(ctx, vertex_program);
 	for (p = 0; p <= npass; p++) {
 		if (p == 0) {
@@ -1388,9 +1388,39 @@ static void renderDraws(SceGxmContext *ctx, const GeSgxFrameData *frame, uint32_
 	int scissor_empty = 0;
 	const SceGxmFragmentProgram *last_fp = NULL;
 	uint32_t i;
+	// The rendering's alpha may not be its stencil (draws changed the stencil since it was copied)
+	int stencil_dirty = 1;
 
 	for (i = first; i < last; i++) {
 		const GeSgxDraw *d = &frame->draws[i];
+
+		/*
+			A draw blending with the framebuffer's alpha reads the PSP's
+			stencil: the stencil copied into the alpha first when draws
+			changed it (in this scene, or before it)
+		*/
+		if ((d->flags & GE_SGX_DRAW_BLEND) && (d->flags & GE_SGX_DRAW_FB_ALPHA) && !(d->flags & GE_SGX_DRAW_CLEAR) && stencil_dirty) {
+			uint32_t fs = d->blend & 0xF, fd = (d->blend >> 4) & 0xF;
+			if (fs == 4 || fs == 5 || fs == 8 || fs == 9 || fd == 4 || fd == 5 || fd == 8 || fd == 9) {
+				stencilToAlpha(ctx, tw, th, d->fbfmt == 1);
+				stencil_dirty = 0;
+				stats->stencil_copies++;
+				// The state it set: set again for the next draw
+				sceGxmSetFrontDepthFunc(ctx, SCE_GXM_DEPTH_FUNC_ALWAYS);
+				sceGxmSetFrontDepthWriteEnable(ctx, SCE_GXM_DEPTH_WRITE_DISABLED);
+				last_zfunc = SCE_GXM_DEPTH_FUNC_ALWAYS;
+				last_zwrite = 0;
+				sceGxmSetFrontPolygonMode(ctx, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+				last_poly = SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
+				last_vp = vertex_program;
+				last_stencil = 0xFFFFFFFFu;
+				last_scissor[0] = last_scissor[1] = last_scissor[2] = last_scissor[3] = -1;
+				last_fp = NULL;
+			}
+		}
+		// Writes the stencil: the alpha is not it any more (a clear writes both alike)
+		if (!(d->flags & GE_SGX_DRAW_CLEAR) && d->sfunc != 0xFF && (d->sops & 0xFFF) != 0)
+			stencil_dirty = 1;
 
 		// Debug mode (R + SELECT): one feature off for every draw, to see what hides something
 		GeSgxDraw dbg;
@@ -1872,7 +1902,7 @@ vita2d_texture *geSgxRenderFrame(SceGxmContext *ctx, const GeSgxFrameData *frame
 			for (k = j; k < frame->ndraws && !sampled_later; k++)
 				sampled_later = frame->draws[k].fbtex == dfb + 1;
 			if (sampled_later) {
-				stencilToAlpha(ctx, t, frame->draws[i].fbfmt == 1);
+				stencilToAlpha(ctx, t->w, t->h, frame->draws[i].fbfmt == 1);
 				rtraceAdd("GeSgx R:   its stencil copied into its alpha (read as a texture)\n");
 			}
 		}

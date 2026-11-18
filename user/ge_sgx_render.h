@@ -32,6 +32,7 @@ typedef struct {
 	uint32_t other_fb; // draws into other framebuffers (not shown)
 	uint32_t gpu_draws; // with the GPU transform
 	uint32_t render_us;
+	uint32_t stencil_copies; // stencil copied into alpha before draws blending with it
 	// Draws not drawn, by reason (GE_SGX_SKIP_*)
 	uint32_t skipped[6];
 } GeSgxRenderStats;

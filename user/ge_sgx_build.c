@@ -2122,6 +2122,20 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		// 5551: one bit of stencil, the value's top bit, read as 0 or 0xFF (stencil5551)
 		if (d.fbfmt == 1)
 			d.sref = (d.sref & 0x80) ? 0xFF : 0x00;
+		/*
+			The alpha it writes into the rendering, as the framebuffer keeps
+			it: 5551 its one bit (0 or 0xFF), 4444 its top four bits. Raw, a
+			5551 clear to alpha 0x40 left alpha a quarter (the PSP's 0), and
+			the menus blended with the framebuffer's alpha were see-through
+			(Black Rock Shooter's item menu)
+		*/
+		if (d.fbfmt == 1 || d.fbfmt == 2) {
+			for (i = 0; i < nv; i++) {
+				uint32_t a = vout[i].color >> 24;
+				a = d.fbfmt == 1 ? ((a & 0x80) ? 0xFF : 0x00) : ((a >> 4) * 0x11);
+				vout[i].color = (vout[i].color & 0x00FFFFFFu) | (a << 24);
+			}
+		}
 	}
 
 	if (!gpu) {

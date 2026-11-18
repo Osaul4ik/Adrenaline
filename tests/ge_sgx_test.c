@@ -1220,6 +1220,7 @@ static void testStencil5551(void) {
 	if (frame.ndraws == 3) {
 		GeSgxDraw *c = &fdraws[0], *i = &fdraws[1], *d = &fdraws[2];
 		CHECK(c->fbfmt == 1 && c->sref == 0x00, "clear fmt %u ref %X", c->fbfmt, c->sref);
+		CHECK((fverts[c->base + fidx[c->first]].color >> 24) == 0x00, "clear alpha as kept: %08X", fverts[c->base + fidx[c->first]].color);
 		CHECK(i->sops == 0x200 && i->sref == 0xFF && i->swmask == 0xFF, "increment: ops %X ref %X wmask %X", i->sops, i->sref, i->swmask);
 		CHECK(d->sops == 0x100 && d->sref == 0x01, "decrement: ops %X ref %X", d->sops, d->sref);
 	}

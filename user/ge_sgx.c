@@ -160,6 +160,19 @@ static inline void applyOverlay(uint8_t *dst, uint32_t block) {
 	}
 }
 
+// The cached blocks of the overlays' memory read again (the others kept: a new epoch copied every block anew, at every signal)
+static void overlayBlocksStale(void) {
+	uint32_t k;
+	for (k = 0; k < noverlays; k++) {
+		uint32_t b = overlays[k].addr & ~(uint32_t)(GE_SGX_BLOCK_SIZE - 1);
+		for (; b < overlays[k].addr + overlays[k].len; b += GE_SGX_BLOCK_SIZE) {
+			uint32_t i = (b / GE_SGX_BLOCK_SIZE) & (BLOCK_CACHE_ENTRIES - 1);
+			if (block_tag[i] == (b | 1))
+				block_tag[i] = 0;
+		}
+	}
+}
+
 /*
 	A copy record (the PSP side's captureSegment): the event's seq, the
 	number of pieces, then each piece's address, words and words
@@ -1480,7 +1493,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 							const uint32_t *rec = (const uint32_t *)ScePspemuConvertAddress(shadow_addr + off * 4, KERMIT_INPUT_MODE, words * 4);
 							if (rec && takeOverlays(rec, words, e->seq)) {
 								overlays_used++;
-								epoch++; // blocks read before are read again, with them
+								overlayBlocksStale(); // read again, with them
 							} else {
 								overlays_stale++;
 							}
@@ -1492,8 +1505,8 @@ static int GeSgxThread(SceSize args, void *argp) {
 						geSgxWalkerSignal(&walker, e->b);
 					noteListDone();
 					if (noverlays) {
+						overlayBlocksStale(); // the memory as it is again
 						noverlays = 0;
-						epoch++;
 					}
 					// Read up to here: the PSP side waits for it in the GE's interrupt
 					writeAck(session, read + i + 1);
