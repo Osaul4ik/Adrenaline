@@ -1570,6 +1570,16 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 	frame are found again. dst keeps the source's alignment modulo 16.
 */
 #define RAW_DONE 16
+/*
+	Room after the code: vita-elf-create puts the module's SCE data at the
+	end of segment 0, before segment 1 (the data). With the code ending
+	3.7 KB short of segment 1 it failed ("Cannot allocate 3748 bytes for SCE
+	data at end of segment 0; segment 1 overlaps"); this read-only block
+	moves the code's end past that boundary. If the error comes back, the
+	code has grown up to the next one: make this bigger or smaller.
+*/
+__attribute__((used)) static const uint8_t segment_room[8192] = { 1 };
+
 static GeSgxFrameData *raw_frame = NULL;
 static struct { uint32_t src, len, dst; } raw_done[RAW_DONE];
 static int raw_ndone = 0, raw_next = 0;
