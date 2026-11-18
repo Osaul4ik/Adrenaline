@@ -96,22 +96,12 @@ static int vram_want_dirty = 0;
 // Pages wanted only for the PSP's picture of an asked trace (framebuffers): not wanted again after it
 static uint32_t picture_pages[GE_SGX_VRAM_PAGES / 32];
 
-/*
-	The flip a page was last read at: pages not read for VRAM_UNWANT_FLIPS
-	are not wanted any more (the PSP side copied every page ever read at
-	every flip: 1.2 MB, 3 ms of the game's time a frame in The 3rd Birthday)
-*/
-#define VRAM_UNWANT_FLIPS 180
-static uint16_t vram_used[GE_SGX_VRAM_PAGES];
-static uint16_t vram_flips = 0;
-
 static inline void wantVram(uint32_t off, uint32_t size) {
 	uint32_t p = off / GE_SGX_VRAM_PAGE, last = (off + (size ? size : 1) - 1) / GE_SGX_VRAM_PAGE;
 	if (last >= GE_SGX_VRAM_PAGES)
 		last = GE_SGX_VRAM_PAGES - 1;
 	for (; p <= last; p++) {
 		uint32_t bit = 1u << (p % 32);
-		vram_used[p] = vram_flips;
 		picture_pages[p / 32] &= ~bit; // wanted for itself now
 		if (!(vram_want[p / 32] & bit)) {
 			vram_want[p / 32] |= bit;
@@ -1541,18 +1531,6 @@ static int GeSgxThread(SceSize args, void *argp) {
 					noteListDone();
 					break;
 				case GE_SGX_EVENT_FLIP: {
-					// Pages long unread: not copied any more
-					if ((++vram_flips & 31) == 0) {
-						uint32_t p;
-						for (p = 0; p < GE_SGX_VRAM_PAGES; p++) {
-							uint32_t bit = 1u << (p % 32);
-							if ((vram_want[p / 32] & bit) && !(picture_pages[p / 32] & bit) &&
-							    (uint16_t)(vram_flips - vram_used[p]) > VRAM_UNWANT_FLIPS) {
-								vram_want[p / 32] &= ~bit;
-								vram_want_dirty = 1;
-							}
-						}
-					}
 					// No wait for the GE in this frame: its lists walked now (the ones after a wait are the next frame's)
 					if ((!walk_late || !synced_since_flip) && walker.count)
 						walkAll();
