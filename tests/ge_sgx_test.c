@@ -1143,13 +1143,21 @@ static void testDepthRange(void) {
 	CHECK(frame.ndraws == 1 && frame.skipped_range == 1, "depth range: draws %u past %u", frame.ndraws, frame.skipped_range);
 }
 
-/* Culling: off for a primitive with a vertex behind the camera, on for one in front */
-static void testCullBehind(void) {
+/*
+	Culling of a primitive with a vertex behind the camera: its triangles
+	culled here as the PSP does (the GPU's culling off), the ones in front
+	left to the GPU. The camera looks down -z (w = -z): v0, v1 in front,
+	v2 behind; (v0, v1, v2) is counterclockwise on the screen, culled by
+	CULL 1, (v1, v0, v2) drawn. Depth clip off: none of them drawn.
+*/
+static void cullBehindRun(int clip, int big) {
 	resetFrame();
 	uint32_t v = 0x08900000;
-	static const float pos[6][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 }, { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, 3 } };
+	static const float pos[9][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 },
+	                                 { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, 3 },
+	                                 { 1, 1, -2 }, { 0, 0, -2 }, { -1, 1, 3 } };
 	int i;
-	for (i = 0; i < 6; i++) {
+	for (i = 0; i < 9; i++) {
 		wf(v + i * 24, 0.25f);
 		wf(v + i * 24 + 4, 0.75f);
 		w32(v + i * 24 + 8, 0x80FF0000u);
@@ -1157,21 +1165,89 @@ static void testCullBehind(void) {
 		wf(v + i * 24 + 16, pos[i][1]);
 		wf(v + i * 24 + 20, pos[i][2]);
 	}
+	/* big: 200 triangles in front, then one crossing the camera (a sample of the vertices missed it) */
+	uint32_t vb = 0x08910000, nb = 0;
+	if (big) {
+		int t;
+		for (t = 0; t < 201; t++) {
+			int k;
+			for (k = 0; k < 3; k++) {
+				int src = t < 200 ? k : 6 + k; /* counterclockwise ones in front (culled), then (v1, v0, v2) */
+				wf(vb + nb * 24, 0.25f);
+				wf(vb + nb * 24 + 4, 0.75f);
+				w32(vb + nb * 24 + 8, 0x80FF0000u);
+				wf(vb + nb * 24 + 12, pos[src][0]);
+				wf(vb + nb * 24 + 16, pos[src][1]);
+				wf(vb + nb * 24 + 20, pos[src][2]);
+				nb++;
+			}
+		}
+	}
 	L l = { 0x08800000 };
 	setup3D(&l);
 	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
 	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x1C, clip));
 	emit(&l, C(0x1D, 1));
 	emit(&l, C(0x9B, 1));
-	emit(&l, C(0x01, 0x900000));
-	emit(&l, C(0x04, (3u << 16) | 3));
-	emit(&l, C(0x01, 0x900048));
-	emit(&l, C(0x04, (3u << 16) | 3));
+	if (big) {
+		emit(&l, C(0x01, 0x910000));
+		emit(&l, C(0x04, (3u << 16) | nb));
+	} else {
+		emit(&l, C(0x01, 0x900000));
+		emit(&l, C(0x04, (3u << 16) | 3));
+		emit(&l, C(0x01, 0x900048));
+		emit(&l, C(0x04, (3u << 16) | 3));
+		emit(&l, C(0x01, 0x900090));
+		emit(&l, C(0x04, (3u << 16) | 3));
+	}
 	emit(&l, C(0x0C, 0));
 	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
 	geSgxWalkerRun(w);
-	CHECK(frame.ndraws == 2 && fdraws[0].cull == GE_SGX_CULL_CCW && fdraws[1].cull == GE_SGX_CULL_NONE && frame.cull_off == 1,
-	      "draws %u cull %u %u off %u", frame.ndraws, frame.ndraws > 0 ? fdraws[0].cull : 9, frame.ndraws > 1 ? fdraws[1].cull : 9, frame.cull_off);
+}
+
+static void testCullBehind(void) {
+	cullBehindRun(1, 0);
+	CHECK(frame.ndraws == 2 && fdraws[0].cull == GE_SGX_CULL_CCW && fdraws[1].cull == GE_SGX_CULL_NONE && fdraws[1].count == 3 &&
+	      frame.cull_off == 2 && frame.cull_cpu == 2 && frame.cull_dropped == 1,
+	      "clip on: draws %u cull %u %u count %u off %u cpu %u dropped %u", frame.ndraws, frame.ndraws > 0 ? fdraws[0].cull : 9,
+	      frame.ndraws > 1 ? fdraws[1].cull : 9, frame.ndraws > 1 ? fdraws[1].count : 0, frame.cull_off, frame.cull_cpu, frame.cull_dropped);
+	cullBehindRun(0, 0);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_dropped == 2,
+	      "clip off: draws %u dropped %u", frame.ndraws, frame.cull_dropped);
+	cullBehindRun(1, 1);
+	CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_NONE && fdraws[0].count == 3 && frame.cull_dropped == 200,
+	      "big: draws %u cull %u count %u dropped %u", frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.ndraws ? fdraws[0].count : 0, frame.cull_dropped);
+}
+
+/* 16 bit positions: in front of the camera by their bound alone (no vertex looked at), or looked at when near it */
+static void testCullFormatBound(void) {
+	int near;
+	for (near = 0; near < 2; near++) {
+		resetFrame();
+		uint32_t v = 0x08900000;
+		static const int16_t pos[3][3] = { { 0, 0, 0 }, { 1000, 1000, 0 }, { -1000, 1000, 0 } };
+		int i, k;
+		for (i = 0; i < 3; i++)
+			for (k = 0; k < 3; k++)
+				w16(v + i * 6 + k * 2, (uint16_t)pos[i][k]);
+		const float world[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, near ? -0.5f : -10.0f };
+		L l = { 0x08800000 };
+		setup3D(&l);
+		matrix(&l, 0x3A, world, 12);
+		emit(&l, C(0x12, VT_POS16));
+		emit(&l, C(0x10, 0x080000));
+		emit(&l, C(0x1C, 1));
+		emit(&l, C(0x1D, 1));
+		emit(&l, C(0x9B, 1));
+		emit(&l, C(0x01, 0x900000));
+		emit(&l, C(0x04, (3u << 16) | 3));
+		emit(&l, C(0x0C, 0));
+		geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+		geSgxWalkerRun(w);
+		CHECK(frame.ndraws == 1 && fdraws[0].cull == GE_SGX_CULL_CCW && frame.cull_checked == (uint32_t)near && frame.cull_off == 0,
+		      "near %d: draws %u cull %u checked %u off %u", near, frame.ndraws, frame.ndraws ? fdraws[0].cull : 9, frame.cull_checked, frame.cull_off);
+	}
 }
 
 static void testBuild3D(void) {
@@ -1993,6 +2069,7 @@ int main(void) {
 	testListStartOffset();
 	testDepthRange();
 	testCullBehind();
+	testCullFormatBound();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();

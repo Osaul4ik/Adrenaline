@@ -817,6 +817,7 @@ static void acquireSlot(void) {
 			s->data.skipped_other = 0;
 			s->data.skipped_range = 0;
 			s->data.cull_off = 0;
+			s->data.cull_checked = s->data.cull_vertices = s->data.cull_cpu = s->data.cull_dropped = s->data.us_cull = 0;
 			s->data.asked = 0;
 			building = s;
 			walker.frame = &s->data;
@@ -1398,6 +1399,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 	uint32_t read = 0, last_lost = 0;
 	uint32_t logged_types = 0, slow_logs = 0, bad_logged = 0, bad_logs = 0;
 	uint32_t frame_stats_range = 0, frame_stats_cull_off = 0;
+	uint32_t frame_stats_cull[4] = { 0 }, built_us_cull = 0; // checked, vertices, culled here, dropped; us over the interval
 	uint32_t frame_stats_3d = 0, frame_stats_other = 0, frame_stats_draws = 0, frame_stats_verts = 0, frame_stats_indices = 0;
 	uint32_t frame_stats_gpu = 0, frame_stats_raw = 0, frame_stats_uni = 0, frame_stats_cpu[3] = { 0 };
 	uint32_t built_vertices = 0, built_states = 0, built_frames = 0, built_us[7] = { 0 }; // per log interval
@@ -1748,6 +1750,11 @@ static int GeSgxThread(SceSize args, void *argp) {
 							frame_stats_other = building->data.skipped_other;
 							frame_stats_range = building->data.skipped_range;
 							frame_stats_cull_off = building->data.cull_off;
+							frame_stats_cull[0] = building->data.cull_checked;
+							frame_stats_cull[1] = building->data.cull_vertices;
+							frame_stats_cull[2] = building->data.cull_cpu;
+							frame_stats_cull[3] = building->data.cull_dropped;
+							built_us_cull += building->data.us_cull / clock_ticks_per_us;
 							frame_stats_draws = building->data.ndraws;
 							frame_stats_verts = building->data.nvertices;
 							built_vertices += building->data.vertices_built;
@@ -1852,18 +1859,22 @@ per_second:;
 			if (walker.texture_fn && now - log_start < 1000) {
 				GeSgxTexStats ts;
 				geSgxTexStats(&ts);
-				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u, past the depth range %u, culling off %u | interval: %u frames, vertices %u, states %u, us state %u texture %u (clut %u) vertices %u (index read %u, uniforms %u) indices %u, walk %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
+				GeSgxLog("GeSgx build: draws %u verts %u indices %u 3d prims %u (gpu %u, %u KB copied vertices, %u KB uniforms; cpu: sprites %u layout %u full %u) skipped %u, past the depth range %u, culling: vertex behind the camera %u, culled here %u (triangles dropped %u), vertices looked at in %u (%u)\n",
 					(unsigned)frame_stats_draws, (unsigned)frame_stats_verts, (unsigned)frame_stats_indices, (unsigned)frame_stats_3d,
 					(unsigned)frame_stats_gpu, (unsigned)(frame_stats_raw / 1024), (unsigned)(frame_stats_uni / 1024),
 					(unsigned)frame_stats_cpu[0], (unsigned)frame_stats_cpu[1], (unsigned)frame_stats_cpu[2], (unsigned)frame_stats_other, (unsigned)frame_stats_range, (unsigned)frame_stats_cull_off,
+					(unsigned)frame_stats_cull[2], (unsigned)frame_stats_cull[3], (unsigned)frame_stats_cull[0], (unsigned)frame_stats_cull[1]);
+				// (a line of the log is 512 bytes at most)
+				GeSgxLog("GeSgx build (cont): interval: %u frames, vertices %u, states %u, us state %u texture %u (clut %u) vertices %u (index read %u, uniforms %u) indices %u, culling %u, walk %u | published %u dropped %u behind %u | tex %u (%u KB) uploads %u (%u KB, %u us) checks %u failed %u\n",
 					(unsigned)built_frames, (unsigned)built_vertices, (unsigned)built_states,
 					(unsigned)built_us[0], (unsigned)built_us[1], (unsigned)built_us[6], (unsigned)built_us[2], (unsigned)built_us[4],
-					(unsigned)built_us[5], (unsigned)built_us[3], (unsigned)interval_walk_us,
+					(unsigned)built_us[5], (unsigned)built_us[3], (unsigned)built_us_cull, (unsigned)interval_walk_us,
 					(unsigned)frames_published, (unsigned)frames_dropped, (unsigned)frames_skipped,
 					(unsigned)ts.entries, (unsigned)ts.kb, (unsigned)ts.uploads, (unsigned)ts.upload_kb, (unsigned)ts.upload_us,
 					(unsigned)ts.checks, (unsigned)ts.failed);
 				built_vertices = built_states = built_frames = 0;
 				memset(built_us, 0, sizeof(built_us));
+				built_us_cull = 0;
 				interval_walk_us = 0;
 			}
 

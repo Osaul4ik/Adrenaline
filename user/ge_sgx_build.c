@@ -683,13 +683,12 @@ static const uint8_t *vertexData(GeSgxWalker *w, const GeSgxVertexLayout *l, uin
 	Only the clip w of a vertex (3D, not through mode): morphing, skinning,
 	the 4x4 transform's last column. 0 when it cannot be read.
 */
-static float vertexW(GeSgxWalker *w, const Xform *x, uint32_t index, int *ok) {
+static int vertexModel(GeSgxWalker *w, const Xform *x, uint32_t index, float *mpos) {
 	const GeSgxVertexLayout *l = x->l;
 	uint8_t tmp[MAX_VERTEX_BYTES];
 	const uint8_t *buf = vertexData(w, l, index, tmp);
-	*ok = buf != NULL;
 	if (!buf)
-		return 0.0f;
+		return 0;
 	float pos[3] = { 0, 0, 0 }, wts[8] = { 0 };
 	uint32_t k, j;
 	for (k = 0; k < l->morphs; k++) {
@@ -704,7 +703,6 @@ static float vertexW(GeSgxWalker *w, const Xform *x, uint32_t index, int *ok) {
 				wts[j] = comp(p, l->wt_fmt, j, 0);
 		}
 	}
-	float mpos[3];
 	if (x->skinning) {
 		mpos[0] = mpos[1] = mpos[2] = 0.0f;
 		for (j = 0; j < l->weights; j++) {
@@ -715,10 +713,88 @@ static float vertexW(GeSgxWalker *w, const Xform *x, uint32_t index, int *ok) {
 			mpos[0] += t[0] * wts[j]; mpos[1] += t[1] * wts[j]; mpos[2] += t[2] * wts[j];
 		}
 	} else {
-		memcpy(mpos, pos, sizeof(mpos));
+		memcpy(mpos, pos, sizeof(pos));
 	}
+	return 1;
+}
+
+/*
+	A vertex's position on the screen times its clip w (out[0], out[1]: the
+	PSP's pixels, scaled, times w) and its w (out[2]): the triangle's
+	winding seen on the screen is the sign of the determinant of its three
+	(the part in front of the camera too, of one crossing it: homogeneous
+	rasterization, Olano and Greer)
+*/
+static int vertexClip(GeSgxWalker *w, const Xform *x, uint32_t index, float *out) {
+	float p[3];
+	if (!vertexModel(w, x, index, p))
+		return 0;
 	const float *M = x->mvp;
-	return mpos[0] * M[3] + mpos[1] * M[7] + mpos[2] * M[11] + M[15];
+	float cx = p[0] * M[0] + p[1] * M[4] + p[2] * M[8] + M[12];
+	float cy = p[0] * M[1] + p[1] * M[5] + p[2] * M[9] + M[13];
+	float cw = p[0] * M[3] + p[1] * M[7] + p[2] * M[11] + M[15];
+	out[0] = x->vp_x[0] * cx + x->vp_x[1] * cw;
+	out[1] = x->vp_y[0] * cy + x->vp_y[1] * cw;
+	out[2] = cw;
+	return 1;
+}
+
+/*
+	Every vertex in front of the camera (clip w > 0) by the bound of its
+	format alone: 8 and 16 bit positions are in -1..1 (times the morph
+	weights' sum), 8 and 16 bit weights in 0..2; float ones have no bound
+	(0: to be looked at)
+*/
+static int frontByFormat(const Xform *x) {
+	const GeSgxVertexLayout *l = x->l;
+	if (l->pos_fmt != 1 && l->pos_fmt != 2)
+		return 0;
+	float sp = 0.0f;
+	uint32_t k, j;
+	for (k = 0; k < l->morphs; k++)
+		sp += fabsf(l->morphs > 1 ? x->morph[k] : 1.0f);
+	const float *M = x->mvp;
+	if (!x->skinning)
+		return M[15] - sp * (fabsf(M[3]) + fabsf(M[7]) + fabsf(M[11])) > 0.0f;
+	if (l->wt_fmt != 1 && l->wt_fmt != 2)
+		return 0;
+	// w = M15 + sum of weight_j * g_j(p), g_j the bone's then the transform's w (affine in p): each g_j at its lowest over the box
+	float wmax = l->wt_fmt == 1 ? 255.0f / 128.0f : 65535.0f / 32768.0f, low = M[15];
+	for (j = 0; j < l->weights; j++) {
+		const float *b = &x->m->bone[j * 12];
+		float a0 = M[3] * b[0] + M[7] * b[1] + M[11] * b[2];
+		float a1 = M[3] * b[3] + M[7] * b[4] + M[11] * b[5];
+		float a2 = M[3] * b[6] + M[7] * b[7] + M[11] * b[8];
+		float c = M[3] * b[9] + M[7] * b[10] + M[11] * b[11];
+		float g = c - sp * (fabsf(a0) + fabsf(a1) + fabsf(a2));
+		if (g < 0.0f)
+			low += wmax * g;
+	}
+	return low > 0.0f;
+}
+
+/*
+	Culled triangles with a vertex behind the camera: the PSP clips them at
+	the near plane (depth clip on) and culls what is left by its winding on
+	the screen, or draws none of them (depth clip off: the depth clamped).
+	The GPU's culling gets those wrong (The 3rd Birthday: floors and walls
+	under the camera, Aya close to it culled, the screen dark there). Such
+	a primitive has its triangles culled here as the PSP does, with each
+	vertex's position times w (cull_clip, by the primitive's vertex), the
+	GPU's culling off.
+*/
+#define CULL_MAX 16384
+static float cull_clip[CULL_MAX][3];
+static uint16_t cull_local[GE_SGX_MAX_DRAW_VERTICES]; // a local vertex's primitive vertex
+
+// 1: the triangle drawn (cull: GE_SGX_CULL_CW culls the ones clockwise on the screen, CCW the others)
+static int cullKeep(const float *a, const float *b, const float *c, int cull, int clip) {
+	int behind = !(a[2] > 0.0f) + !(b[2] > 0.0f) + !(c[2] > 0.0f);
+	if (behind == 3 || (behind && !clip))
+		return 0;
+	// The screen's y goes down: positive is clockwise
+	float det = a[0] * (b[1] * c[2] - c[1] * b[2]) - a[1] * (b[0] * c[2] - c[0] * b[2]) + a[2] * (b[0] * c[1] - c[0] * b[1]);
+	return cull == GE_SGX_CULL_CW ? det < 0.0f : det > 0.0f;
 }
 
 static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex *out) {
@@ -2031,29 +2107,43 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 	}
 
 	/*
-		Culling of a primitive with a vertex behind the camera (w <= 0): the
-		PSP clips it at the near plane and culls what is left, by the winding
-		on the screen. The GPU's culling gets those wrong (the screen
-		position of a vertex behind the camera is mirrored): The 3rd Birthday's
-		floors and walls under the camera were culled, the screen dark there.
-		A draw with such a vertex is drawn without culling: every vertex of
-		small ones looked at (the big polygons that cross the camera have
-		few), 48 spread over bigger ones (Aya's model close to the camera
-		made the screen black).
+		Culling of a primitive that may have a vertex behind the camera (its
+		format's bound could not put it in front): every vertex looked at
+		(48 of them, spread over big ones, missed the few behind the camera:
+		the screen black at times with culling on). One behind it: its
+		triangles culled here (cullKeep), the GPU's culling off; drawn
+		without culling when too big to keep their vertices.
 	*/
-	if (d.cull != GE_SGX_CULL_NONE && !xp->through) {
-		uint32_t k, step = count <= 48 ? 1 : (count + 47) / 48;
+	int cpu_cull = 0, cull_mode = d.cull, depth_clip = reg(w, 0x1Cu) & 1;
+	if (d.cull != GE_SGX_CULL_NONE && !xp->through && !frontByFormat(xp)) {
+		// Every vertex (a sample of them missed the few behind the camera of big ones)
+		uint32_t k, t_cull = clk ? clk() : 0;
+		int behind = 0, unread = 0, store = count <= CULL_MAX;
 		bulk_count = 0;
-		for (k = 0; k < count; k += step) {
-			int ok;
-			float cw = vertexW(w, xp, prim_index[k], &ok);
-			if (ok && !(cw > 0.0f)) {
-				d.cull = GE_SGX_CULL_NONE;
-				f->cull_off++;
-				break;
+		if (range * l->size <= BULK_BYTES)
+			bulkLoad(w, l, imin, range);
+		for (k = 0; k < count; k++) {
+			float c[3];
+			if (!vertexClip(w, xp, prim_index[k], c)) {
+				unread = 1;
+				c[0] = c[1] = 0.0f;
+				c[2] = 1.0f;
 			}
+			if (!(c[2] > 0.0f))
+				behind = 1;
+			if (store)
+				memcpy(cull_clip[k], c, sizeof(c));
 		}
 		bulk_count = 0;
+		f->cull_checked++;
+		f->cull_vertices += count;
+		if (behind) {
+			d.cull = GE_SGX_CULL_NONE;
+			f->cull_off++;
+			cpu_cull = store && !unread;
+		}
+		if (clk)
+			f->us_cull += (clk() - t_cull) * TIME_EVERY;
 	}
 
 	/*
@@ -2284,6 +2374,24 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 					iout[ni++] = (uint16_t)s[i + 1];
 				}
 				break;
+		}
+
+		// Culled here: each triangle as the PSP does (its local vertices' primitive vertices first)
+		if (cpu_cull) {
+			uint32_t t, kept = 0;
+			for (i = 0; i < count; i++)
+				cull_local[s[i]] = (uint16_t)i;
+			for (t = 0; t + 2 < ni; t += 3) {
+				uint16_t a = iout[t], b = iout[t + 1], c = iout[t + 2];
+				if (cullKeep(cull_clip[cull_local[a]], cull_clip[cull_local[b]], cull_clip[cull_local[c]], cull_mode, depth_clip)) {
+					iout[kept++] = a;
+					iout[kept++] = b;
+					iout[kept++] = c;
+				}
+			}
+			f->cull_cpu++;
+			f->cull_dropped += (ni - kept) / 3;
+			ni = kept;
 		}
 	}
 
