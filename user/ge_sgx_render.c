@@ -241,7 +241,7 @@ static uint32_t blendKey(const GeSgxDraw *d) {
 		if (e.aout)
 			dst = SCE_GXM_BLEND_FACTOR_SRC_ALPHA;
 	}
-	uint32_t func = blendFunc((d->blend >> 8) & 7);
+	uint32_t func = e.sub ? SCE_GXM_BLEND_FUNC_SUBTRACT : blendFunc((d->blend >> 8) & 7);
 	return 0x40000000u | masked | func | (src << 4) | (dst << 8);
 }
 

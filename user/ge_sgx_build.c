@@ -984,8 +984,18 @@ static void drawState(GeSgxWalker *w, GeSgxDraw *d) {
 			d->tfunc = 0;
 		if (tfunc & 0x100)
 			d->flags |= GE_SGX_DRAW_TCC;
-		if (tfunc & 0x10000)
+		// Colour doubling: of the textured colour only (PPSSPP's software renderer; Black Rock
+		// Shooter's sky gradient, untextured, was drawn twice as bright, near white)
+		if ((tfunc & 0x10000) && (d->flags & GE_SGX_DRAW_TEXTURED))
 			d->flags |= GE_SGX_DRAW_DOUBLE;
+		/*
+			Untextured, no vertex colour, no lighting: every pixel's alpha
+			is the material's (blendings it decides: geSgxBlendEmu)
+		*/
+		if (!(d->flags & GE_SGX_DRAW_TEXTURED) && ((reg(w, GE_CMD_VERTEXTYPE) >> 2) & 7) == 0 && !(reg(w, GE_CMD_LIGHTINGENABLE) & 1)) {
+			d->flags |= GE_SGX_DRAW_CONST_ALPHA;
+			d->calpha = (uint8_t)(reg(w, GE_CMD_MATERIALALPHA) & 0xFF);
+		}
 		uint32_t at = reg(w, GE_CMD_ALPHATEST);
 		d->atest_func = (uint8_t)(at & 7);
 		d->atest_ref = (uint8_t)((at >> 8) & 0xFF);
@@ -1037,7 +1047,7 @@ static int sameState(const GeSgxDraw *a, const GeSgxDraw *b) {
 		a->ztest == b->ztest && a->blend == b->blend && a->fix_a == b->fix_a && a->fix_b == b->fix_b &&
 		a->env == b->env && a->fog_color == b->fog_color && a->texture == b->texture && a->fb == b->fb &&
 		a->fbtex == b->fbtex && a->texfmt == b->texfmt && a->depthtex == b->depthtex && a->lut == b->lut && a->cmask == b->cmask && a->sfunc == b->sfunc && a->sref == b->sref &&
-		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops && a->cull == b->cull &&
+		a->smask == b->smask && a->swmask == b->swmask && a->sops == b->sops && a->cull == b->cull && a->calpha == b->calpha &&
 		memcmp(a->scissor, b->scissor, sizeof(a->scissor)) == 0;
 }
 

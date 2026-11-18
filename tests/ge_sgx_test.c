@@ -1324,6 +1324,47 @@ static void testCull(void) {
 	}
 }
 
+/* Colour doubling of textured draws only; an untextured draw without vertex colour has the material's alpha */
+static void testDoublingConstAlpha(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 272, 0xFFFFFFFF, 480, 272);
+	w16(0x08901000, 0); w16(0x08901002, 0); w16(0x08901004, 0);       /* position only */
+	w16(0x08901006, 480); w16(0x08901008, 272); w16(0x0890100A, 0);
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0xC9, 0x10000));            /* doubling */
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));     /* untextured: not doubled */
+	emit(&l, C(0x1E, 1));
+	emit(&l, C(0xA0, 0x900000));
+	emit(&l, C(0xA8, (0x08 << 16) | 64));
+	emit(&l, C(0xB8, (6 << 8) | 6));
+	emit(&l, C(0xC3, GE_TFMT_5650));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));     /* textured: doubled */
+	emit(&l, C(0x1E, 0));
+	emit(&l, C(0x58, 0xC0));               /* material alpha */
+	emit(&l, C(0x12, VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x01, 0x901000));
+	emit(&l, C(0x04, (6u << 16) | 2));     /* no colour: the material's alpha */
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 3, "draws %u", frame.ndraws);
+	if (frame.ndraws == 3) {
+		CHECK(!(fdraws[0].flags & GE_SGX_DRAW_DOUBLE) && (fdraws[1].flags & GE_SGX_DRAW_DOUBLE), "doubling: %x %x", fdraws[0].flags, fdraws[1].flags);
+		CHECK(!(fdraws[0].flags & GE_SGX_DRAW_CONST_ALPHA) && (fdraws[2].flags & GE_SGX_DRAW_CONST_ALPHA) && fdraws[2].calpha == 0xC0,
+		      "const alpha: %x %x %x", fdraws[0].flags, fdraws[2].flags, fdraws[2].calpha);
+	}
+}
+
 /* Framebuffers as textures, stencil, colour mask, stencil clear */
 static void testFbTexture(void) {
 	resetFrame();
@@ -1733,6 +1774,7 @@ int main(void) {
 	testFbTexture();
 	testStencil5551();
 	testCull();
+	testDoublingConstAlpha();
 	testBadListState();
 	testDepthRange();
 	testFbTextureGenerated();

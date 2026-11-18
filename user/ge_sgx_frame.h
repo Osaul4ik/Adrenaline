@@ -79,6 +79,7 @@ enum GeSgxDrawFlags {
 	GE_SGX_DRAW_WRITE_DEPTH  = 1 << 8, // depth is written
 	GE_SGX_DRAW_FOG          = 1 << 9, // fog (the vertices carry the factor)
 	GE_SGX_DRAW_FB_ALPHA     = 1 << 10, // the framebuffer has alpha (not 565): clears write it
+	GE_SGX_DRAW_CONST_ALPHA  = 1 << 11, // every pixel's source alpha is calpha
 };
 
 /*
@@ -144,6 +145,7 @@ typedef struct {
 	uint8_t fbfmt;      // the framebuffer's pixel format (FRAMEBUFPIXFMT: 0 565, 1 5551, 2 4444, 3 8888)
 	uint8_t texfmt;     // framebuffer texture (fbtex): the texture format it is read with (0: 5650, alpha 1)
 	uint8_t cull;       // GeSgxDrawCull: triangles of one winding not drawn
+	uint8_t calpha;     // GE_SGX_DRAW_CONST_ALPHA: the source alpha
 	uint16_t vkey;      // vertex program key (GE_SGX_VS_*)
 	uint32_t vtype;     // GE vertex type: the attribute formats and offsets
 	uint32_t ucommon;   // byte offsets of its uniform buffers in the uniform arena

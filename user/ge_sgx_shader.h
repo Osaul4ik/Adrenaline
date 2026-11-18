@@ -48,7 +48,7 @@
 #define GE_SGX_KEY_ALPHA2X   (1u << 16)
 
 typedef struct {
-	int premul, aout, a2x;
+	int premul, aout, a2x, sub;
 	float pre[4];
 	float aval;
 } GeSgxBlendEmu;
@@ -59,7 +59,7 @@ static inline int geSgxFixExact(uint32_t fix) {
 }
 
 static inline int geSgxBlendEmu(const GeSgxDraw *d, GeSgxBlendEmu *e) {
-	e->premul = e->aout = e->a2x = 0;
+	e->premul = e->aout = e->a2x = e->sub = 0;
 	e->pre[0] = e->pre[1] = e->pre[2] = e->pre[3] = 0.0f;
 	e->aval = 1.0f;
 	if (!(d->flags & GE_SGX_DRAW_BLEND) || (d->flags & GE_SGX_DRAW_CLEAR))
@@ -100,6 +100,21 @@ static inline int geSgxBlendEmu(const GeSgxDraw *d, GeSgxBlendEmu *e) {
 		e->pre[1] = ((fa >> 8) & 0xFF) / 255.0f;
 		e->pre[2] = ((fa >> 16) & 0xFF) / 255.0f;
 		e->premul = 1;
+	}
+	/*
+		Doubled factors past alpha 0.5: 1 - 2a is negative, the PSP
+		subtracts (PPSSPP's software renderer). With one alpha for the whole
+		draw: s * 2a made here, minus d * (2a - 1) (the output alpha), by the
+		GPU's subtraction. The 3rd Birthday's shop: an opaque grey quad with
+		2a and 1 - 2a over its tunnel, 2 grey - tunnel on the PSP, flat grey
+		with the factors clamped.
+	*/
+	if (fs == 6 && fd == 7 && ((d->blend >> 8) & 7) == 0 && (d->flags & GE_SGX_DRAW_CONST_ALPHA) && d->calpha >= 128) {
+		e->premul = e->aout = e->sub = 1;
+		e->pre[0] = e->pre[1] = e->pre[2] = 0.0f;
+		e->pre[3] = 2.0f;
+		e->aval = (float)(2 * (int)d->calpha - 255) / 255.0f;
+		return 1;
 	}
 	if (!e->aout) {
 		int plain = fs == 2 || fs == 3 || fd == 2 || fd == 3;
