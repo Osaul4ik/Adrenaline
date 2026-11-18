@@ -110,6 +110,8 @@ static u32 timeNow(void) {
 	return _sceKernelGetSystemTimeLow ? _sceKernelGetSystemTimeLow() : 0;
 }
 
+static void serveVram(void);
+
 // Wait until the Vita side has read every event written so far
 static void waitForVita(void) {
 	u32 target = ring->write;
@@ -132,6 +134,8 @@ static void waitForVita(void) {
 	int loops = 0;
 
 	while (1) {
+		// The VRAM pages the walk reads, copied now (the GE idle)
+		serveVram();
 		read = shared->read;
 		if ((int)(read - target) >= 0)
 			break;
@@ -627,6 +631,10 @@ static int sceGeSetCallbackPatched(PspGeCallbackData *cb) {
 */
 static int (* _sceDmacMemcpy)(void *dst, const void *src, SceSize size) = NULL;
 
+// The Vita side's last VRAM copy request done, and whether one was since the last flip
+static u32 vram_served = 0;
+static int vram_served_since_flip = 0;
+
 static void copyVram(void) {
 	volatile GeSgxVramWant *want = (volatile GeSgxVramWant *)GE_SGX_VRAM_WANT_ADDRESS; // uncached
 	if (shared->session != ring->session)
@@ -660,6 +668,19 @@ static void copyVram(void) {
 	ring->vram_copy_us += took;
 	if (took > ring->vram_copy_max_us)
 		ring->vram_copy_max_us = took;
+}
+
+// A copy the Vita side asked for (GeSgxAck.vram_req), while the game waits for it
+static void serveVram(void) {
+	u32 req = shared->vram_req;
+	if (req == vram_served || shared->session != ring->session)
+		return;
+	copyVram();
+	vram_served = req;
+	vram_served_since_flip = 1;
+	memorySync();
+	ring->vram_done = req;
+	memorySync();
 }
 
 // An export of any loaded module, by library name and NID; the module's name into *modname
@@ -717,7 +738,10 @@ static void pushRegs(void) {
 }
 
 static int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
-	copyVram();
+	// Copied at the waits this frame: not again (the walk at the flip, without a wait, reads the copy as it is)
+	if (!vram_served_since_flip)
+		copyVram();
+	vram_served_since_flip = 0;
 	pushRegs();
 #if GE_SGX_SIGNAL_WAIT
 	signal_frame_us = 0;
@@ -833,6 +857,9 @@ int GeSgxInit(void) {
 	}
 
 	vita_stalled = 0;
+	vram_served = 0; // the Vita side's requests start over with the ring
+	vram_served_since_flip = 0;
+	ring->vram_done = 0;
 	state_full = 1;
 	state_snapshots = 0;
 	pending = 0;

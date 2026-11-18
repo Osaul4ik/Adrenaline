@@ -89,25 +89,122 @@ static const uint8_t *ram_map = NULL;  // PSP RAM 0x08000000 in our address spac
 static const uint8_t *vram_map = NULL; // PSP VRAM 0x04000000 (the PSP side's copy of it)
 static uint32_t vram_writes = 0, vram_write_bytes = 0; // GE transfers into it done here (vramCopyFn)
 // pspemu maps PSP VRAM uncached (a USER_RW_UNCACHE block): the CPU reads it as it is
-// The VRAM pages read so far, for the PSP side to copy only those (GeSgxVramWant)
-static uint32_t vram_want[GE_SGX_VRAM_PAGES / 32];
+/*
+	The VRAM pages the PSP side copies (GeSgxVramWant): the ones read in the
+	frame before and in this one, not every page ever read (every flip
+	copied 1.2 MB, 3 ms of the game's time, in The 3rd Birthday: pages read
+	once, long before). A walk at the game's wait (SYNC) asks for them
+	first, copied then with the GE idle, and for each page it reads that
+	is not in them, before reading it (see requestVram).
+*/
+#define VRAM_WORDS (GE_SGX_VRAM_PAGES / 32)
+static uint32_t vram_want[VRAM_WORDS];     // published: what the PSP side copies
 static int vram_want_dirty = 0;
+static uint32_t vram_read_prev[VRAM_WORDS]; // read in the frame before
+static uint32_t vram_read_cur[VRAM_WORDS];  // read in this one
+static uint32_t vram_fresh[VRAM_WORDS];     // copied for the walk going on
+static int vram_walk_sync = 0;              // the walk is at the game's wait: the PSP side copies when asked
+static uint32_t vram_req = 0;
+static uint32_t vram_requests = 0, vram_request_fails = 0, vram_request_us = 0;
+static uint32_t vram_ring_addr = 0, vram_session = 0;
 
 // Pages wanted only for the PSP's picture of an asked trace (framebuffers): not wanted again after it
-static uint32_t picture_pages[GE_SGX_VRAM_PAGES / 32];
+static uint32_t picture_pages[VRAM_WORDS];
+
+static void writeAck(uint32_t session, uint32_t read);
+static uint32_t ack_read = 0;
+
+static void publishVram(void) {
+	uint32_t i;
+	for (i = 0; i < VRAM_WORDS; i++) {
+		uint32_t v = vram_read_prev[i] | vram_read_cur[i] | picture_pages[i];
+		if (v != vram_want[i]) {
+			vram_want[i] = v;
+			vram_want_dirty = 1;
+		}
+	}
+}
+
+/*
+	Asks the PSP side to copy the wanted pages now, and waits for it (it
+	copies in its wait for us: a few hundred microseconds at most). Only at
+	a SYNC's walk: the PSP side waits there.
+*/
+static void requestVram(void) {
+	if (!vram_walk_sync || !vram_ring_addr)
+		return;
+	vram_req++;
+	vram_want_dirty = 1;
+	writeAck(vram_session, ack_read);
+	uint32_t t0 = sceKernelGetProcessTimeLow();
+	while (1) {
+		const GeSgxRing *r = (const GeSgxRing *)ScePspemuConvertAddress(vram_ring_addr, KERMIT_INPUT_MODE, RING_EVENTS_OFFSET);
+		if (!r || r->session != vram_session) {
+			vram_request_fails++;
+			break;
+		}
+		if (r->vram_done == vram_req)
+			break;
+		if (sceKernelGetProcessTimeLow() - t0 > 5000) {
+			vram_request_fails++;
+			vram_walk_sync = 0; // not waiting for us: not asked again in this walk
+			break;
+		}
+		sceKernelDelayThread(50);
+	}
+	vram_requests++;
+	vram_request_us += sceKernelGetProcessTimeLow() - t0;
+	epoch++; // the walker's blocks of it are read again
+}
 
 static inline void wantVram(uint32_t off, uint32_t size) {
 	uint32_t p = off / GE_SGX_VRAM_PAGE, last = (off + (size ? size : 1) - 1) / GE_SGX_VRAM_PAGE;
+	int missing = 0;
 	if (last >= GE_SGX_VRAM_PAGES)
 		last = GE_SGX_VRAM_PAGES - 1;
 	for (; p <= last; p++) {
 		uint32_t bit = 1u << (p % 32);
 		picture_pages[p / 32] &= ~bit; // wanted for itself now
-		if (!(vram_want[p / 32] & bit)) {
-			vram_want[p / 32] |= bit;
-			vram_want_dirty = 1;
+		vram_read_cur[p / 32] |= bit;
+		if (!(vram_fresh[p / 32] & bit)) {
+			vram_fresh[p / 32] |= bit;
+			missing = 1;
 		}
 	}
+	if (missing) {
+		publishVram();
+		requestVram();
+	}
+}
+
+// A walk at the game's wait: the pages read in the frame before copied first, as the GE left them (once a frame)
+static int vram_prefetched = 0;
+static void vramSyncWalkStart(void) {
+	uint32_t i, any = 0;
+	vram_walk_sync = 1;
+	if (vram_prefetched)
+		return;
+	vram_prefetched = 1;
+	publishVram();
+	for (i = 0; i < VRAM_WORDS; i++) {
+		vram_fresh[i] = vram_want[i];
+		any |= vram_want[i];
+	}
+	if (any)
+		requestVram();
+}
+
+static void vramSyncWalkEnd(void) {
+	vram_walk_sync = 0;
+}
+
+// A flip: the frame's pages are the frame before's now; what is copied at the next flip (no wait in between)
+static void vramFlip(void) {
+	memcpy(vram_read_prev, vram_read_cur, sizeof(vram_read_prev));
+	memset(vram_read_cur, 0, sizeof(vram_read_cur));
+	memset(vram_fresh, 0, sizeof(vram_fresh));
+	vram_prefetched = 0;
+	publishVram();
 }
 static uint32_t *block_tag = NULL;     // block address | 1 (valid)
 static uint32_t *block_epoch = NULL;
@@ -1034,15 +1131,18 @@ static void writeAck(uint32_t session, uint32_t read) {
 	if (!block)
 		return;
 	GeSgxAck *ack = (GeSgxAck *)(block + (GE_SGX_ACK_ADDRESS - ADRENALINE_ADDRESS));
-	ack->session = session;
-	ack->read = read;
-	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
+	// The pages first, then the request for them
 	if (vram_want_dirty) {
 		vram_want_dirty = 0;
 		GeSgxVramWant *want = (GeSgxVramWant *)(block + (GE_SGX_VRAM_WANT_ADDRESS - ADRENALINE_ADDRESS));
 		memcpy((void *)want->bits, vram_want, sizeof(vram_want));
 		ScePspemuWritebackCache(want, sizeof(GeSgxVramWant));
 	}
+	ack_read = read;
+	ack->session = session;
+	ack->read = read;
+	ack->vram_req = vram_req;
+	ScePspemuWritebackCache(ack, sizeof(GeSgxAck));
 }
 
 void GeSgxLogText(const char *text, uint32_t len) {
@@ -1479,7 +1579,9 @@ static int GeSgxThread(SceSize args, void *argp) {
 						GeSgxLog("GeSgx: the game waits for the GE: lists walked at its waits from now on\n");
 					walk_late = 1;
 					synced_since_flip = 1;
+					vramSyncWalkStart();
 					walkAll();
+					vramSyncWalkEnd();
 					break;
 				case GE_SGX_EVENT_SIGNAL:
 					// The GE at a signal, its handler about to run: the lists up to it (the PSP side waits for this)
@@ -1531,6 +1633,7 @@ static int GeSgxThread(SceSize args, void *argp) {
 					noteListDone();
 					break;
 				case GE_SGX_EVENT_FLIP: {
+					vramFlip();
 					// No wait for the GE in this frame: its lists walked now (the ones after a wait are the next frame's)
 					if ((!walk_late || !synced_since_flip) && walker.count)
 						walkAll();
@@ -1654,7 +1757,7 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB), asked at the waits %u (%u us, failed %u)\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
@@ -1664,7 +1767,7 @@ per_second:;
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
 					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped, (unsigned)overlays_used, (unsigned)overlays_stale,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
-					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024));
+					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024), (unsigned)vram_requests, (unsigned)vram_request_us, (unsigned)vram_request_fails);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {
@@ -1733,7 +1836,14 @@ int GeSgxStart(uint32_t ring_addr) {
 	// The PSP side may wait for us from now on (and copies no VRAM page before we read one)
 	memset(vram_want, 0, sizeof(vram_want));
 	memset(picture_pages, 0, sizeof(picture_pages));
+	memset(vram_read_prev, 0, sizeof(vram_read_prev));
+	memset(vram_read_cur, 0, sizeof(vram_read_cur));
+	memset(vram_fresh, 0, sizeof(vram_fresh));
 	vram_want_dirty = 1;
+	vram_req = 0;
+	vram_walk_sync = 0;
+	vram_ring_addr = ring_addr;
+	vram_session = ring->session;
 	writeAck(ring->session, 0);
 
 	start_ring = ring_addr;

@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 6 // the ring's layout: both sides from the same build
+#define GE_SGX_VERSION 7 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -124,7 +124,8 @@ typedef struct {
 	// Written by the PSP side (own 64 byte line)
 	volatile unsigned int write; // events written so far
 	volatile unsigned int lost;  // events dropped because the ring was full
-	unsigned int reserved1[14];
+	volatile unsigned int vram_done; // the Vita side's last VRAM copy request (GeSgxAck.vram_req) done
+	unsigned int reserved1[13];
 
 	// PSP side statistics (own 64 byte line)
 	volatile unsigned int sync_waits;    // DrawSync/ListSync calls that waited for the Vita side
@@ -153,7 +154,8 @@ typedef struct {
 typedef struct {
 	volatile unsigned int session; // session of the ring being read
 	volatile unsigned int read;    // events of that ring consumed so far
-	unsigned int reserved[14];
+	volatile unsigned int vram_req; // VRAM copy requests (GE_SGX_VRAM_WANT_ADDRESS): the PSP side copies at its next wait
+	unsigned int reserved[13];
 } GeSgxAck;
 
 #define GE_SGX_ACK_ADDRESS 0xABCDFFC0 // last line of ADRENALINE_ADDRESS/ADRENALINE_SIZE
@@ -171,10 +173,13 @@ typedef struct {
 
 /*
 	Only the VRAM pages the Vita side reads (textures, CLUTs; not the
-	framebuffers, which it renders itself) are copied: it sets their bits in
-	this bitmap, one per 4 KB page, the first time it reads them. Written by
-	the Vita side only, in the line before GeSgxAck, for the session there;
-	bits are only ever set (all cleared when the Vita side takes a ring).
+	framebuffers, which it renders itself) are copied: their bits in this
+	bitmap, one per 4 KB page, the pages it read in the frame before and in
+	this one. Written by the Vita side only, in the line before GeSgxAck, for
+	the session there. Copied when the Vita side asks (GeSgxAck.vram_req,
+	done when GeSgxRing.vram_done is the same), at the game's next wait for
+	it (DrawSync, ListSync: the GE idle, the Vita side walking the lists it
+	waits for); at a flip only if it did not ask since the flip before.
 */
 #define GE_SGX_VRAM_PAGE 4096
 #define GE_SGX_VRAM_PAGES (GE_SGX_VRAM_SIZE / GE_SGX_VRAM_PAGE) // 512

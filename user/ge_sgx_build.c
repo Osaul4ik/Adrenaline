@@ -1288,13 +1288,14 @@ const char *geSgxBuildTraceText(uint32_t *len) {
 	return trace_text;
 }
 
-static uint32_t trace_depth_lines = 0, trace_vertex_lines = 0;
+static uint32_t trace_depth_lines = 0, trace_vertex_lines = 0, trace_vertex_draw = 0xFFFFFFFFu;
 
 void geSgxBuildTraceClear(GeSgxWalker *w) {
 	trace_len = 0;
 	vtrace_len = 0;
 	trace_depth_lines = 0;
 	trace_vertex_lines = 0;
+	trace_vertex_draw = 0xFFFFFFFFu;
 	w->trace_lines = 0;
 	trace_fb_key = trace_tex_key = 0;
 }
@@ -2054,7 +2055,9 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 		of them (The 3rd Birthday's HUD and fog, drawn but not seen)
 	*/
 	// (the first 120 draws, then small ones: HUD quads, particles, the full screen passes)
-	if (w->trace && !xp->through && (trace_vertex_lines < 120 || (count <= 8 && trace_vertex_lines < 380)) && count) {
+	// (one line a draw, its first primitive: all of a frame's draws, the HUD's last ones included)
+	if (w->trace && !xp->through && trace_vertex_draw != f->ndraws && trace_vertex_lines < 420 && count) {
+		trace_vertex_draw = f->ndraws;
 		char line[400];
 		int n = snprintf(line, sizeof(line), "GeSgx T: v: draw %u prim %u count %u vtype %06X z range %u-%u cull %u/%u |", (unsigned)f->ndraws, (unsigned)type,
 			(unsigned)count, (unsigned)(reg(w, GE_CMD_VERTEXTYPE) & 0xFFFFFF), (unsigned)(reg(w, GE_CMD_MINZ) & 0xFFFF),
