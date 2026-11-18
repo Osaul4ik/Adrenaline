@@ -223,7 +223,7 @@ static void stampText(const uint32_t *keys, int n, char *out, int size) {
 	int i;
 	for (i = 0; i < n; i++)
 		h = (h ^ keys[i]) * 16777619u;
-	snprintf(out, size, "version %d revision %d keys %d %08X\n", GE_SGX_CG_VERSION, GE_SGX_CG_GEN_REV, n, (unsigned)h);
+	snprintf(out, size, "version %d vs %d revision %d keys %d %08X\n", GE_SGX_CG_VERSION, GE_SGX_CG_VS_VERSION, GE_SGX_CG_GEN_REV, n, (unsigned)h);
 }
 
 static int stampMatches(const char *want) {

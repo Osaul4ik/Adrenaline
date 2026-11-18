@@ -35,8 +35,8 @@
 // The generator's revision: a program that failed to compile is tried again when it changes
 #define GE_SGX_CG_GEN_REV 2
 #define GE_SGX_CG_VERSION 1
-// The GPU transform's vertex programs (2xxx keys): 4 had range culling, 5 none, 6 the near plane clipped (never 1-5 again)
-#define GE_SGX_CG_VS_VERSION 6
+// The GPU transform's vertex programs (2xxx keys): 4 had range culling, 5 none, 6 the near plane clipped, 7 range culling again (never 1-6 again)
+#define GE_SGX_CG_VS_VERSION 7
 
 #define GE_SGX_CG_DIR "ux0:data/adrenaline/sgx_shaders"
 // Written by adrenaline_user when it could not compile: the app compiles all programs at its next start

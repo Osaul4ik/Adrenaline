@@ -1704,7 +1704,10 @@ static int gpuUniforms(GeSgxWalker *w, GeSgxFrameData *f, const GeSgxVertexLayou
 	set4(c[GE_SGX_UC_VPZ], x->vp_z[0], x->vp_z[1], x->fog1, x->fog2);
 	// Range culling: the screen (offset included) from 0 to 4096, in the program's pixels (offset taken, scaled)
 	// The depth clamp's sides (the near plane's side is clipped instead)
-	set4(c[GE_SGX_UC_CULL], x->zclamp_lo ? 1.0f : 0.0f, x->zclamp_hi ? 1.0f : 0.0f, 0.0f, 0.0f);
+	set4(c[GE_SGX_UC_CULL], x->zclamp_lo ? 1.0f : 0.0f, x->zclamp_hi ? 1.0f : 0.0f, NAN, 0.0f);
+	// Range culling: the GE's screen space (0..4096, offset included) in the program's pixels (the offset taken, scaled)
+	set4(c[GE_SGX_UC_RANGE], -x->offx * GE_SGX_SCALE, -x->offy * GE_SGX_SCALE, (4096.0f - x->offx) * GE_SGX_SCALE,
+		(4096.0f - x->offy) * GE_SGX_SCALE);
 	set4(c[GE_SGX_UC_CULL + 1], 0.0f, 0.0f, 0.0f, 0.0f);
 	set4(c[GE_SGX_UC_FLAGS], (float)x->uvgen, (float)x->uvproj, x->fog ? 1.0f : 0.0f, (x->lighting && x->reverse_normal) ? -1.0f : 1.0f);
 	uint32_t mc = x->material_color;

@@ -58,7 +58,8 @@ enum {
 	GE_SGX_UC_LIGHT = 17,    // 4 lights of GE_SGX_UC_LIGHT_SIZE
 	GE_SGX_UC_ENVLS = 45,    // 2: environment map light directions
 	GE_SGX_UC_TGEN = 47,     // 4 columns
-	GE_SGX_UC_CULL = 51,     // the depth clamp: x 1 clamps at 0, y 1 clamps at w (once range culling; next: unused)
+	GE_SGX_UC_CULL = 51,     // the depth clamp: x 1 clamps at 0, y 1 clamps at w; z NaN (range culling)
+	GE_SGX_UC_RANGE = 52,    // range culling: the GE's screen space (0..4096, the offset included) in the program's pixels: x min, y min, x max, y max
 	GE_SGX_UC_COUNT = 53,
 };
 // One light: position + type (-1 off, 0 directional, 1 point, 2 spot),

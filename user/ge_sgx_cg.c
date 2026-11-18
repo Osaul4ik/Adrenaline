@@ -104,12 +104,16 @@ static int vertexSource(uint32_t key, char *buf, int size) {
 	  "		if (zc.x > 0.5)\n			z = max(z, 0.0);\n		if (zc.y > 0.5)\n			z = min(z, c.w);\n	}\n", GE_SGX_UC_CULL);
 	S("	vPosition = float4(x * (2.0 / 960.0) - c.w, c.w - y * (2.0 / 544.0), z, c.w);\n");
 	/*
-		No range culling (PPSSPP's: a vertex off the 4096 screen space and
-		not before the near plane drops its primitive): the GE tests the
-		vertices after clipping at the near plane, a vertex shader cannot, and
-		big triangles crossing it (floors by the camera, in every game) were
-		dropped at the screen's edges.
+		Range culling (PPSSPP's VertexShaderGenerator): a vertex off the GE's
+		screen space (0..4096, the offset included) or with w < -1, and not
+		past the near plane (z < -w: clipped away before the GE tests it),
+		drops its primitive: its position NaN. Without it a vertex of a
+		matrix gone wild (The 3rd Birthday: w -5.7e34) drew a white wedge
+		over half the screen; Carbon's sparks were streaks across the car.
 	*/
+	S("	float4 cr = uC[%d];\n	float iw = 1.0 / c.w;\n", GE_SGX_UC_RANGE);
+	S("	if (!(c.z < -c.w) && (x * iw < cr.x || y * iw < cr.y || x * iw >= cr.z || y * iw >= cr.w || c.w < -1.0))\n"
+	  "		vPosition = zc.zzzz;\n");
 
 	// Texture coordinates
 	S("	float4 fl = uC[%d];\n", GE_SGX_UC_FLAGS);
