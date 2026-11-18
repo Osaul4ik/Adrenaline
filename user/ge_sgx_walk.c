@@ -707,6 +707,8 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 	uint32_t pc = list->pc;
 	// No stall: an address the list can never reach (it is 4 aligned)
 	const uint32_t stall = list->stall ? list->stall : 0xFFFFFFFFu;
+	// Where the GE is (geSgxWalkerProgress): the top list goes no further (to it, or past it by a jump)
+	const uint32_t limit = w->limit;
 	uint32_t commands = 0;
 	int res = WALK_BAD;
 
@@ -724,7 +726,7 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 	list->started = 1;
 
 	while (commands < GE_SGX_MAX_COMMANDS) {
-		if (pc == stall) {
+		if (pc == stall || (limit && list->depth == 0 && pc - limit < GE_SGX_PROGRESS_WINDOW)) {
 			res = WALK_STALLED;
 			break;
 		}
@@ -739,6 +741,8 @@ static int walkList(GeSgxWalker *w, GeSgxList *list) {
 		uint32_t end = GE_SGX_BLOCK_SIZE;
 		if (stall > pc && stall - block < end)
 			end = stall - block;
+		if (limit && list->depth == 0 && limit > pc && limit - block < end)
+			end = limit - block;
 		uint32_t start = off;
 		uint32_t op = 0, cmd = 0;
 		uint32_t changed = 0;
@@ -1244,6 +1248,24 @@ void geSgxWalkerFinish(GeSgxWalker *w, uint32_t after) {
 	geSgxWalkerRun(w);
 	w->run_one = 0;
 	w->releasing = 0;
+}
+
+int geSgxWalkerProgress(GeSgxWalker *w, uint32_t addr) {
+	if (!w->count || !addr)
+		return 0;
+	GeSgxList *l = &w->lists[0];
+	uint32_t a = normalize(addr) & ~3u;
+	/*
+		Only ahead of the walk and near it (a list the walker does not have,
+		the kernel's, or a GE that went elsewhere: not walked to)
+	*/
+	if (l->held || l->depth || !(a > l->pc && a - l->pc <= GE_SGX_PROGRESS_SPAN))
+		return 0;
+	w->limit = a;
+	w->stats.progress++;
+	geSgxWalkerRun(w);
+	w->limit = 0;
+	return 1;
 }
 
 int geSgxWalkerFlip(GeSgxWalker *w, uint32_t top, GeSgxRect *out, int max, GeSgxStats *stats) {

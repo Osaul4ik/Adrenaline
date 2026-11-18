@@ -1396,6 +1396,70 @@ static void testDoublingConstAlpha(void) {
 	}
 }
 
+/* The GE's progress: the list walked up to where the GE is, not past it; the rest later */
+static void testProgress(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 272, 0xFFFFFFFF, 480, 272);
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	int k;
+	uint32_t at[4];
+	for (k = 0; k < 4; k++) {
+		emit(&l, C(0xD5, (271 << 10) | (479 - k))); /* a state change: one draw each */
+		emit(&l, C(0x01, 0x900000));
+		at[k] = l.pos;
+		emit(&l, C(0x04, (6u << 16) | 2));
+	}
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	CHECK(geSgxWalkerProgress(w, at[2]) == 1 && frame.ndraws == 2, "to the third prim: %u draws", frame.ndraws);
+	CHECK(w->count == 1 && w->lists[0].pc == at[2], "stopped at %X (prim at %X)", w->count ? w->lists[0].pc : 0, at[2]);
+	CHECK(geSgxWalkerProgress(w, at[1]) == 0 && frame.ndraws == 2, "behind the walk: not walked (%u draws)", frame.ndraws);
+	CHECK(geSgxWalkerProgress(w, at[2] + 0x20000) == 0, "too far ahead: not walked");
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 4 && w->count == 0, "the rest at the wait: %u draws, %d lists", frame.ndraws, w->count);
+}
+
+/* The GE in a sublist: its progress is the CALL (RADR1 - 4), the sublist not walked yet */
+static void testProgressCall(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	spriteVertex(v + 0, 0, 0, 0xFFFFFFFF, 0, 0);
+	spriteVertex(v + 16, 480, 272, 0xFFFFFFFF, 480, 272);
+	L sub = { 0x08810000 };
+	emit(&sub, C(0xD5, (271 << 10) | 470));
+	emit(&sub, C(0x01, 0x900000));
+	emit(&sub, C(0x04, (6u << 16) | 2));
+	emit(&sub, C(0x0B, 0));
+	L l = { 0x08800000 };
+	emit(&l, C(0x9C, 0x00000));
+	emit(&l, C(0x9D, 512));
+	emit(&l, C(0xD4, 0));
+	emit(&l, C(0xD5, (271 << 10) | 479));
+	emit(&l, C(0x12, VT_TC16 | VT_COL8888 | VT_POS16 | VT_THROUGH));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	uint32_t call = l.pos;
+	emit(&l, C(0x0A, 0x810000));
+	emit(&l, C(0xD5, (271 << 10) | 460));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (6u << 16) | 2));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	CHECK(geSgxWalkerProgress(w, call) == 1 && frame.ndraws == 1 && w->lists[0].pc == call && w->lists[0].depth == 0,
+	      "up to the CALL: %u draws, at %X depth %d", frame.ndraws, w->count ? w->lists[0].pc : 0, w->count ? w->lists[0].depth : -1);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 3 && w->count == 0, "the rest: %u draws", frame.ndraws);
+}
+
 /* Framebuffers as textures, stencil, colour mask, stencil clear */
 static void testFbTexture(void) {
 	resetFrame();
@@ -1805,6 +1869,8 @@ int main(void) {
 	testFbTexture();
 	testStencil5551();
 	testCull();
+	testProgress();
+	testProgressCall();
 	testDoublingConstAlpha();
 	testBadListState();
 	testDepthRange();

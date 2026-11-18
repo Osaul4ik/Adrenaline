@@ -106,6 +106,7 @@ static uint32_t vram_fresh[VRAM_WORDS];     // copied for the walk going on
 static int vram_walk_sync = 0;              // the walk is at the game's wait: the PSP side copies when asked
 static uint32_t vram_req = 0;
 static uint32_t vram_requests = 0, vram_request_fails = 0, vram_request_us = 0;
+static uint32_t progress_walks = 0, progress_stale = 0; // GE_SGX_EVENT_PROGRESS walked to, not (no copy)
 static uint32_t vram_ring_addr = 0, vram_session = 0;
 
 // Pages wanted only for the PSP's picture of an asked trace (framebuffers): not wanted again after it
@@ -237,7 +238,7 @@ static int initBlockCache(void) {
 	before the game's handler wrote over them (GE_SGX_EVENT_SIGNAL's shadow):
 	put over the blocks the walker reads while it walks up to that signal
 */
-#define MAX_OVERLAYS 96
+#define MAX_OVERLAYS 384 // a frame's progresses not walked to, with a signal's
 static struct {
 	uint32_t addr, len; // PSP address (no cache bits), bytes
 	const uint8_t *data;
@@ -272,13 +273,21 @@ static void overlayBlocksStale(void) {
 
 /*
 	A copy record (the PSP side's captureSegment): the event's seq, the
-	number of pieces, then each piece's address, words and words
+	number of pieces, then each piece's address, words and words. Added to
+	the ones not walked yet (a progress the walk could not go to: its
+	commands are walked later, with its copy), later ones over earlier ones.
 */
-static int takeOverlays(const uint32_t *rec, uint32_t words, uint32_t seq) {
-	if (words < 2 || rec[0] != seq)
+#define MAX_OVERLAY_RECORDS 64
+static struct { uint32_t psp; uint32_t seq; } overlay_recs[MAX_OVERLAY_RECORDS]; // the record's PSP address, its seq
+static uint32_t noverlay_recs = 0;
+
+static int takeOverlays(const uint32_t *rec, uint32_t psp, uint32_t words, uint32_t seq) {
+	if (words < 2 || rec[0] != seq || noverlay_recs >= MAX_OVERLAY_RECORDS)
 		return 0;
-	uint32_t pieces = rec[1], pos = 2, k;
-	noverlays = 0;
+	overlay_recs[noverlay_recs].psp = psp;
+	overlay_recs[noverlay_recs].seq = seq;
+	noverlay_recs++;
+	uint32_t pieces = rec[1], pos = 2, k, had = noverlays;
 	for (k = 0; k < pieces && noverlays < MAX_OVERLAYS && pos + 2 <= words; k++) {
 		uint32_t addr = rec[pos], n = rec[pos + 1];
 		if (pos + 2 + n > words)
@@ -289,7 +298,34 @@ static int takeOverlays(const uint32_t *rec, uint32_t words, uint32_t seq) {
 		noverlays++;
 		pos += 2 + n;
 	}
-	return noverlays > 0;
+	return noverlays > had;
+}
+
+// The overlays walked: the memory as it is again
+static void dropOverlays(void) {
+	if (noverlays) {
+		overlayBlocksStale();
+		noverlays = 0;
+	}
+	noverlay_recs = 0;
+}
+
+/*
+	Kept overlays whose records the PSP side has written over since (its
+	shadow is a ring): none of them used (counted), the walk reads the
+	memory as it is
+*/
+static uint32_t overlays_overwritten = 0;
+static void checkOverlays(void) {
+	uint32_t k;
+	for (k = 0; k < noverlay_recs; k++) {
+		const uint32_t *r = (const uint32_t *)ScePspemuConvertAddress(overlay_recs[k].psp, KERMIT_INPUT_MODE, 4); // read again
+		if (!r || r[0] != overlay_recs[k].seq) {
+			overlays_overwritten++;
+			dropOverlays();
+			return;
+		}
+	}
 }
 
 static const void *blockFn(void *user, uint32_t block) {
@@ -1579,9 +1615,11 @@ static int GeSgxThread(SceSize args, void *argp) {
 						GeSgxLog("GeSgx: the game waits for the GE: lists walked at its waits from now on\n");
 					walk_late = 1;
 					synced_since_flip = 1;
+					checkOverlays();
 					vramSyncWalkStart();
 					walkAll();
 					vramSyncWalkEnd();
+					dropOverlays(); // progresses' copies not walked to: walked now
 					break;
 				case GE_SGX_EVENT_SIGNAL:
 					// The GE at a signal, its handler about to run: the lists up to it (the PSP side waits for this)
@@ -1594,9 +1632,10 @@ static int GeSgxThread(SceSize args, void *argp) {
 							memory while the walk gets to this signal
 						*/
 						uint32_t words = e->d >> 16, off = e->d & 0xFFFF;
+						checkOverlays();
 						if (words && shadow_addr && (off + words) * 4 <= shadow_size) {
 							const uint32_t *rec = (const uint32_t *)ScePspemuConvertAddress(shadow_addr + off * 4, KERMIT_INPUT_MODE, words * 4);
-							if (rec && takeOverlays(rec, words, e->seq)) {
+							if (rec && takeOverlays(rec, shadow_addr + off * 4, words, e->seq)) {
 								overlays_used++;
 								overlayBlocksStale(); // read again, with them
 							} else {
@@ -1609,12 +1648,37 @@ static int GeSgxThread(SceSize args, void *argp) {
 					else
 						geSgxWalkerSignal(&walker, e->b);
 					noteListDone();
-					if (noverlays) {
-						overlayBlocksStale(); // the memory as it is again
-						noverlays = 0;
-					}
+					dropOverlays();
 					// Read up to here: the PSP side waits for it in the GE's interrupt
 					writeAck(session, read + i + 1);
+					break;
+				case GE_SGX_EVENT_PROGRESS:
+					/*
+						Where the GE is: the lists walked up to there while the game
+						goes on (at its wait only the rest is left), with the copy of
+						the commands the GE read since the last signal or progress (a
+						later handler may write over them). Not walked to (walking as
+						they come, held, stalled, the GE not near the walk): the copy
+						is kept for the walk that gets there (the next signal's starts
+						at this progress), dropped at the flip.
+					*/
+					{
+						checkOverlays();
+						uint32_t words = e->d >> 16, off = e->d & 0xFFFF;
+						const uint32_t *rec = (words && shadow_addr && (off + words) * 4 <= shadow_size) ?
+							(const uint32_t *)ScePspemuConvertAddress(shadow_addr + off * 4, KERMIT_INPUT_MODE, words * 4) : NULL;
+						if (rec && takeOverlays(rec, shadow_addr + off * 4, words, e->seq)) {
+							overlays_used++;
+							overlayBlocksStale();
+							if (walk_late && walker.count && geSgxWalkerProgress(&walker, e->a)) {
+								noteListDone();
+								dropOverlays();
+								progress_walks++;
+							}
+						} else {
+							progress_stale++;
+						}
+					}
 					break;
 				case GE_SGX_EVENT_REGS:
 					geSgxWalkerHardwareReg(&walker, e->a, e->b);
@@ -1635,8 +1699,10 @@ static int GeSgxThread(SceSize args, void *argp) {
 				case GE_SGX_EVENT_FLIP: {
 					vramFlip();
 					// No wait for the GE in this frame: its lists walked now (the ones after a wait are the next frame's)
+					checkOverlays();
 					if ((!walk_late || !synced_since_flip) && walker.count)
 						walkAll();
+					dropOverlays(); // the frame's: not over the next frame's lists
 					synced_since_flip = 0;
 					/*
 						Asked traces only: an automatic one waiting for a frame of
@@ -1757,7 +1823,7 @@ per_second:;
 
 			if ((flips || events) && (now - log_start >= LOG_INTERVAL_US || now - session_start < 30 * 1000 * 1000)) {
 				log_start = now;
-				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB), asked at the waits %u (%u us, failed %u)\n",
+				GeSgxLog("GeSgx: t %u fps %u events %u walk %u us (max %u) blocks %u lookups %u | lists %u cmds %u prims %u verts %u clears %u signals %u held %u bad %u bbox %u/%u hw regs %u state %u contexts %u signal events %u unstalled %u | waits %u timeouts %u max %u us resyncs %u peeks %u held %u callbacks %u signal waits %u timeouts %u (%u us, max %u) skipped %u copies %u stale %u | VRAM copies %u (%u pages, %u us, max %u, how %u %s), transfers into it here %u (%u KB), asked at the waits %u (%u us, failed %u) | GE progress %u: walked to %u, no copy %u, walker %u, copies overwritten %u\n",
 					(unsigned)((now - session_start) / 1000000), (unsigned)rates.fps, (unsigned)rates.events,
 					(unsigned)rates.walk_us, (unsigned)rates.walk_max_us,
 					(unsigned)rates.invalidates, (unsigned)(block_calls - calls_start),
@@ -1767,7 +1833,8 @@ per_second:;
 					(unsigned)ring->sync_peeks, (unsigned)ring->sync_held, (unsigned)ring->callbacks,
 					(unsigned)ring->signal_waits, (unsigned)ring->signal_timeouts, (unsigned)ring->signal_wait_us, (unsigned)ring->signal_max_us, (unsigned)ring->signal_skipped, (unsigned)overlays_used, (unsigned)overlays_stale,
 					(unsigned)rates.vram_copies, (unsigned)ring->vram_copy_pages, (unsigned)rates.vram_copy_us, (unsigned)rates.vram_copy_max_us, (unsigned)ring->vram_copy_how, ring->vram_copy_module,
-					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024), (unsigned)vram_requests, (unsigned)vram_request_us, (unsigned)vram_request_fails);
+					(unsigned)vram_writes, (unsigned)(vram_write_bytes / 1024), (unsigned)vram_requests, (unsigned)vram_request_us, (unsigned)vram_request_fails,
+					(unsigned)ring->progress_events, (unsigned)progress_walks, (unsigned)progress_stale, (unsigned)walker.stats.progress, (unsigned)overlays_overwritten);
 			}
 
 			if (walker.texture_fn && now - log_start < 1000) {

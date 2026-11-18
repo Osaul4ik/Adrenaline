@@ -421,7 +421,8 @@ static u32 seg_after = 0;           // list address after the last signal (0: no
 
 static void allocShadow(void) {
 	u32 size;
-	for (size = 128 * 1024; size >= 32 * 1024; size /= 2) {
+	// (the progresses copy a frame's commands too: room for more than a frame)
+	for (size = 256 * 1024; size >= 32 * 1024; size /= 2) {
 		SceUID id = sceKernelAllocPartitionMemory661(PSP_MEMORY_PARTITION_KERNEL, "GeSgxShadow", PSP_SMEM_High, size, NULL);
 		if (id < 0)
 			continue;
@@ -560,6 +561,50 @@ static u32 captureSegment(u32 after) {
 	shadow[rec_off + 1] = rec_pieces;
 	shadow_pos = rec_off + rec_len;
 	return (rec_len << 16) | rec_off;
+}
+
+/*
+	The GE's progress (GE_SGX_EVENT_PROGRESS), from its registers (uOFW
+	hardware.h): EXEC (bit 0 running, 0x300 the call depth), LISTADDR the
+	command it is at, RADR1 the address after the top list's CALL when in a
+	sublist. A timer interrupt every GE_SGX_PROGRESS_US.
+*/
+#define HW_GE_EXEC     (*(volatile u32 *)0xBD400100)
+#define HW_GE_LISTADDR (*(volatile u32 *)0xBD400108)
+#define HW_GE_RADR1    (*(volatile u32 *)0xBD400110)
+
+static SceUID (* _sceKernelSetAlarm)(SceUInt clock, SceUInt (*handler)(void *common), void *common) = NULL;
+static SceUID progress_alarm = -1;
+static u32 progress_last = 0;
+
+static SceUInt progressAlarm(void *common) {
+	if (!ring || !shadow || shared->session != ring->session)
+		return GE_SGX_PROGRESS_US;
+	u32 exec = HW_GE_EXEC;
+	if (!(exec & 1))
+		return GE_SGX_PROGRESS_US;
+	u32 at = ((exec & 0x300) ? HW_GE_RADR1 - 4 : HW_GE_LISTADDR) & 0x0FFFFFFC;
+	if (at == progress_last || !validRam(at, 4))
+		return GE_SGX_PROGRESS_US;
+	u32 intr_flags = interruptsOff();
+	// Only with the copy: what the Vita side walks up to is what the GE read
+	u32 copy = captureSegment(at);
+	if (copy) {
+		ringPush(GE_SGX_EVENT_PROGRESS, at, exec, 0, copy);
+		seg_after = at;
+		progress_last = at;
+		ring->progress_events++;
+	}
+	interruptsRestore(intr_flags);
+	return GE_SGX_PROGRESS_US;
+}
+
+static void startProgress(void) {
+	if (progress_alarm >= 0 || !_sceKernelSetAlarm)
+		return;
+	progress_last = 0;
+	progress_alarm = _sceKernelSetAlarm(GE_SGX_PROGRESS_US, progressAlarm, NULL);
+	log("GeSgx: GE progress every %d us: %08X\n", GE_SGX_PROGRESS_US, (unsigned int)progress_alarm);
 }
 
 #if GE_SGX_SIGNAL_WAIT
@@ -810,6 +855,7 @@ int GeSgxInit(void) {
 	_sceGeSetCallback = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xA4FC06A4);
 	_sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
 	_sceKernelGetSystemTimeLow = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x369ED59D);
+	_sceKernelSetAlarm = (void *)FindProc("sceThreadManager", "ThreadManForKernel", 0x6652B8CA);
 	_sceGeGetCmd = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xDC93CFEF);
 	_sceGeGetMtx = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x57C8945B);
 	_sceGeRestoreContext = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x0BF608FB);
@@ -881,6 +927,7 @@ int GeSgxInit(void) {
 		MAKE_JUMP(subintr_stub, sceKernelCallSubIntrHandlerPatched);
 	sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
 	ClearCaches();
+	startProgress();
 
 	log("GeSgx: enabled\n");
 	return 1;

@@ -35,6 +35,9 @@
 
 #define GE_SGX_MAX_LISTS 64
 #define GE_SGX_FINISH_SPAN (1024 * 1024) // a finished list's end at most this far past where the walk is
+// geSgxWalkerProgress: how far ahead of the walk the GE may be (a list's part between two progresses), and past it the stop
+#define GE_SGX_PROGRESS_SPAN (64 * 1024)
+#define GE_SGX_PROGRESS_WINDOW 0x00100000u
 #define GE_SGX_MAX_SIGNAL_STEPS 64 // held signals passed for one reported handler at most
 #define GE_SGX_MAX_STACK 32
 #define GE_SGX_MAX_RECTS 256
@@ -70,6 +73,7 @@ typedef struct {
 	uint32_t contexts;    // lists with a context ended (their state restored)
 	uint32_t signal_events; // signal and finish handlers reported by the PSP side (geSgxWalkerSignal, geSgxWalkerFinish)
 	uint32_t unstalled;   // lists stalled here the GE had finished (geSgxWalkerFinish)
+	uint32_t progress;    // walks up to where the GE was (geSgxWalkerProgress)
 } GeSgxStats;
 
 typedef struct {
@@ -238,6 +242,7 @@ typedef struct {
 	void (* log_fn)(const char *fmt, ...);
 	int releasing; // geSgxWalkerRelease running: handler signals do not hold
 	int run_one; // geSgxWalkerRun walks the first list only (geSgxWalkerFinish)
+	uint32_t limit; // geSgxWalkerProgress: the top list stops where the GE is (0: no limit)
 	int hold_signals; // lists stop after handler signals (on once the PSP side reports the handlers: geSgxWalkerSignal)
 	int trace;
 	uint32_t trace_lines;
@@ -301,6 +306,12 @@ void geSgxWalkerResync(GeSgxWalker *w);
 void geSgxWalkerRelease(GeSgxWalker *w);
 void geSgxWalkerSignal(GeSgxWalker *w, uint32_t after);
 void geSgxWalkerFinish(GeSgxWalker *w, uint32_t after);
+/*
+	The GE is at addr (GE_SGX_EVENT_PROGRESS: what it did before is as it
+	read it): the first list walked up to there, not past it, while the
+	game goes on
+*/
+int geSgxWalkerProgress(GeSgxWalker *w, uint32_t addr);
 void geSgxWalkerHardwareReg(GeSgxWalker *w, uint32_t cmd, uint32_t value);
 void geSgxWalkerHardwareState(GeSgxWalker *w, uint32_t id, uint32_t value);
 

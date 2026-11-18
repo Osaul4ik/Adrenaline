@@ -40,7 +40,7 @@
 #define __GE_SGX_SHARED_H__
 
 #define GE_SGX_MAGIC   0x58475347 // 'GSGX'
-#define GE_SGX_VERSION 7 // the ring's layout: both sides from the same build
+#define GE_SGX_VERSION 8 // the ring's layout: both sides from the same build
 
 #define GE_SGX_RING_ENTRIES 4096 // power of two
 #define GE_SGX_RING_MASK (GE_SGX_RING_ENTRIES - 1)
@@ -94,7 +94,21 @@ enum GeSgxEventTypes {
 		signal is read after it ran, as the GE reads it.
 	*/
 	GE_SGX_EVENT_SIGNAL,
+	/*
+		Where the GE is (read from its registers every GE_SGX_PROGRESS_US
+		while it runs): a = the address in the list the GE is at (its
+		current command; in a sublist, the CALL that went there), b = its
+		EXEC register, d = the copy of the commands since the last signal
+		or progress (as GE_SGX_EVENT_SIGNAL's). The commands before a were
+		done, read by the GE as they are now: the Vita side walks up to a
+		while the game goes on, so that at the game's wait only what came
+		after the last progress is left to walk (the GE works next to the
+		game, the walk did all of it while the game waited).
+	*/
+	GE_SGX_EVENT_PROGRESS,
 };
+
+#define GE_SGX_PROGRESS_US 1000
 
 #define GE_SGX_LIST_HEAD    1 // queued at the head
 #define GE_SGX_LIST_CONTEXT 2 // queued with a context (PspGeListArgs): the GE's state is saved at its start, restored at its end
@@ -146,6 +160,7 @@ typedef struct {
 	volatile unsigned int signal_wait_us;  // total time waited
 	volatile unsigned int signal_max_us;   // longest wait
 	volatile unsigned int signal_skipped;  // not waited for: the frame's time for it used up (GE_SGX_SIGNAL_FRAME_US)
+	volatile unsigned int progress_events; // GE_SGX_EVENT_PROGRESS pushed
 
 	GeSgxEvent events[GE_SGX_RING_ENTRIES];
 } GeSgxRing;
