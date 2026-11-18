@@ -195,6 +195,7 @@ typedef struct {
 	uint32_t cpu_reason[3]; // and why the others were not (GE_SGX_CPU_*)
 	uint32_t skipped_other; // unsupported primitives, formats, full arrays
 	uint32_t skipped_range; // primitives past the depth range (MINZ, MAXZ): no pixel drawn
+	uint32_t cull_off;      // culled primitives with a vertex behind the camera, drawn without culling
 	uint32_t asked; // the frame of an asked trace (L + SELECT): its number, the renderer traces it too
 	uint32_t vertices_built; // vertices transformed
 	uint32_t state_builds;   // times the draw state was built anew

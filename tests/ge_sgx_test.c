@@ -1026,6 +1026,37 @@ static void testDepthRange(void) {
 	CHECK(frame.ndraws == 1 && frame.skipped_range == 1, "depth range: draws %u past %u", frame.ndraws, frame.skipped_range);
 }
 
+/* Culling: off for a primitive with a vertex behind the camera, on for one in front */
+static void testCullBehind(void) {
+	resetFrame();
+	uint32_t v = 0x08900000;
+	static const float pos[6][3] = { { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, -4 }, { 0, 0, -2 }, { 1, 1, -2 }, { -1, 1, 3 } };
+	int i;
+	for (i = 0; i < 6; i++) {
+		wf(v + i * 24, 0.25f);
+		wf(v + i * 24 + 4, 0.75f);
+		w32(v + i * 24 + 8, 0x80FF0000u);
+		wf(v + i * 24 + 12, pos[i][0]);
+		wf(v + i * 24 + 16, pos[i][1]);
+		wf(v + i * 24 + 20, pos[i][2]);
+	}
+	L l = { 0x08800000 };
+	setup3D(&l);
+	emit(&l, C(0x12, (3u << 0) | VT_COL8888 | VT_POSF));
+	emit(&l, C(0x10, 0x080000));
+	emit(&l, C(0x1D, 1));
+	emit(&l, C(0x9B, 1));
+	emit(&l, C(0x01, 0x900000));
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x01, 0x900048));
+	emit(&l, C(0x04, (3u << 16) | 3));
+	emit(&l, C(0x0C, 0));
+	geSgxWalkerList(w, 1, 0x08800000, 0, 0);
+	geSgxWalkerRun(w);
+	CHECK(frame.ndraws == 2 && fdraws[0].cull == GE_SGX_CULL_CCW && fdraws[1].cull == GE_SGX_CULL_NONE && frame.cull_off == 1,
+	      "draws %u cull %u %u off %u", frame.ndraws, frame.ndraws > 0 ? fdraws[0].cull : 9, frame.ndraws > 1 ? fdraws[1].cull : 9, frame.cull_off);
+}
+
 static void testBuild3D(void) {
 	resetFrame();
 	/* float uv, 8888 colour, float xyz: 8 + 4 + 12 = 24 bytes */
@@ -1777,6 +1808,7 @@ int main(void) {
 	testDoublingConstAlpha();
 	testBadListState();
 	testDepthRange();
+	testCullBehind();
 	testFbTextureGenerated();
 	testTransferAlias();
 	testTransferIntoVram();

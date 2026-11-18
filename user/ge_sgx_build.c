@@ -679,6 +679,48 @@ static const uint8_t *vertexData(GeSgxWalker *w, const GeSgxVertexLayout *l, uin
 }
 
 // One vertex of the current primitive, ready for the GPU
+/*
+	Only the clip w of a vertex (3D, not through mode): morphing, skinning,
+	the 4x4 transform's last column. 0 when it cannot be read.
+*/
+static float vertexW(GeSgxWalker *w, const Xform *x, uint32_t index, int *ok) {
+	const GeSgxVertexLayout *l = x->l;
+	uint8_t tmp[MAX_VERTEX_BYTES];
+	const uint8_t *buf = vertexData(w, l, index, tmp);
+	*ok = buf != NULL;
+	if (!buf)
+		return 0.0f;
+	float pos[3] = { 0, 0, 0 }, wts[8] = { 0 };
+	uint32_t k, j;
+	for (k = 0; k < l->morphs; k++) {
+		const uint8_t *p = buf + k * l->stride;
+		float mw = x->morph[k];
+		if (mw == 0.0f && l->morphs > 1)
+			continue;
+		for (j = 0; j < 3; j++)
+			pos[j] += comp(p + l->pos_off, l->pos_fmt, j, 1) * mw;
+		if (k == 0 && l->wt_fmt) {
+			for (j = 0; j < l->weights; j++)
+				wts[j] = comp(p, l->wt_fmt, j, 0);
+		}
+	}
+	float mpos[3];
+	if (x->skinning) {
+		mpos[0] = mpos[1] = mpos[2] = 0.0f;
+		for (j = 0; j < l->weights; j++) {
+			float t[3];
+			if (wts[j] == 0.0f)
+				continue;
+			xf43(t, &x->m->bone[j * 12], pos[0], pos[1], pos[2]);
+			mpos[0] += t[0] * wts[j]; mpos[1] += t[1] * wts[j]; mpos[2] += t[2] * wts[j];
+		}
+	} else {
+		memcpy(mpos, pos, sizeof(mpos));
+	}
+	const float *M = x->mvp;
+	return mpos[0] * M[3] + mpos[1] * M[7] + mpos[2] * M[11] + M[15];
+}
+
 static int vertexOut(GeSgxWalker *w, const Xform *x, uint32_t index, GeSgxVertex *out) {
 	const GeSgxVertexLayout *l = x->l;
 	uint8_t tmp[MAX_VERTEX_BYTES];
@@ -1533,11 +1575,17 @@ static struct { uint32_t src, len, dst; } raw_done[RAW_DONE];
 static int raw_ndone = 0, raw_next = 0;
 static uint32_t pend_src, pend_len, pend_dst;
 
+/*
+	The arena is uncached GPU memory, slow for the CPU to write: a run of 1 KB
+	or more goes by DMA (The 3rd Birthday copied 640 KB of vertices a frame
+	with the CPU, 11 ms of its walk).
+*/
+#define RAW_DMA_BYTES 1024
 static void rawFlush(GeSgxWalker *w) {
 	if (!pend_len || !raw_frame)
 		return;
 	uint8_t *dst = raw_frame->raw + pend_dst;
-	if (!(w->bulk_fn && pend_len >= 8 * 1024 && w->bulk_fn(pend_src, dst, pend_len)))
+	if (!(w->bulk_fn && pend_len >= RAW_DMA_BYTES && w->bulk_fn(pend_src, dst, pend_len)))
 		geSgxRead(w, pend_src, dst, pend_len);
 	raw_done[raw_next].src = pend_src;
 	raw_done[raw_next].len = pend_len;
@@ -1937,6 +1985,32 @@ void geSgxBuildPrim(GeSgxWalker *w, uint32_t type, uint32_t count, const GeSgxVe
 				return;
 			}
 		}
+	}
+
+	/*
+		Culling of a primitive with a vertex behind the camera (w <= 0): the
+		PSP clips it at the near plane and culls what is left, by the winding
+		on the screen. The GPU's culling gets those wrong (the screen
+		position of a vertex behind the camera is mirrored): The 3rd Birthday's
+		floors and walls under the camera were culled, the screen dark there.
+		A draw with such a vertex is drawn without culling: every vertex of
+		small ones looked at (the big polygons that cross the camera have
+		few), 48 spread over bigger ones (Aya's model close to the camera
+		made the screen black).
+	*/
+	if (d.cull != GE_SGX_CULL_NONE && !xp->through) {
+		uint32_t k, step = count <= 48 ? 1 : (count + 47) / 48;
+		bulk_count = 0;
+		for (k = 0; k < count; k += step) {
+			int ok;
+			float cw = vertexW(w, xp, prim_index[k], &ok);
+			if (ok && !(cw > 0.0f)) {
+				d.cull = GE_SGX_CULL_NONE;
+				f->cull_off++;
+				break;
+			}
+		}
+		bulk_count = 0;
 	}
 
 	/*
